@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(_argv: list[str] | None = None) -> int:
     print(
         "agy-install-skill is implemented in Phase 7; see docs/installation.md.",
         file=sys.stderr,

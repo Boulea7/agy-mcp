@@ -2,7 +2,7 @@
 
 > Re-run the probe whenever `agy` is updated; the Adapter caches detections per binary hash.
 
-## Confirmed flags — `agy --help` (v1.0.0, /Users/ln/.local/bin/agy, 2026-05-20)
+## Confirmed flags — `agy --help` (v1.0.0, probed via `$(command -v agy)`, 2026-05-20)
 
 | Flag | Purpose |
 |---|---|

@@ -6,7 +6,7 @@ import json
 import sys
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(_argv: list[str] | None = None) -> int:
     """Stub bridge CLI emitting a structured 'not implemented' error.
 
     The schema mirrors :class:`agy_mcp.models.BridgeResponse` so downstream callers
