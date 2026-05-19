@@ -50,7 +50,7 @@ def _ctx() -> _RunContext:
 @pytest.fixture(autouse=True)
 def _clear_fake_env(monkeypatch):
     for k in list(os.environ.keys()):
-        if k.startswith("FAKE_GEMINI_"):
+        if k.startswith("GEMINI_TEST_") or k.startswith("FAKE_GEMINI_"):
             monkeypatch.delenv(k, raising=False)
 
 
@@ -171,8 +171,8 @@ def test_translate_unknown_event_is_preserved_as_subagent_event():
 
 def test_run_translates_stream_json_to_canonical_events(tmp_path, monkeypatch):
     wrapper = _wrapper(tmp_path)
-    monkeypatch.setenv("FAKE_GEMINI_SESSION", "thread-xyz")
-    monkeypatch.setenv("FAKE_GEMINI_REPLY", "stream reply")
+    monkeypatch.setenv("GEMINI_TEST_SESSION", "thread-xyz")
+    monkeypatch.setenv("GEMINI_TEST_REPLY", "stream reply")
     backend = GeminiCliBackend(bin_override=str(wrapper))
     sink = ListEventSink()
     req = BridgeRequest(prompt="hi", cwd=str(tmp_path), timeout=10)
@@ -192,7 +192,7 @@ def test_run_translates_stream_json_to_canonical_events(tmp_path, monkeypatch):
 
 def test_run_surfaces_decode_failures(tmp_path, monkeypatch):
     wrapper = _wrapper(tmp_path)
-    monkeypatch.setenv("FAKE_GEMINI_GARBAGE", "1")
+    monkeypatch.setenv("GEMINI_TEST_GARBAGE", "1")
     backend = GeminiCliBackend(bin_override=str(wrapper))
     req = BridgeRequest(prompt="hi", cwd=str(tmp_path), timeout=10)
     result = backend.run(req)
@@ -205,8 +205,8 @@ def test_run_surfaces_decode_failures(tmp_path, monkeypatch):
 
 def test_run_surfaces_upstream_error_event(tmp_path, monkeypatch):
     wrapper = _wrapper(tmp_path)
-    monkeypatch.setenv("FAKE_GEMINI_ERROR", "upstream said no")
-    monkeypatch.setenv("FAKE_GEMINI_EXIT", "1")
+    monkeypatch.setenv("GEMINI_TEST_ERROR", "upstream said no")
+    monkeypatch.setenv("GEMINI_TEST_EXIT", "1")
     backend = GeminiCliBackend(bin_override=str(wrapper))
     req = BridgeRequest(prompt="hi", cwd=str(tmp_path), timeout=10)
     result = backend.run(req)

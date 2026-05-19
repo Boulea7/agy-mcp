@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import abc
+import os
 import re
 import shutil
+import threading
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -32,6 +34,166 @@ class AdapterRunResult:
     stderr_tail: str
     log_path: str | None
     artifacts: list[dict]
+
+
+# ---------------------------------------------------------------------------
+# Capability help-text parsing
+# ---------------------------------------------------------------------------
+
+# Capture any long/short flag token preceded by a non-identifier char.
+# Using a negative lookbehind on alphanumeric/underscore so we don't pick
+# up the trailing fragment of identifiers like ``foo-bar``. The MULTILINE
+# anchor is no longer needed because ``-`` boundaries are explicit.
+_FLAG_PATTERN = re.compile(r"(?<![\w.])(-{1,2}[A-Za-z][\w-]*)")
+
+
+def detect_flags(help_text: str) -> set[str]:
+    """Return the set of long/short flag names present in ``help_text``."""
+
+    return {match.group(1) for match in _FLAG_PATTERN.finditer(help_text)}
+
+
+def has_flag(help_text: str, *names: str) -> bool:
+    flags = detect_flags(help_text)
+    return any(name in flags for name in names)
+
+
+# ---------------------------------------------------------------------------
+# Run context — shared state across adapter reader threads.
+# Lifted out of agy.py so GeminiCliBackend can reuse it without importing
+# adapter internals across modules.
+# ---------------------------------------------------------------------------
+
+# Cap any single line read from klog / stream-json / drain pipes — a malicious
+# or corrupt upstream could write a multi-GB line with no newline, blocking
+# ``readline()`` indefinitely and growing memory unbounded.
+_MAX_LINE_BYTES = 64 * 1024
+
+
+@dataclass(slots=True)
+class _RunContext:
+    """Per-invocation state shared between the adapter reader threads.
+
+    All mutation goes through ``lock`` so list append / set add /
+    seen_session_id slot writes are deterministic even if a future runtime
+    relaxes the GIL guarantees that make individual ops atomic today.
+    """
+
+    stdout_buf: list[str]
+    stderr_buf: list[str]
+    events: list[CanonicalEvent]
+    seen_session_id: list[str | None]
+    stop_event: threading.Event
+    sink: "EventSink | None"
+    transcript_seen: set[Path]
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _open_spool(path: Path):
+    """Open ``path`` for append with O_NOFOLLOW when available."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        # Fall back to append-mode open; rare on POSIX, but tolerate
+        # filesystems that reject O_NOFOLLOW (some network mounts).
+        return path.open("a", encoding="utf-8")
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
+def _drain_stream(
+    stream,
+    buf: list[str],
+    ctx: _RunContext,
+    spool_path: Path | None,
+    label: str,
+) -> None:
+    """Copy stream content into ``buf`` and (optionally) to a spool file."""
+
+    if stream is None:
+        return
+    spool = _open_spool(spool_path) if spool_path else None
+    try:
+        while not ctx.stop_event.is_set():
+            chunk = stream.readline(_MAX_LINE_BYTES)
+            if not chunk:
+                break
+            with ctx.lock:
+                buf.append(chunk)
+            if spool is not None:
+                spool.write(chunk)
+                spool.flush()
+    except (OSError, ValueError):
+        return
+    finally:
+        if spool is not None:
+            try:
+                spool.close()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# CanonicalEvent scrubbing — every adapter must run events through this
+# before they reach the sink, so the supervisor's session store does not
+# persist secrets.
+# ---------------------------------------------------------------------------
+
+
+def _scrub_event_in_place(event: CanonicalEvent, safety: SafetyPolicy) -> None:
+    """Walk a CanonicalEvent and rewrite every string field through ``safety.redact``."""
+
+    if event.text:
+        event.text = safety.redact(event.text)
+    if event.content:
+        event.content = [_scrub_mapping(item, safety) for item in event.content]
+    if event.metadata:
+        event.metadata = _scrub_mapping(event.metadata, safety)
+    if event.raw:
+        event.raw = _scrub_mapping(event.raw, safety)
+
+
+def _scrub_mapping(value, safety: SafetyPolicy, _depth: int = 0):
+    """Recursively redact strings inside ``value``, capping recursion depth."""
+
+    if _depth > 32:
+        # Truncate rather than echoing the raw subtree, so secrets at depth
+        # >32 never escape the redaction net.
+        return {"__truncated__": True}
+    if isinstance(value, str):
+        return safety.redact(value)
+    if isinstance(value, dict):
+        return {k: _scrub_mapping(v, safety, _depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_mapping(v, safety, _depth + 1) for v in value]
+    return value
+
+
+# ---------------------------------------------------------------------------
+# CWD hardening — adapters refuse to run inside a non-existent directory or
+# one that resolves through a dangling symlink. Workspace-allowlist policy
+# is bridge / supervisor territory (Phase 3+); the adapter just enforces
+# the minimum invariant that ``cwd`` is a real local directory.
+# ---------------------------------------------------------------------------
+
+
+def resolve_cwd(cwd: str) -> Path:
+    """Resolve ``cwd`` and verify it points at an existing directory.
+
+    Raises ``RuntimeError`` if the path does not exist, resolves through a
+    broken symlink, or points at something other than a directory.
+    """
+
+    try:
+        resolved = Path(cwd).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"cwd does not resolve to a real path: {cwd!r}: {exc}") from exc
+    if not resolved.is_dir():
+        raise RuntimeError(f"cwd is not a directory: {resolved!r}")
+    return resolved
 
 
 class BaseAdapter(abc.ABC):
@@ -90,7 +252,7 @@ class BaseAdapter(abc.ABC):
         stdout_path: Path | None = None,
         stderr_path: Path | None = None,
         event_sink: "EventSink | None" = None,
-    ) -> AdapterRunResult:
+    ) -> "AdapterRunResult":
         """Run the bound CLI for ``request`` and return canonical events."""
 
     # ------------------------------------------------------------------
@@ -105,31 +267,21 @@ class BaseAdapter(abc.ABC):
                 return resolved
         return None
 
+    def emit_event(self, ctx: _RunContext, event: CanonicalEvent) -> None:
+        """Scrub, append, and forward an event to the sink under the run lock."""
+
+        _scrub_event_in_place(event, self.safety)
+        with ctx.lock:
+            ctx.events.append(event)
+        if ctx.sink is not None:
+            try:
+                ctx.sink.emit(event)
+            except Exception:  # noqa: BLE001 - sink errors must not poison the run
+                pass
+
 
 def shutil_which_or_none(name: str) -> str | None:
     return shutil.which(name)
-
-
-# ---------------------------------------------------------------------------
-# Capability help-text parsing
-# ---------------------------------------------------------------------------
-
-# Capture any long/short flag token preceded by a non-identifier char.
-# Using a negative lookbehind on alphanumeric/underscore so we don't pick
-# up the trailing fragment of identifiers like ``foo-bar``. The MULTILINE
-# anchor is no longer needed because ``-`` boundaries are explicit.
-_FLAG_PATTERN = re.compile(r"(?<![\w.])(-{1,2}[A-Za-z][\w-]*)")
-
-
-def detect_flags(help_text: str) -> set[str]:
-    """Return the set of long/short flag names present in ``help_text``."""
-
-    return {match.group(1) for match in _FLAG_PATTERN.finditer(help_text)}
-
-
-def has_flag(help_text: str, *names: str) -> bool:
-    flags = detect_flags(help_text)
-    return any(name in flags for name in names)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +313,14 @@ __all__ = [
     "BaseAdapter",
     "EventSink",
     "ListEventSink",
+    "_MAX_LINE_BYTES",
+    "_RunContext",
+    "_drain_stream",
+    "_open_spool",
+    "_scrub_event_in_place",
+    "_scrub_mapping",
     "detect_flags",
     "has_flag",
+    "resolve_cwd",
     "shutil_which_or_none",
 ]

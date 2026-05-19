@@ -20,11 +20,13 @@ from agy_mcp.adapters.base import (
     AdapterRunResult,
     BaseAdapter,
     EventSink,
+    _MAX_LINE_BYTES,
+    _RunContext,
+    _drain_stream,
     has_flag,
+    resolve_cwd,
 )
-from agy_mcp.adapters.agy import _drain_stream, _RunContext
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
-from agy_mcp.safety import DEFAULT_SCRUB_ENV_NAMES
 from agy_mcp.utils import (
     is_windows,
     scrub_env,
@@ -115,6 +117,30 @@ class GeminiCliBackend(BaseAdapter):
         cap = self.detect()
         argv = self.build_command(request, log_path=log_path)
 
+        # Refuse to spawn into a non-existent / non-directory / dangling
+        # symlink cwd (defense-in-depth alongside the bridge's policy).
+        try:
+            cwd_resolved = resolve_cwd(request.cwd)
+        except RuntimeError as exc:
+            err = CanonicalEvent(
+                type="error",
+                subtype="invalid_cwd",
+                text=self.safety.redact(str(exc)),
+            )
+            ctx_dummy = _RunContext(
+                stdout_buf=[], stderr_buf=[], events=[],
+                seen_session_id=[request.session_id],
+                stop_event=threading.Event(), sink=event_sink,
+                transcript_seen=set(),
+            )
+            self._emit(ctx_dummy, err)
+            return AdapterRunResult(
+                events=[err], session_id=request.session_id,
+                exit_code=None, duration_ms=0, stdout_tail="",
+                stderr_tail=self.safety.redact(str(exc)),
+                log_path=None, artifacts=[],
+            )
+
         ctx = _RunContext(
             stdout_buf=[],
             stderr_buf=[],
@@ -126,17 +152,16 @@ class GeminiCliBackend(BaseAdapter):
         )
         self._emit(ctx, _gemini_init_event(request=request, cap=cap))
 
-        env = dict(os.environ)
-        env.update(request.extra_env or {})
-
+        env = self._build_subprocess_env(request)
         start = time.time()
+        proc: subprocess.Popen | None = None
         try:
             proc = subprocess.Popen(  # noqa: S603
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=str(Path(request.cwd).expanduser().resolve()),
+                cwd=str(cwd_resolved),
                 env=env,
                 bufsize=1,
                 text=True,
@@ -149,7 +174,7 @@ class GeminiCliBackend(BaseAdapter):
                 CanonicalEvent(
                     type="error",
                     subtype="spawn_failure",
-                    text=f"failed to spawn {argv[0]!r}: {exc}",
+                    text=self.safety.redact(f"failed to spawn {argv[0]!r}: {exc}"),
                 ),
             )
             duration = int((time.time() - start) * 1000)
@@ -159,7 +184,7 @@ class GeminiCliBackend(BaseAdapter):
                 exit_code=None,
                 duration_ms=duration,
                 stdout_tail="",
-                stderr_tail=str(exc),
+                stderr_tail=self.safety.redact(str(exc)),
                 log_path=None,
                 artifacts=[],
             )
@@ -210,12 +235,28 @@ class GeminiCliBackend(BaseAdapter):
             ctx.stop_event.set()
             stdout_thread.join(timeout=5)
             stderr_thread.join(timeout=5)
-            for stream in (proc.stdout, proc.stderr):
-                if stream is not None:
+            # Mirror agy.py: kill child on any abnormal exit so the
+            # subprocess can never be orphaned.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
                     try:
-                        stream.close()
-                    except OSError:
-                        pass
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            pass
+                except OSError:
+                    pass
+            if proc is not None:
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
 
         stderr_text = "".join(ctx.stderr_buf)
         duration_ms = int((time.time() - start) * 1000)
@@ -260,12 +301,28 @@ class GeminiCliBackend(BaseAdapter):
         )
 
     def _emit(self, ctx: _RunContext, event: CanonicalEvent) -> None:
-        ctx.events.append(event)
-        if ctx.sink is not None:
-            try:
-                ctx.sink.emit(event)
-            except Exception:  # noqa: BLE001
-                pass
+        """Append the event and forward to the sink with secrets stripped.
+
+        Delegates to :meth:`BaseAdapter.emit_event` so the gemini path
+        applies the same redaction policy as agy before the supervisor's
+        session store sees the event.
+        """
+
+        self.emit_event(ctx, event)
+
+    def _build_subprocess_env(self, request: BridgeRequest) -> dict[str, str]:
+        """Strip host secrets before forwarding env to the gemini child.
+
+        Same threat model as agy's ``_build_subprocess_env``: gemini-cli
+        uses its own OAuth credential file under ``~/.gemini``, so wrapper-
+        side provider keys (OPENAI_API_KEY, AWS_*, etc.) serve no purpose
+        for it and should not be exposed in case of prompt injection.
+        """
+
+        env = self.safety.scrub_environment(dict(os.environ))
+        if request.extra_env:
+            env.update(self.safety.scrub_environment(dict(request.extra_env)))
+        return env
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +341,7 @@ def _stream_json_reader(stream, ctx: _RunContext, adapter: GeminiCliBackend) -> 
     if stream is None:
         return
     while not ctx.stop_event.is_set():
-        line = stream.readline()
+        line = stream.readline(_MAX_LINE_BYTES)
         if not line:
             break
         stripped = line.strip()
@@ -315,7 +372,8 @@ def _translate_gemini_event(payload: dict, ctx: _RunContext) -> CanonicalEvent |
     text = _first_field(payload, _FIELD_TEXT)
     sid = _first_field(payload, _FIELD_SESSION)
     if sid:
-        ctx.seen_session_id[0] = str(sid)
+        with ctx.lock:
+            ctx.seen_session_id[0] = str(sid)
 
     if evt_type == "message" and role == "assistant":
         text_value = text if isinstance(text, str) else json.dumps(text)

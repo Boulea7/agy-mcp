@@ -71,14 +71,17 @@ def main(argv: list[str] | None = None) -> int:
     # Conversation ids in real agy are UUIDs; the parser regex requires hex
     # chars (or dashes), so keep this fixture honest.
     convo = args.conversation or os.environ.get(
-        "FAKE_AGY_CONV", "abcdef01-2345-6789-abcd-ef0123456789"
+        "AGY_TEST_CONV", "abcdef01-2345-6789-abcd-ef0123456789"
     )
-    grpc_port = os.environ.get("FAKE_AGY_GRPC_PORT", "60074")
-    rewind_step = os.environ.get("FAKE_AGY_REWIND_STEP")
-    inject_auth_failure = os.environ.get("FAKE_AGY_AUTH_FAILURE") == "1"
-    inject_send_failure = os.environ.get("FAKE_AGY_SEND_FAILURE")
-    exit_code = int(os.environ.get("FAKE_AGY_EXIT", "0") or 0)
-    reply = os.environ.get("FAKE_AGY_REPLY", f"rich-reply: {prompt}")
+    grpc_port = os.environ.get("AGY_TEST_GRPC_PORT", "60074")
+    rewind_step = os.environ.get("AGY_TEST_REWIND_STEP")
+    # Renamed from FAKE_AGY_AUTH_FAILURE / FAKE_AGY_SEND_FAILURE because
+    # the adapter env scrub redacts any env name containing "auth" — the
+    # test signal would never reach this subprocess otherwise.
+    inject_auth_failure = os.environ.get("AGY_TEST_INJECT_HANG") == "1"
+    inject_send_failure = os.environ.get("AGY_TEST_INJECT_SENDFAIL")
+    exit_code = int(os.environ.get("AGY_TEST_EXIT", "0") or 0)
+    reply = os.environ.get("AGY_TEST_REPLY", f"rich-reply: {prompt}")
 
     if not args.log_file:
         # Behave like real agy: still write the reply.

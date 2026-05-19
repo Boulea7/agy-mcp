@@ -55,9 +55,9 @@ def isolated_agy(tmp_path, monkeypatch):
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_SETTINGS_PATH", tmp_path / "no-settings.json")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_GEMINI_SETTINGS_PATH", tmp_path / "no-gemini.json")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
-    # Clear FAKE_AGY_* envs that previous tests may have set on os.environ.
+    # Clear AGY_TEST_* envs that previous tests may have set on os.environ.
     for key in list(os.environ.keys()):
-        if key.startswith("FAKE_AGY_"):
+        if key.startswith("AGY_TEST_") or key.startswith("FAKE_AGY_"):
             monkeypatch.delenv(key, raising=False)
 
 
@@ -110,7 +110,7 @@ def test_build_command_raises_without_binary(tmp_path, monkeypatch):
 
 def test_run_emits_init_and_assistant_and_result(tmp_path, monkeypatch, isolated_agy):
     wrapper = _make_wrapper(tmp_path, FAKE_AGY_PRINT)
-    monkeypatch.setenv("FAKE_AGY_REPLY", "the answer is 42")
+    monkeypatch.setenv("AGY_TEST_REPLY", "the answer is 42")
     backend = AgyPrintBackend(bin_override=str(wrapper))
     sink = ListEventSink()
     req = BridgeRequest(prompt="ping", cwd=str(tmp_path), timeout=60)
@@ -137,9 +137,9 @@ def test_run_emits_init_and_assistant_and_result(tmp_path, monkeypatch, isolated
 
 def test_run_surfaces_non_zero_exit_as_error_result(tmp_path, monkeypatch, isolated_agy):
     wrapper = _make_wrapper(tmp_path, FAKE_AGY_PRINT)
-    monkeypatch.setenv("FAKE_AGY_REPLY", "")
-    monkeypatch.setenv("FAKE_AGY_STDERR", "boom: connection refused")
-    monkeypatch.setenv("FAKE_AGY_EXIT", "2")
+    monkeypatch.setenv("AGY_TEST_REPLY", "")
+    monkeypatch.setenv("AGY_TEST_STDERR", "boom: connection refused")
+    monkeypatch.setenv("AGY_TEST_EXIT", "2")
     backend = AgyPrintBackend(bin_override=str(wrapper))
     req = BridgeRequest(prompt="x", cwd=str(tmp_path), timeout=60)
     result = backend.run(req, log_path=tmp_path / "x.log")
@@ -153,8 +153,8 @@ def test_run_surfaces_non_zero_exit_as_error_result(tmp_path, monkeypatch, isola
 def test_run_records_wrapper_timeout(tmp_path, monkeypatch, isolated_agy):
     wrapper = _make_wrapper(tmp_path, FAKE_AGY_PRINT)
     # Sleep 5s; wrapper deadline is 1s.
-    monkeypatch.setenv("FAKE_AGY_SLEEP", "5")
-    monkeypatch.setenv("FAKE_AGY_REPLY", "late")
+    monkeypatch.setenv("AGY_TEST_SLEEP", "5")
+    monkeypatch.setenv("AGY_TEST_REPLY", "late")
     backend = AgyPrintBackend(bin_override=str(wrapper))
     req = BridgeRequest(prompt="slow", cwd=str(tmp_path), timeout=1)
     start = time.time()
@@ -333,8 +333,8 @@ def test_run_with_rich_log_promotes_session_and_emits_lifecycle(
 ):
     wrapper = _make_wrapper(tmp_path, FAKE_AGY_WITH_LOG, name="fake_agy_rich")
     convo = "deadbeef-cafe-1234-5678-abcdef012345"
-    monkeypatch.setenv("FAKE_AGY_CONV", convo)
-    monkeypatch.setenv("FAKE_AGY_REPLY", "rich answer")
+    monkeypatch.setenv("AGY_TEST_CONV", convo)
+    monkeypatch.setenv("AGY_TEST_REPLY", "rich answer")
     backend = AgyPrintBackend(bin_override=str(wrapper))
     log = tmp_path / "rich.log"
     req = BridgeRequest(prompt="hi", cwd=str(tmp_path), timeout=20)
@@ -357,8 +357,8 @@ def test_run_with_rich_log_promotes_session_and_emits_lifecycle(
 
 def test_run_with_log_records_auth_failure(tmp_path, monkeypatch, isolated_agy):
     wrapper = _make_wrapper(tmp_path, FAKE_AGY_WITH_LOG, name="fake_agy_authfail")
-    monkeypatch.setenv("FAKE_AGY_AUTH_FAILURE", "1")
-    monkeypatch.setenv("FAKE_AGY_EXIT", "1")
+    monkeypatch.setenv("AGY_TEST_INJECT_HANG", "1")
+    monkeypatch.setenv("AGY_TEST_EXIT", "1")
     backend = AgyPrintBackend(bin_override=str(wrapper))
     req = BridgeRequest(prompt="hi", cwd=str(tmp_path), timeout=20)
     result = backend.run(req, log_path=tmp_path / "auth.log")
@@ -407,3 +407,172 @@ def test_subprocess_env_sets_session_id_and_disables_autoupdate(
     assert env["ANTIGRAVITY_CONVERSATION_ID"] == "abc"
     assert env["AGY_CLI_DISABLE_AUTO_UPDATE"] == "1"
     assert env["MY_FLAG"] == "1"
+
+
+def test_subprocess_env_scrubs_host_secrets(tmp_path, monkeypatch, isolated_agy):
+    """Phase 2 review P0: confirm provider keys never reach the child."""
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk" "-veryverylongtoken1234567890ABCD")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ak-livenotredacted")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "AKIA" "IOSFODNN7EXAMPLE")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp" "_realtokenlooksuperreal")
+    monkeypatch.setenv("HARMLESS_VAR", "keep-me")
+    backend = AgyPrintBackend(bin_override=None)
+    req = BridgeRequest(prompt="x", cwd=str(tmp_path))
+    env = backend._build_subprocess_env(req)
+    # Names survive so downstream tooling can still detect presence...
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"):
+        assert name in env
+        assert "***" == env[name], f"{name} not scrubbed"
+    # ...but unrelated names are passed through unchanged.
+    assert env["HARMLESS_VAR"] == "keep-me"
+
+
+def test_subprocess_env_scrubs_extra_env_too(tmp_path, monkeypatch, isolated_agy):
+    """Caller cannot smuggle a secret into the child via extra_env naming."""
+
+    backend = AgyPrintBackend(bin_override=None)
+    req = BridgeRequest(
+        prompt="x",
+        cwd=str(tmp_path),
+        extra_env={"OPENAI_API_KEY": "sk-leakedviaextra1234567890ABCD"},
+    )
+    env = backend._build_subprocess_env(req)
+    assert env["OPENAI_API_KEY"] == "***"
+
+
+# ---------------------------------------------------------------------------
+# Event redaction at emit time (review P0 #2)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_redacts_text_metadata_and_raw(tmp_path, isolated_agy):
+    """Live sink must receive scrubbed events even before the translator runs."""
+
+    from agy_mcp.adapters.base import ListEventSink
+
+    sink = ListEventSink()
+    backend = AgyPrintBackend(bin_override=None)
+    ctx = _new_ctx()
+    ctx.sink = sink
+    # JWT pattern requires 3 dot-separated segments of >=5 chars each.
+    fake_jwt = "eyJabcdef.ghijklm.nopqrstuvw"
+    backend._emit(
+        ctx,
+        CanonicalEvent(
+            type="assistant",
+            text="Authorization: Bearer abcdef123456abcdef123456abcdef",
+            metadata={"nested": {"jwt": fake_jwt, "ok": "fine"}},
+            raw={"aws": "AKIA" "IOSFODNN7EXAMPLE"},
+        ),
+    )
+    [evt] = sink.events
+    assert "abcdef123456abcdef123456abcdef" not in (evt.text or "")
+    assert evt.metadata["nested"]["jwt"] == "***"
+    assert evt.metadata["nested"]["ok"] == "fine"
+    assert evt.raw["aws"] == "***"
+
+
+# ---------------------------------------------------------------------------
+# CWD hardening (review P1 #5)
+# ---------------------------------------------------------------------------
+
+
+def test_run_refuses_missing_cwd(tmp_path, isolated_agy):
+    backend = AgyPrintBackend(bin_override=None)
+    monkeypatch_target = tmp_path / "does-not-exist"
+    req = BridgeRequest(prompt="x", cwd=str(monkeypatch_target))
+    result = backend.run(req, log_path=None)
+    assert result.exit_code is None
+    assert result.events
+    assert any(e.subtype == "invalid_cwd" for e in result.events)
+
+
+def test_run_refuses_file_as_cwd(tmp_path, isolated_agy):
+    file_path = tmp_path / "not-a-dir"
+    file_path.write_text("x")
+    backend = AgyPrintBackend(bin_override=None)
+    req = BridgeRequest(prompt="x", cwd=str(file_path))
+    result = backend.run(req, log_path=None)
+    assert any(e.subtype == "invalid_cwd" for e in result.events)
+
+
+# ---------------------------------------------------------------------------
+# klog parser tolerates extra fields (review P1 #3)
+# ---------------------------------------------------------------------------
+
+
+def test_klog_print_start_tolerates_extra_fields():
+    """Future agy versions may add new key=value pairs; parser must not regress."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    line = (
+        'I0520 12:00:00.000300  1234 print.go:1] Print mode: starting '
+        '(promptLength=42, projectID="proj-1", model="gemini-3-pro", '
+        'tenant="x", conversationID="conv-tolerant-001")\n'
+    )
+    _handle_klog_line(line, ctx, adapter)
+    [evt] = ctx.events
+    assert evt.subtype == "print_starting"
+    assert evt.metadata["prompt_length"] == 42
+    assert evt.metadata["model"] == "gemini-3-pro"
+    assert evt.session_id == "conv-tolerant-001"
+    assert evt.metadata["fields"]["projectID"] == "proj-1"
+    assert evt.metadata["fields"]["tenant"] == "x"
+
+
+def test_klog_created_conv_does_not_over_capture():
+    """Trailing non-hex/dash chars must not be pulled into the conversation id."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    _handle_klog_line(
+        "I0520 12:00:00.000  1234 conv.go:1] "
+        "Created conversation abcdef01-2345-6789-abcd-ef0123456789 some-trailing-garbage\n",
+        ctx,
+        adapter,
+    )
+    [evt] = ctx.events
+    assert evt.session_id == "abcdef01-2345-6789-abcd-ef0123456789"
+
+
+# ---------------------------------------------------------------------------
+# Transcript watcher symlink defense (review P1 #3 sec)
+# ---------------------------------------------------------------------------
+
+
+def test_tail_transcripts_skips_symlink_targets(tmp_path, monkeypatch):
+    """A symlinked transcript.jsonl must be skipped, not drained."""
+
+    from agy_mcp.adapters.agy import _tail_transcripts
+
+    fake_log_root = tmp_path / "log"
+    fake_log_root.mkdir()
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", fake_log_root)
+
+    secret_outside = tmp_path / "outside_secret.txt"
+    secret_outside.write_text('{"type":"would-not-want-this"}', encoding="utf-8")
+
+    subdir = fake_log_root / "sub"
+    subdir.mkdir()
+    link = subdir / "transcript.jsonl"
+    link.symlink_to(secret_outside)
+
+    backend = AgyPrintBackend(bin_override=None)
+    ctx = _new_ctx()
+    # Run the watcher in a thread; let it complete one rglob pass, then
+    # set stop_event so the wait(0.5) returns immediately.
+    worker = threading.Thread(
+        target=_tail_transcripts,
+        args=(ctx, backend, time.time() - 60),
+        daemon=True,
+    )
+    worker.start()
+    # Give the loop a moment to enumerate, then signal stop.
+    time.sleep(0.2)
+    ctx.stop_event.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert ctx.events == []
+    assert link in ctx.transcript_seen

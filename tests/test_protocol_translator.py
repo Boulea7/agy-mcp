@@ -260,3 +260,49 @@ def test_redact_dict_caps_recursion_depth():
     out = _redact_dict(payload, SafetyPolicy())
     # At the top of the chain, redaction was applied.
     assert "abcdef123456abcdef123456" not in out["nested"]["v"]
+
+
+def test_redact_dict_returns_truncated_marker_past_cap():
+    """Phase 2 review: depth >32 must not echo unredacted subtree."""
+
+    payload = current = {}
+    for _ in range(60):
+        current["nested"] = {"deep_secret": "Authorization: Bearer leakedToken1234567890"}
+        current = current["nested"]
+    out = _redact_dict(payload, SafetyPolicy())
+    # Walk down to the truncation boundary; somewhere we must hit __truncated__.
+    cursor = out
+    found = False
+    for _ in range(64):
+        if isinstance(cursor, dict) and cursor.get("__truncated__") is True:
+            found = True
+            break
+        cursor = cursor.get("nested") if isinstance(cursor, dict) else None
+        if cursor is None:
+            break
+    assert found, "expected __truncated__ marker past depth 32"
+
+
+# ---------------------------------------------------------------------------
+# is_error default (review P2)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_result_cancelled_is_not_error():
+    """Future ``result/cancelled`` events must not be misread as errors."""
+
+    evt = CanonicalEvent(type="result", subtype="cancelled", session_id="s")
+    out = ProtocolTranslator("claude").translate(evt)
+    assert out["is_error"] is False
+
+
+def test_claude_result_partial_is_not_error():
+    evt = CanonicalEvent(type="result", subtype="partial", session_id="s")
+    out = ProtocolTranslator("claude").translate(evt)
+    assert out["is_error"] is False
+
+
+def test_claude_result_wrapper_timeout_is_error():
+    evt = CanonicalEvent(type="result", subtype="wrapper_timeout", session_id="s")
+    out = ProtocolTranslator("claude").translate(evt)
+    assert out["is_error"] is True

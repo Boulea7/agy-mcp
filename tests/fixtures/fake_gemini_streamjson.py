@@ -54,11 +54,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     prompt = args.prompt or (args.positional[0] if args.positional else "")
-    session = args.resume or os.environ.get("FAKE_GEMINI_SESSION", "thread-42")
-    reply = os.environ.get("FAKE_GEMINI_REPLY", f"gemini reply to: {prompt}")
-    inject_error = os.environ.get("FAKE_GEMINI_ERROR")
-    inject_garbage = os.environ.get("FAKE_GEMINI_GARBAGE") == "1"
-    exit_code = int(os.environ.get("FAKE_GEMINI_EXIT", "0") or 0)
+    session = args.resume or os.environ.get("GEMINI_TEST_SESSION", "thread-42")
+    reply = os.environ.get("GEMINI_TEST_REPLY", f"gemini reply to: {prompt}")
+    inject_error = os.environ.get("GEMINI_TEST_ERROR")
+    inject_garbage = os.environ.get("GEMINI_TEST_GARBAGE") == "1"
+    exit_code = int(os.environ.get("GEMINI_TEST_EXIT", "0") or 0)
 
     if args.fmt != "stream-json":
         # Non-stream mode: dump as a single text line (rare path).

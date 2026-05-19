@@ -92,13 +92,19 @@ class ProtocolTranslator:
             )
         if evt_type == "result":
             metadata = event.metadata or {}
+            # ``is_error`` should default to False; only explicit error
+            # subtypes set it. This protects against future ``result``
+            # subtypes like ``cancelled`` or ``partial`` being misread as
+            # errors by clients.
+            error_subtypes = {"error", "wrapper_timeout", "error_during_execution"}
+            is_error = (event.subtype or "") in error_subtypes
             return _redact_dict(
                 {
                     "type": "result",
                     "subtype": event.subtype or "success",
                     "session_id": event.session_id,
                     "ts": event.ts,
-                    "is_error": event.subtype not in (None, "success", "turn_completed"),
+                    "is_error": is_error,
                     "result": event.text or "",
                     "duration_ms": metadata.get("duration_ms"),
                     "exit_code": metadata.get("exit_code"),
@@ -252,8 +258,9 @@ def _redact_dict(value: Any, safety: SafetyPolicy, _depth: int = 0) -> Any:
     """Walk a serialisable structure and run safety.redact on every string."""
 
     if _depth > 32:
-        # Defensive: avoid pathological deep recursion.
-        return value
+        # Truncate deep subtrees instead of returning them unredacted, so
+        # secrets nested past the recursion cap cannot slip through.
+        return {"__truncated__": True}
     if isinstance(value, str):
         return safety.redact(value)
     if isinstance(value, list):

@@ -87,11 +87,14 @@ def main(argv: list[str] | None = None) -> int:
     prompt = args.print_prompt or args.alt_prompt or (
         args.positional[0] if args.positional else ""
     )
-    pre_chunks = os.environ.get("FAKE_AGY_PRE_STDOUT", "")
-    reply = os.environ.get("FAKE_AGY_REPLY", f"echo: {prompt}")
-    stderr_extra = os.environ.get("FAKE_AGY_STDERR", "")
-    sleep_s = float(os.environ.get("FAKE_AGY_SLEEP", "0") or 0)
-    exit_code = int(os.environ.get("FAKE_AGY_EXIT", "0") or 0)
+    # Use a test-only prefix that does NOT match the safety SECRET_ENV_NAME
+    # pattern (contains no secret-word substrings) — otherwise the adapter's
+    # env scrub would redact our signal before the subprocess starts.
+    pre_chunks = os.environ.get("AGY_TEST_PRE_STDOUT", "")
+    reply = os.environ.get("AGY_TEST_REPLY", f"echo: {prompt}")
+    stderr_extra = os.environ.get("AGY_TEST_STDERR", "")
+    sleep_s = float(os.environ.get("AGY_TEST_SLEEP", "0") or 0)
+    exit_code = int(os.environ.get("AGY_TEST_EXIT", "0") or 0)
 
     if args.log_file:
         _emit_klog(Path(args.log_file), prompt)

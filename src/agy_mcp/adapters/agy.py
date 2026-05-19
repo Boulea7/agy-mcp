@@ -33,7 +33,12 @@ from agy_mcp.adapters.base import (
     AdapterRunResult,
     BaseAdapter,
     EventSink,
+    _MAX_LINE_BYTES,
+    _RunContext,
+    _drain_stream,
+    _scrub_mapping,
     has_flag,
+    resolve_cwd,
 )
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
 from agy_mcp.safety import DEFAULT_SCRUB_ENV_NAMES, SafetyPolicy
@@ -72,12 +77,14 @@ _KLOG_LINE = re.compile(
 
 _RE_GRPC_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTPS")
 _RE_HTTP_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTP\b")
-_RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F-]{8,})")
-_RE_PRINT_START = re.compile(
-    r'Print mode: starting \(promptLength=(\d+), model=(?:"([^"]*)")?(?:[^,]*), '
-    r'conversationID=(?:"([^"]*)")?\)'
-)
-_RE_RESUMING_CONV = re.compile(r"Print mode: resuming conversation ([0-9a-fA-F-]{8,})")
+# Anchor end with ``\b`` so trailing alphanumerics (e.g. accidental log
+# concatenation) don't pull garbage into the captured conversation id.
+_RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F-]{8,})\b")
+# Tolerate format drift: ``Print mode: starting (k1=v1, k2="v2", ...)``.
+# We match the prefix, then extract ``key=value`` pairs from the body.
+_RE_PRINT_START_PREFIX = re.compile(r"Print mode: starting \((?P<body>.*?)\)")
+_RE_PRINT_START_KV = re.compile(r'(?P<k>\w+)=(?:"(?P<qv>[^"]*)"|(?P<rv>[^,\s)]+))')
+_RE_RESUMING_CONV = re.compile(r"Print mode: resuming conversation ([0-9a-fA-F-]{8,})\b")
 _RE_NEW_CONV = re.compile(r"Starting new conversation \(agent=(true|false)\)")
 _RE_AUTO_FLUSH = re.compile(
     r"Auto-flush: sending (\d+) queued input\(s\) \(combinedLength=(\d+), media=(\d+)\)"
@@ -86,26 +93,13 @@ _RE_SEND_FAILED = re.compile(r"Print mode: SendUserMessage failed: (.+)")
 _RE_AUTH_TIMEOUT = re.compile(r"Print mode: auth timed out")
 _RE_AUTH_ERROR = re.compile(r"Print mode: auth error: (.+)")
 _RE_REWIND = re.compile(r"Rewinding conversation [0-9a-fA-F-]+ to step (\d+)")
-_RE_STREAM_START = re.compile(r"Starting conversation update stream for ([0-9a-fA-F-]+)")
+_RE_STREAM_START = re.compile(r"Starting conversation update stream for ([0-9a-fA-F-]+)\b")
 _RE_TURN_END = re.compile(r"Stopping conversation stream|Language server shutting down")
 
 
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class _RunContext:
-    """Per-invocation state shared between the three concurrent readers."""
-
-    stdout_buf: list[str]
-    stderr_buf: list[str]
-    events: list[CanonicalEvent]
-    seen_session_id: list[str | None]  # mutable slot
-    stop_event: threading.Event
-    sink: EventSink | None
-    transcript_seen: set[Path]
 
 
 class AgyPrintBackend(BaseAdapter):
@@ -184,11 +178,15 @@ class AgyPrintBackend(BaseAdapter):
 
     @staticmethod
     def _discover_model() -> str | None:
-        """Read the active model label from agy's settings file (read-only)."""
+        """Read the active model label from agy's settings file (read-only).
+
+        Refuses to follow symlinks so a malicious ``settings.json -> ~/.ssh/id_rsa``
+        cannot trick us into echoing private content into a parse-failure log.
+        """
 
         for path in (AGY_SETTINGS_PATH, AGY_GEMINI_SETTINGS_PATH):
             try:
-                if not path.is_file():
+                if not path.is_file() or path.is_symlink():
                     continue
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -256,6 +254,31 @@ class AgyPrintBackend(BaseAdapter):
         cap = self.detect()
         argv = self.build_command(request, log_path=log_path)
 
+        # Refuse to spawn into a non-existent / non-directory / dangling
+        # symlink cwd; this is defense-in-depth in addition to the bridge's
+        # workspace-allowlist policy (Phase 3+).
+        try:
+            cwd_resolved = resolve_cwd(request.cwd)
+        except RuntimeError as exc:
+            err = CanonicalEvent(
+                type="error",
+                subtype="invalid_cwd",
+                text=self.safety.redact(str(exc)),
+            )
+            self._emit(_RunContext(
+                stdout_buf=[], stderr_buf=[], events=[],
+                seen_session_id=[request.session_id],
+                stop_event=threading.Event(), sink=event_sink,
+                transcript_seen=set(),
+            ), err)
+            return AdapterRunResult(
+                events=[err], session_id=request.session_id,
+                exit_code=None, duration_ms=0, stdout_tail="",
+                stderr_tail=self.safety.redact(str(exc)),
+                log_path=str(log_path) if log_path else None,
+                artifacts=[],
+            )
+
         ctx = _RunContext(
             stdout_buf=[],
             stderr_buf=[],
@@ -270,13 +293,14 @@ class AgyPrintBackend(BaseAdapter):
 
         env = self._build_subprocess_env(request)
         start = time.time()
+        proc: subprocess.Popen | None = None
         try:
             proc = subprocess.Popen(  # noqa: S603 - argv built from probed cap
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=str(Path(request.cwd).expanduser().resolve()),
+                cwd=str(cwd_resolved),
                 env=env,
                 bufsize=1,
                 text=True,
@@ -289,7 +313,7 @@ class AgyPrintBackend(BaseAdapter):
                 CanonicalEvent(
                     type="error",
                     subtype="spawn_failure",
-                    text=f"failed to spawn {argv[0]!r}: {exc}",
+                    text=self.safety.redact(f"failed to spawn {argv[0]!r}: {exc}"),
                 ),
             )
             duration = int((time.time() - start) * 1000)
@@ -299,7 +323,7 @@ class AgyPrintBackend(BaseAdapter):
                 exit_code=None,
                 duration_ms=duration,
                 stdout_tail="",
-                stderr_tail=str(exc),
+                stderr_tail=self.safety.redact(str(exc)),
                 log_path=str(log_path) if log_path else None,
                 artifacts=[],
             )
@@ -370,12 +394,28 @@ class AgyPrintBackend(BaseAdapter):
             ctx.stop_event.set()
             for t in threads:
                 t.join(timeout=5)
-            for stream in (proc.stdout, proc.stderr):
-                if stream is not None:
+            # Even if the outer try-block raised (KeyboardInterrupt, etc.)
+            # we must not orphan the child. terminate → wait → kill cascade.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
                     try:
-                        stream.close()
-                    except OSError:
-                        pass
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            pass
+                except OSError:
+                    pass
+            if proc is not None:
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
 
         stdout_text = "".join(ctx.stdout_buf)
         stderr_text = "".join(ctx.stderr_buf)
@@ -443,67 +483,52 @@ class AgyPrintBackend(BaseAdapter):
     # ------------------------------------------------------------------
 
     def _emit(self, ctx: _RunContext, event: CanonicalEvent) -> None:
-        ctx.events.append(event)
-        if ctx.sink is not None:
-            try:
-                ctx.sink.emit(event)
-            except Exception:  # noqa: BLE001 - sink errors must not poison the run
-                pass
+        """Append the event and forward to the sink with secrets stripped.
+
+        Delegates to the shared ``BaseAdapter.emit_event`` which applies
+        recursive redaction before the event reaches the sink (and the
+        supervisor's session store behind it).
+        """
+
+        self.emit_event(ctx, event)
 
     def _build_subprocess_env(self, request: BridgeRequest) -> dict[str, str]:
-        env = dict(os.environ)
-        for key in DEFAULT_SCRUB_ENV_NAMES:
-            # We do NOT scrub here — `agy` needs its own OAuth file, not env
-            # vars — but we must not export wrapper-side secret vars that the
-            # subprocess does not need. Leave the host environment unchanged
-            # except for explicit overrides.
-            env.pop(key, None) if False else None
+        """Strip host secrets before forwarding env to the agy child.
+
+        The child has its own OAuth file under ``~/.gemini`` so wrapper-side
+        provider keys (OPENAI_API_KEY, AWS_*, GITHUB_TOKEN, etc.) serve no
+        purpose for it — but a prompt-injection inside agy that runs
+        ``printenv`` would otherwise exfiltrate them. We replace the values
+        with the redaction placeholder rather than deleting the names so
+        downstream tooling can still detect "this var existed".
+        """
+
+        env = self.safety.scrub_environment(dict(os.environ))
         if request.session_id:
             env["ANTIGRAVITY_CONVERSATION_ID"] = request.session_id
         env.setdefault("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
-        env.update(request.extra_env or {})
+        # Caller-provided extras land last so explicit overrides win, but we
+        # redact-by-key as well so the caller cannot smuggle a fresh secret
+        # into the child by naming it ``OPENAI_API_KEY`` in extra_env.
+        if request.extra_env:
+            env.update(self.safety.scrub_environment(dict(request.extra_env)))
         return env
 
 
 # ---------------------------------------------------------------------------
-# Free functions used by adapter threads
+# Free functions used by adapter threads. ``_RunContext``, ``_drain_stream``,
+# ``_scrub_event_in_place``, and ``_scrub_mapping`` live in ``base`` so the
+# gemini adapter can reuse them without cross-module private imports.
 # ---------------------------------------------------------------------------
 
 
-def _drain_stream(
-    stream,
-    buf: list[str],
-    ctx: _RunContext,
-    spool_path: Path | None,
-    label: str,
-) -> None:
-    """Copy stream content into ``buf`` and (optionally) to a spool file."""
-
-    if stream is None:
-        return
-    spool = spool_path.open("a", encoding="utf-8") if spool_path else None
-    try:
-        while not ctx.stop_event.is_set():
-            chunk = stream.readline()
-            if not chunk:
-                # End of stream → wait for process exit to also stop tailing.
-                break
-            buf.append(chunk)
-            if spool is not None:
-                spool.write(chunk)
-                spool.flush()
-    except (OSError, ValueError):
-        return
-    finally:
-        if spool is not None:
-            try:
-                spool.close()
-            except OSError:
-                pass
-
-
 def _tail_klog(log_path: Path, ctx: _RunContext, adapter: AgyPrintBackend) -> None:
-    """Tail the --log-file written by agy and emit structured lifecycle events."""
+    """Tail the --log-file written by agy and emit structured lifecycle events.
+
+    The final-drain pass lives in the ``finally`` block so it always runs —
+    short-lived subprocesses that exit before the first poll-loop tick must
+    not lose their lifecycle events.
+    """
 
     end = time.time() + 60.0  # wait up to 60s for the log file to appear
     fp = None
@@ -521,40 +546,46 @@ def _tail_klog(log_path: Path, ctx: _RunContext, adapter: AgyPrintBackend) -> No
                 else:
                     time.sleep(_TAIL_POLL_INTERVAL_S)
                     continue
-            line = fp.readline()
+            line = fp.readline(_MAX_LINE_BYTES)
             if not line:
                 if ctx.stop_event.is_set():
                     break
                 time.sleep(_TAIL_POLL_INTERVAL_S)
                 continue
             _handle_klog_line(line, ctx, adapter)
-        # Final drain: even if stop_event fired before fp was opened (very
-        # short-lived subprocess case), make one last attempt to read the
-        # log so we don't lose lifecycle events like "Created conversation".
+    finally:
+        # Always attempt a final drain — covers the race where stop_event
+        # fired before fp was opened, and the normal-exit case where there
+        # are buffered lines past the last successful readline.
         if fp is None and log_path.exists():
             try:
                 fp = log_path.open("r", encoding="utf-8", errors="replace")
             except OSError:
                 fp = None
         if fp is not None:
-            while True:
-                remainder = fp.readline()
-                if not remainder:
-                    break
-                _handle_klog_line(remainder, ctx, adapter)
-    finally:
-        if fp is not None:
             try:
-                fp.close()
-            except OSError:
-                pass
+                while True:
+                    remainder = fp.readline(_MAX_LINE_BYTES)
+                    if not remainder:
+                        break
+                    _handle_klog_line(remainder, ctx, adapter)
+            finally:
+                try:
+                    fp.close()
+                except OSError:
+                    pass
 
 
 def _handle_klog_line(line: str, ctx: _RunContext, adapter: AgyPrintBackend) -> None:
     match = _KLOG_LINE.match(line)
-    msg = (match.group("msg") if match else line).strip()
-    if not msg:
+    msg_full = (match.group("msg") if match else line).strip()
+    if not msg_full:
         return
+    # Cap and redact the raw text we store under metadata.raw so an attacker
+    # who can write to the klog file (or a future agy version that logs
+    # secrets in error paths) cannot leak them through the event sink.
+    msg = msg_full[:2000]
+    safe_msg = adapter.safety.redact(msg)
 
     if m := _RE_GRPC_PORT.search(msg):
         adapter._emit(
@@ -562,7 +593,7 @@ def _handle_klog_line(line: str, ctx: _RunContext, adapter: AgyPrintBackend) -> 
             CanonicalEvent(
                 type="system",
                 subtype="sidecar_ready",
-                metadata={"grpc_port": int(m.group(1)), "raw": msg},
+                metadata={"grpc_port": int(m.group(1)), "raw": safe_msg},
             ),
         )
         return
@@ -572,49 +603,62 @@ def _handle_klog_line(line: str, ctx: _RunContext, adapter: AgyPrintBackend) -> 
             CanonicalEvent(
                 type="system",
                 subtype="sidecar_http_ready",
-                metadata={"http_port": int(m.group(1)), "raw": msg},
+                metadata={"http_port": int(m.group(1)), "raw": safe_msg},
             ),
         )
         return
     if m := _RE_CREATED_CONV.search(msg):
         sid = m.group(1)
-        ctx.seen_session_id[0] = sid
+        with ctx.lock:
+            ctx.seen_session_id[0] = sid
         adapter._emit(
             ctx,
             CanonicalEvent(
                 type="system",
                 subtype="conversation_started",
                 session_id=sid,
-                metadata={"raw": msg},
+                metadata={"raw": safe_msg},
             ),
         )
         return
     if m := _RE_RESUMING_CONV.search(msg):
         sid = m.group(1)
-        ctx.seen_session_id[0] = sid
+        with ctx.lock:
+            ctx.seen_session_id[0] = sid
         adapter._emit(
             ctx,
             CanonicalEvent(
                 type="system",
                 subtype="conversation_resumed",
                 session_id=sid,
-                metadata={"raw": msg},
+                metadata={"raw": safe_msg},
             ),
         )
         return
-    if m := _RE_PRINT_START.search(msg):
-        prompt_len = int(m.group(1))
-        model = m.group(2) or None
-        sid = m.group(3) or None
+    if m := _RE_PRINT_START_PREFIX.search(msg):
+        # Two-pass: extract the body, then parse key=value pairs from it.
+        # Tolerates extra/missing fields between agy versions.
+        body = m.group("body")
+        kv = {
+            pair.group("k"): (pair.group("qv") if pair.group("qv") is not None else pair.group("rv"))
+            for pair in _RE_PRINT_START_KV.finditer(body)
+        }
+        try:
+            prompt_len = int(kv.get("promptLength", "0"))
+        except ValueError:
+            prompt_len = 0
+        model = kv.get("model") or None
+        sid = kv.get("conversationID") or None
         if sid:
-            ctx.seen_session_id[0] = sid
+            with ctx.lock:
+                ctx.seen_session_id[0] = sid
         adapter._emit(
             ctx,
             CanonicalEvent(
                 type="system",
                 subtype="print_starting",
                 session_id=sid,
-                metadata={"prompt_length": prompt_len, "model": model},
+                metadata={"prompt_length": prompt_len, "model": model, "fields": kv},
             ),
         )
         return
@@ -695,7 +739,7 @@ def _handle_klog_line(line: str, ctx: _RunContext, adapter: AgyPrintBackend) -> 
     if _RE_TURN_END.search(msg):
         adapter._emit(
             ctx,
-            CanonicalEvent(type="system", subtype="turn_end", metadata={"raw": msg}),
+            CanonicalEvent(type="system", subtype="turn_end", metadata={"raw": safe_msg}),
         )
         return
 
@@ -703,26 +747,47 @@ def _handle_klog_line(line: str, ctx: _RunContext, adapter: AgyPrintBackend) -> 
 def _tail_transcripts(ctx: _RunContext, adapter: AgyPrintBackend, started_at: float) -> None:
     """Best-effort watcher for subagent transcript.jsonl files.
 
-    agy writes these to a per-subagent dynamic path under ~/.gemini/antigravity-cli/log/.
-    We only consider files created after the current invocation started so we
-    do not replay history from prior sessions.
+    Symlinks are skipped, and each candidate must resolve to a path that is
+    actually contained under ``AGY_LOG_DIR`` — otherwise a hostile entry
+    under ~/.gemini/antigravity-cli/log/ (e.g. a symlink to ~/.ssh/id_rsa)
+    could be read and its path leaked into events.
     """
 
     if not AGY_LOG_DIR.exists():
+        return
+    try:
+        log_root = AGY_LOG_DIR.resolve(strict=True)
+    except (OSError, RuntimeError):
         return
     while not ctx.stop_event.is_set():
         try:
             for candidate in AGY_LOG_DIR.rglob("transcript.jsonl"):
                 if candidate in ctx.transcript_seen:
                     continue
+                # Defense: refuse symlinks outright. They're never written
+                # by agy itself; if one appears, treat it as suspicious.
                 try:
-                    if candidate.stat().st_mtime < started_at - 1:
+                    if candidate.is_symlink():
+                        ctx.transcript_seen.add(candidate)
+                        continue
+                    resolved = candidate.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                try:
+                    resolved.relative_to(log_root)
+                except ValueError:
+                    # Resolved outside the log root — skip without echoing
+                    # the path so we don't leak the symlink target.
+                    ctx.transcript_seen.add(candidate)
+                    continue
+                try:
+                    if resolved.stat().st_mtime < started_at - 1:
                         ctx.transcript_seen.add(candidate)
                         continue
                 except OSError:
                     continue
                 ctx.transcript_seen.add(candidate)
-                _drain_transcript(candidate, ctx, adapter)
+                _drain_transcript(resolved, ctx, adapter)
         except OSError:
             pass
         if ctx.stop_event.wait(timeout=0.5):
@@ -738,7 +803,7 @@ def _drain_transcript(path: Path, ctx: _RunContext, adapter: AgyPrintBackend) ->
         return
     try:
         while not ctx.stop_event.is_set():
-            line = fp.readline()
+            line = fp.readline(_MAX_LINE_BYTES)
             if not line:
                 if ctx.stop_event.wait(timeout=_TAIL_POLL_INTERVAL_S):
                     return
