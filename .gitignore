@@ -1,0 +1,74 @@
+# Reference repos (read-only mirrors of upstream projects, never committed)
+.refs/
+
+# Local agy-mcp runtime state (session store, worktrees, logs, artifacts)
+.agy-mcp/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+wheels/
+share/python-wheels/
+MANIFEST
+
+# Virtual environments and tooling
+.venv/
+venv/
+ENV/
+env/
+.tox/
+.nox/
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+
+# uv
+uv.lock.tmp
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local agent / project state that should not be published
+.claude/
+.codex/
+.agents/
+.gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+credentials*
+api_key*
+secret*
+
+# Logs and temp
+*.log
+tmp/
+.tmp/
