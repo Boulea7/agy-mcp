@@ -106,3 +106,17 @@ def test_default_config_path_honours_xdg(isolated_env, monkeypatch: pytest.Monke
     path = default_config_path()
     assert path.parent.name == "agy-mcp"
     assert path.parent.parent == tmp_path
+
+
+def test_invalid_env_backend_is_rejected(isolated_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AGY_MCP_BACKEND", "banana")
+    config = load_config(path=tmp_path / "missing.toml")
+    assert config.backend.prefer == "auto"  # default retained
+    assert "ignored bad AGY_MCP_BACKEND" in config.source
+
+
+def test_invalid_env_protocol_is_rejected(isolated_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AGY_MCP_OUTPUT_PROTOCOL", "yaml")
+    config = load_config(path=tmp_path / "missing.toml")
+    assert config.backend.output_protocol == "claude"
+    assert "ignored bad AGY_MCP_OUTPUT_PROTOCOL" in config.source

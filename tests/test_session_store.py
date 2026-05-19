@@ -145,6 +145,42 @@ def test_get_job_missing_returns_none(tmp_session_root: Path):
     assert store.get_job("job_doesnotexist") is None
 
 
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "..",
+        "../sibling",
+        "subdir/nested",
+        "",
+        "no_prefix_just_text",
+        "job_" + "x" * 200,        # exceeds 80-char limit after prefix
+        "job_with spaces",
+        "job_unicode‮",        # bidi override
+        "job_../escape",
+        "job_\x00null",
+    ],
+)
+def test_job_id_rejects_traversal_and_garbage(tmp_session_root: Path, bad_id: str):
+    store = SessionStore(tmp_session_root)
+    with pytest.raises(ValueError):
+        store.create_job(job_id=bad_id)
+    # Read-only lookup paths must NOT raise — they return None.
+    assert store.get_job(bad_id) is None
+    assert store.read_events(bad_id) == []
+
+
+def test_create_job_accepts_only_generated_or_well_formed_ids(tmp_session_root: Path):
+    store = SessionStore(tmp_session_root)
+    # No id supplied → generated, accepted.
+    auto = store.create_job()
+    assert auto.job_id.startswith("job_")
+    # Explicit well-formed id — accepted.
+    manual = store.create_job(job_id="job_test123_abcDEF")
+    assert manual.job_id == "job_test123_abcDEF"
+
+
 def test_meta_file_is_restrictive(tmp_session_root: Path):
     store = SessionStore(tmp_session_root)
     record = store.create_job()

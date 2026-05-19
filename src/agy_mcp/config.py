@@ -10,15 +10,10 @@ Precedence (highest first):
 from __future__ import annotations
 
 import os
-import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-if sys.version_info >= (3, 11):  # pragma: no branch
-    import tomllib  # type: ignore[import-not-found]
-else:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 from agy_mcp.utils import expand_user_path
 
@@ -195,10 +190,16 @@ def _apply_env_overrides(config: Config) -> None:
     )
     env_backend = os.environ.get("AGY_MCP_BACKEND")
     if env_backend:
-        config.backend.prefer = env_backend
+        if env_backend in {"auto", "agy", "gemini"}:
+            config.backend.prefer = env_backend
+        else:
+            config.source = f"{config.source} (ignored bad AGY_MCP_BACKEND={env_backend!r})"
     env_protocol = os.environ.get("AGY_MCP_OUTPUT_PROTOCOL")
     if env_protocol:
-        config.backend.output_protocol = env_protocol
+        if env_protocol in {"raw", "claude", "codex"}:
+            config.backend.output_protocol = env_protocol
+        else:
+            config.source = f"{config.source} (ignored bad AGY_MCP_OUTPUT_PROTOCOL={env_protocol!r})"
     env_agy = os.environ.get("AGY_BIN")
     if env_agy:
         config.backend.agy_bin = env_agy

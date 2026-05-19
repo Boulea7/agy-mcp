@@ -19,22 +19,37 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from agy_mcp.models import CanonicalEvent, JobRecord, JobStatus
+from pydantic import ValidationError
+
+from agy_mcp.models import BackendName, CanonicalEvent, JobRecord, JobStatus
 from agy_mcp.utils import ensure_directory, safe_write_text, utc_now_iso
 
 JOB_ID_PREFIX = "job_"
+# Strict job-id grammar: callers may supply ids over MCP, so we refuse
+# anything that could traverse out of the store root. Generated ids satisfy
+# this regex (see generate_job_id).
+_JOB_ID_RE = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
 
 
 def generate_job_id() -> str:
     """Return a sortable, URL-safe job id (timestamp + 6 random hex)."""
 
     return f"{JOB_ID_PREFIX}{int(time.time())}_{secrets.token_hex(3)}"
+
+
+def _validate_job_id(job_id: str) -> str:
+    if not isinstance(job_id, str) or not _JOB_ID_RE.fullmatch(job_id):
+        raise ValueError(
+            f"invalid job_id {job_id!r}: must match {_JOB_ID_RE.pattern}"
+        )
+    return job_id
 
 
 @dataclass(slots=True)
@@ -49,7 +64,13 @@ class JobPaths:
 
     @classmethod
     def for_job(cls, store_root: Path, job_id: str) -> "JobPaths":
-        root = store_root / job_id
+        _validate_job_id(job_id)
+        root = (store_root / job_id).resolve()
+        store_resolved = store_root.resolve()
+        # Defence-in-depth: even with the strict regex, refuse anything that
+        # resolves outside the store root (handles symlinked store roots).
+        if not _path_is_relative_to(root, store_resolved):
+            raise ValueError(f"job_id {job_id!r} escapes store root")
         return cls(
             root=root,
             meta=root / "meta.json",
@@ -79,9 +100,9 @@ class SessionStore:
         session_id: str | None = None,
         cwd: str = "",
         request: dict | None = None,
-        backend: str | None = None,
+        backend: BackendName | None = None,
     ) -> JobRecord:
-        job_id = job_id or generate_job_id()
+        job_id = _validate_job_id(job_id) if job_id is not None else generate_job_id()
         paths = JobPaths.for_job(self.root, job_id)
         ensure_directory(paths.root, mode=0o700)
         ensure_directory(paths.artifacts, mode=0o700)
@@ -89,7 +110,7 @@ class SessionStore:
             job_id=job_id,
             session_id=session_id,
             status="running",
-            backend=backend,  # type: ignore[arg-type]
+            backend=backend,
             cwd=cwd,
             log_path=str(paths.agy_log),
             stdout_path=str(paths.stdout),
@@ -103,14 +124,20 @@ class SessionStore:
         return record
 
     def get_job(self, job_id: str) -> JobRecord | None:
-        paths = JobPaths.for_job(self.root, job_id)
+        try:
+            paths = JobPaths.for_job(self.root, job_id)
+        except ValueError:
+            return None
         if not paths.meta.is_file():
             return None
         try:
             data = json.loads(paths.meta.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        return JobRecord.model_validate(data)
+        try:
+            return JobRecord.model_validate(data)
+        except ValidationError:
+            return None
 
     def update_job(self, record: JobRecord) -> JobRecord:
         record.touch()
@@ -147,13 +174,12 @@ class SessionStore:
     def append_event(self, job_id: str, event: CanonicalEvent) -> None:
         paths = JobPaths.for_job(self.root, job_id)
         ensure_directory(paths.root, mode=0o700)
-        line = event.model_dump_json(exclude_none=False)
-        # Open in append + close-on-each-call mode so concurrent readers see a
-        # consistent file even if the writer is killed mid-write. We accept
-        # the syscall overhead in exchange for crash safety on long jobs.
+        # Single concatenated write — line is written atomically up to
+        # PIPE_BUF on POSIX; on networked filesystems writers must be serial
+        # per job (supervisor guarantees one writer per job_id).
+        line = event.model_dump_json(exclude_none=False) + "\n"
         with paths.events.open("a", encoding="utf-8") as fp:
             fp.write(line)
-            fp.write("\n")
             fp.flush()
             try:
                 os.fsync(fp.fileno())
@@ -163,7 +189,10 @@ class SessionStore:
     def read_events(self, job_id: str, *, since: int = 0) -> list[CanonicalEvent]:
         """Read events from offset ``since`` (0-based line index)."""
 
-        paths = JobPaths.for_job(self.root, job_id)
+        try:
+            paths = JobPaths.for_job(self.root, job_id)
+        except ValueError:
+            return []
         if not paths.events.is_file():
             return []
         events: list[CanonicalEvent] = []
@@ -176,8 +205,8 @@ class SessionStore:
                     continue
                 try:
                     events.append(CanonicalEvent.model_validate_json(stripped))
-                except Exception:
-                    # Tolerate corrupt lines (e.g. partial write before crash);
+                except (json.JSONDecodeError, ValidationError):
+                    # Tolerate corrupt lines (partial write before crash);
                     # surface as a synthetic error event so the caller still
                     # sees something at this offset.
                     events.append(
@@ -208,7 +237,13 @@ class SessionStore:
         return records
 
     def purge_older_than(self, days: int) -> list[str]:
-        """Delete job directories whose ``updated_at`` is older than ``days``."""
+        """Delete job directories whose meta mtime is older than ``days``.
+
+        Uses the filesystem mtime rather than ``JobRecord.updated_at`` so that
+        purge cost stays O(n) without loading every meta.json. Callers that
+        depend on the record timestamp should call ``update_job(record)`` to
+        bump the mtime.
+        """
 
         if days <= 0 or not self.root.is_dir():
             return []
@@ -216,6 +251,12 @@ class SessionStore:
         removed: list[str] = []
         for path in self.root.iterdir():
             if not path.is_dir():
+                continue
+            # Reject anything outside the store root after symlink resolution.
+            try:
+                if not _path_is_relative_to(path.resolve(), self.root.resolve()):
+                    continue
+            except OSError:
                 continue
             try:
                 if path.stat().st_mtime < cutoff:
@@ -261,6 +302,16 @@ def _rmtree(path: Path) -> None:
         path.rmdir()
     except OSError:
         pass
+
+
+def _path_is_relative_to(child: Path, parent: Path) -> bool:
+    """Backport of ``Path.is_relative_to`` for Python 3.8/3.9 compatibility."""
+
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def collect_artifact_paths(records: Iterable[JobRecord]) -> list[str]:

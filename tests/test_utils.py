@@ -46,9 +46,15 @@ def test_utc_now_iso_is_sortable():
     [
         ("Bearer abcdef1234567890abcdef1234567890", True),
         ("Authorization: gho" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", True),
+        ("X-Api-Key: shh-12345-secret-xyz-678", True),
+        ("X-Auth-Token=verylongheadervaluexyz123456", True),
         ("sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", True),
         ("AIza" "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", True),
         ("ya29" ".aaaaaaaaaaaaaaaaaaaaaaaa", True),
+        ("eyJ" "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", True),
+        ("AKIA" "IOSFODNN7EXAMPLE", True),
+        ("xox" "b-1234567890-abcdefghijklmn", True),
+        ("github_pat" "_11ABCDEFGHIJKLMNOPQRST_abcdef1234567890abcdef1234567890abcdef1234567890", True),
         ("hello world", False),
         ("short_token", False),
     ],
@@ -59,6 +65,18 @@ def test_redact_text_handles_common_secret_shapes(value: str, expect_redaction: 
         assert REDACTION_PLACEHOLDER in out
     else:
         assert out == value
+
+
+def test_redact_text_handles_pem_block():
+    pem = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDR\n"
+        "-----END PRIVATE KEY-----"
+    )
+    out = redact_text(pem)
+    assert REDACTION_PLACEHOLDER in out
+    assert "BEGIN PRIVATE KEY" not in out
+    assert "MIIEvQIBADANB" not in out
 
 
 def test_redact_text_empty_string_returns_empty():
@@ -78,6 +96,8 @@ def test_scrub_env_replaces_secret_named_keys():
         "ANTHROPIC_API_KEY": "supersecret",
         "OPENAI_API_KEY": "shhh",
         "github_token": "leak",  # lower-case form still matched
+        "DATABASE_URL": "postgres://u:p@h/d",
+        "SENTRY_DSN": "https://abc@sentry.io/123",
         "PATH": "/usr/bin",
         "NORMAL_VAR": "value",
     }
@@ -85,6 +105,8 @@ def test_scrub_env_replaces_secret_named_keys():
     assert out["ANTHROPIC_API_KEY"] == REDACTION_PLACEHOLDER
     assert out["OPENAI_API_KEY"] == REDACTION_PLACEHOLDER
     assert out["github_token"] == REDACTION_PLACEHOLDER
+    assert out["DATABASE_URL"] == REDACTION_PLACEHOLDER
+    assert out["SENTRY_DSN"] == REDACTION_PLACEHOLDER
     assert out["PATH"] == "/usr/bin"
     assert out["NORMAL_VAR"] == "value"
     # Caller's env must not be mutated.
@@ -182,3 +204,28 @@ def test_safe_write_text_atomic_replace(tmp_path):
     if not is_windows():
         mode = target.stat().st_mode & 0o777
         assert mode == 0o644
+
+
+@pytest.mark.skipif(is_windows(), reason="symlink TOCTOU is POSIX-specific")
+def test_safe_write_text_does_not_overwrite_symlink_target(tmp_path):
+    """Pre-existing symlinks at target must not be followed during write."""
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("DO NOT TOUCH", encoding="utf-8")
+    target = tmp_path / "config.json"
+    # Pre-create target as a symlink to victim (TOCTOU attack scenario).
+    os.symlink(victim, target)
+    # Write must atomically replace the symlink with a regular file, leaving
+    # the victim contents untouched.
+    safe_write_text(target, "new content")
+    assert target.read_text(encoding="utf-8") == "new content"
+    assert not target.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "DO NOT TOUCH"
+
+
+def test_safe_write_text_leaves_no_tmp_orphans(tmp_path):
+    target = tmp_path / "out.txt"
+    safe_write_text(target, "ok")
+    # No leftover *.tmp files in the destination directory.
+    leftovers = [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []

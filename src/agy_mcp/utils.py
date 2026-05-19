@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,15 +31,34 @@ def utc_now_iso() -> str:
 # conservative; callers may extend them via SafetyPolicy.denylist_extra.
 SECRET_ENV_NAME_PATTERN = re.compile(
     r"(?i)(token|api[_-]?key|secret|password|passwd|credential|bearer|client[_-]?secret"
-    r"|access[_-]?key|private[_-]?key|session[_-]?key|auth)"
+    r"|access[_-]?key|private[_-]?key|session[_-]?key|signing[_-]?key|webhook"
+    r"|auth|_pat$|^pat_|_dsn$|^dsn_|_otp$|^otp_|_pin$|^pin_|certificate|cert|_key$|^key_"
+    r"|database[_-]?(url|uri)|postgres[_-]?(url|uri)|redis[_-]?(url|uri)"
+    r"|mongodb[_-]?(url|uri)|mysql[_-]?(url|uri)|kubeconfig)"
 )
 
-# Token-looking strings: at least 20 chars of base64url, hex, or Bearer-style.
-_VALUE_TOKEN = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"
-                           r"AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z_-]{20,}|"
-                           r"[A-Za-z0-9_-]{40,})\b")
+# Provider-specific token shapes are matched before the generic long-token
+# fallback so that short fixed-length tokens (e.g. AWS AKID = 20 chars) are
+# still redacted.
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+)
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+_AWS_ACCESS_KEY_ID = re.compile(r"\b(AKIA|ASIA|AROA|AGPA|AIDA|ANPA|ANVA)[0-9A-Z]{16}\b")
+_SLACK_TOKEN = re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")
+_GITHUB_PAT_FG = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+_VALUE_TOKEN = re.compile(
+    r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"
+    r"AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z_-]{20,}|"
+    r"[A-Za-z0-9_-]{40,})\b"
+)
 _BEARER_HEADER = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-+/=]{8,})")
-_AUTHZ_HEADER = re.compile(r"(?i)(Authorization[:=]\s*)([^\s\"',;]+)")
+_AUTHZ_HEADER = re.compile(
+    r"(?i)\b("
+    r"Authorization|X-Api-Key|X-Auth-Token|X-Auth-Key|Api-Key|Apikey"
+    r"|Proxy-Authorization|X-Goog-Api-Key|X-OpenAI-Key|X-Anthropic-Key"
+    r")(\s*[:=]\s*)([^\s\"',;]+)"
+)
 
 REDACTION_PLACEHOLDER = "***"
 
@@ -46,15 +66,21 @@ REDACTION_PLACEHOLDER = "***"
 def redact_text(value: str, *, extra_patterns: tuple[re.Pattern[str], ...] = ()) -> str:
     """Redact secret-shaped substrings inside a free-text string.
 
-    Conservative pass: replace bearer tokens, Authorization headers, and long
-    high-entropy tokens with ``***``. Extra patterns may be supplied by the
-    caller (e.g. project-specific deny-list values).
+    Order matters: structural patterns (PEM blocks, JWTs) come first so that
+    their internal contents are not partially redacted by the generic token
+    regex. ``extra_patterns`` is appended last so callers can extend without
+    overriding built-ins.
     """
 
     if not value:
         return value
-    redacted = _BEARER_HEADER.sub(r"\1" + REDACTION_PLACEHOLDER, value)
-    redacted = _AUTHZ_HEADER.sub(r"\1" + REDACTION_PLACEHOLDER, redacted)
+    redacted = _PEM_BLOCK.sub(REDACTION_PLACEHOLDER, value)
+    redacted = _JWT.sub(REDACTION_PLACEHOLDER, redacted)
+    redacted = _AUTHZ_HEADER.sub(r"\1\2" + REDACTION_PLACEHOLDER, redacted)
+    redacted = _BEARER_HEADER.sub(r"\1" + REDACTION_PLACEHOLDER, redacted)
+    redacted = _AWS_ACCESS_KEY_ID.sub(REDACTION_PLACEHOLDER, redacted)
+    redacted = _SLACK_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
+    redacted = _GITHUB_PAT_FG.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _VALUE_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
     for pat in extra_patterns:
         redacted = pat.sub(REDACTION_PLACEHOLDER, redacted)
@@ -193,17 +219,56 @@ def ensure_directory(path: Path, mode: int = 0o755) -> Path:
 
 
 def safe_write_text(path: Path, content: str, mode: int = 0o644) -> None:
-    """Write ``content`` to ``path`` atomically with restrictive permissions."""
+    """Write ``content`` to ``path`` atomically with restrictive permissions.
+
+    Uses a randomised tempfile in the destination directory so two writers
+    racing on the same target do not collide on a predictable ``.tmp`` name,
+    and refuses to follow a symlinked tempfile (``O_NOFOLLOW``) so an
+    attacker cannot pre-create a symlink to e.g. ``~/.ssh/authorized_keys``.
+    """
 
     ensure_directory(path.parent)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    if not is_windows():
+    # NamedTemporaryFile in the destination directory gives us atomic rename
+    # semantics + a randomised name. We close immediately and reopen with
+    # O_NOFOLLOW (where supported) for symlink-safe writes.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp = Path(tmp_name)
+    try:
         try:
-            tmp.chmod(mode)
+            os.close(fd)
+            # POSIX: refuse to follow symlinks; the mkstemp above already
+            # created the file as a regular file, so this just hardens
+            # against TOCTOU swaps.
+            flags = os.O_WRONLY | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            real_fd = os.open(tmp, flags)
+            try:
+                with os.fdopen(real_fd, "w", encoding="utf-8") as fp:
+                    fp.write(content)
+            except Exception:
+                os.close(real_fd) if not real_fd == -1 else None
+                raise
         except OSError:
-            pass
-    os.replace(tmp, path)
+            # Fallback for filesystems without O_NOFOLLOW (e.g. some shares).
+            tmp.write_text(content, encoding="utf-8")
+        if not is_windows():
+            try:
+                tmp.chmod(mode)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    finally:
+        # If replace failed, leave no orphan tmp behind.
+        if tmp.exists() and tmp != path:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
