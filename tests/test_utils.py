@@ -98,6 +98,9 @@ def test_scrub_env_replaces_secret_named_keys():
         "github_token": "leak",  # lower-case form still matched
         "DATABASE_URL": "postgres://u:p@h/d",
         "SENTRY_DSN": "https://abc@sentry.io/123",
+        "APP_KEY_ID": "midword-key",  # P1 round-2 fix: _KEY_ in middle
+        "MY_TOKEN_RAW": "midword-token",
+        "STAGE_SECRET_VALUE": "midword-secret",
         "PATH": "/usr/bin",
         "NORMAL_VAR": "value",
     }
@@ -107,6 +110,9 @@ def test_scrub_env_replaces_secret_named_keys():
     assert out["github_token"] == REDACTION_PLACEHOLDER
     assert out["DATABASE_URL"] == REDACTION_PLACEHOLDER
     assert out["SENTRY_DSN"] == REDACTION_PLACEHOLDER
+    assert out["APP_KEY_ID"] == REDACTION_PLACEHOLDER
+    assert out["MY_TOKEN_RAW"] == REDACTION_PLACEHOLDER
+    assert out["STAGE_SECRET_VALUE"] == REDACTION_PLACEHOLDER
     assert out["PATH"] == "/usr/bin"
     assert out["NORMAL_VAR"] == "value"
     # Caller's env must not be mutated.
@@ -229,3 +235,23 @@ def test_safe_write_text_leaves_no_tmp_orphans(tmp_path):
     # No leftover *.tmp files in the destination directory.
     leftovers = [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
+
+
+def test_safe_write_text_fallback_path_still_writes(tmp_path, monkeypatch):
+    """If the O_NOFOLLOW re-open fails, the fallback plain write must still succeed."""
+
+    target = tmp_path / "out.txt"
+    original_open = os.open
+    state = {"calls": 0}
+
+    def fake_open(path, flags, *args, **kwargs):
+        state["calls"] += 1
+        # mkstemp's internal open is the first call; let it through.
+        # The second open is safe_write_text's re-open — force OSError.
+        if state["calls"] >= 2 and hasattr(os, "O_NOFOLLOW") and (flags & os.O_NOFOLLOW):
+            raise OSError("simulated filesystem without O_NOFOLLOW")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    safe_write_text(target, "fallback-content")
+    assert target.read_text(encoding="utf-8") == "fallback-content"

@@ -32,7 +32,12 @@ def utc_now_iso() -> str:
 SECRET_ENV_NAME_PATTERN = re.compile(
     r"(?i)(token|api[_-]?key|secret|password|passwd|credential|bearer|client[_-]?secret"
     r"|access[_-]?key|private[_-]?key|session[_-]?key|signing[_-]?key|webhook"
-    r"|auth|_pat$|^pat_|_dsn$|^dsn_|_otp$|^otp_|_pin$|^pin_|certificate|cert|_key$|^key_"
+    r"|auth|_pat$|^pat_|_dsn$|^dsn_|_otp$|^otp_|_pin$|^pin_|certificate|cert"
+    # Mid-word matches: `_key_`, `_token_`, `_secret_`, `_password_` etc. catch
+    # composite names like APP_KEY_ID, MY_TOKEN_RAW that prior anchored
+    # patterns would miss.
+    r"|_(key|token|secret|password|credential|auth)(_|$)"
+    r"|^(key|token|secret|password|credential|auth)_"
     r"|database[_-]?(url|uri)|postgres[_-]?(url|uri)|redis[_-]?(url|uri)"
     r"|mongodb[_-]?(url|uri)|mysql[_-]?(url|uri)|kubeconfig)"
 )
@@ -240,21 +245,28 @@ def safe_write_text(path: Path, content: str, mode: int = 0o644) -> None:
     try:
         try:
             os.close(fd)
-            # POSIX: refuse to follow symlinks; the mkstemp above already
-            # created the file as a regular file, so this just hardens
-            # against TOCTOU swaps.
-            flags = os.O_WRONLY | os.O_TRUNC
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
+        except OSError:
+            pass
+        # Try O_NOFOLLOW path first; on filesystems without it (rare on
+        # modern systems but seen on some networked mounts) fall back to a
+        # plain write — the tempfile was just created via mkstemp so the
+        # symlink-swap window is small but non-zero. See docs/review-followups.md.
+        wrote_via_safe = False
+        flags = os.O_WRONLY | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
             real_fd = os.open(tmp, flags)
+        except OSError:
+            real_fd = -1
+        if real_fd != -1:
             try:
                 with os.fdopen(real_fd, "w", encoding="utf-8") as fp:
                     fp.write(content)
-            except Exception:
-                os.close(real_fd) if not real_fd == -1 else None
-                raise
-        except OSError:
-            # Fallback for filesystems without O_NOFOLLOW (e.g. some shares).
+                wrote_via_safe = True
+            except OSError:
+                wrote_via_safe = False
+        if not wrote_via_safe:
             tmp.write_text(content, encoding="utf-8")
         if not is_windows():
             try:
