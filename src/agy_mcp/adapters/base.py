@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+import errno
 import os
 import re
 import shutil
@@ -90,17 +91,40 @@ class _RunContext:
 
 
 def _open_spool(path: Path):
-    """Open ``path`` for append with O_NOFOLLOW when available."""
+    """Open ``path`` for append with O_NOFOLLOW when available.
+
+    We distinguish two failure modes:
+
+    * ``ELOOP`` — the path is already a symlink. Refuse to open at all
+      (refusing fail-closed is the whole point of O_NOFOLLOW). An attacker
+      who can pre-create the spool path as ``ln -s ~/.ssh/authorized_keys
+      ./stdout.log`` would otherwise see adapter output appended to the
+      symlink target.
+    * ``ENOTSUP`` / ``EOPNOTSUPP`` / ``EINVAL`` — the filesystem rejects
+      ``O_NOFOLLOW`` (rare; some NFS / FUSE mounts). Fall back to a plain
+      append after one more ``is_symlink`` check so we still refuse the
+      symlink even on those filesystems.
+    """
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    if hasattr(os, "O_NOFOLLOW"):
+    nofollow_supported = hasattr(os, "O_NOFOLLOW")
+    if nofollow_supported:
         flags |= os.O_NOFOLLOW
     try:
         fd = os.open(path, flags, 0o600)
-    except OSError:
-        # Fall back to append-mode open; rare on POSIX, but tolerate
-        # filesystems that reject O_NOFOLLOW (some network mounts).
-        return path.open("a", encoding="utf-8")
+    except OSError as exc:
+        # ELOOP / a symlink existed: never fall back, always refuse.
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise
+        # Filesystem rejected the flag: fall back to a plain append after
+        # one more symlink check so we still refuse a symlinked target.
+        if not nofollow_supported or exc.errno in (
+            errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL,
+        ):
+            if path.is_symlink():
+                raise OSError(errno.ELOOP, f"refusing to follow symlink: {path}") from exc
+            return path.open("a", encoding="utf-8")
+        raise
     return os.fdopen(fd, "a", encoding="utf-8")
 
 
@@ -115,7 +139,21 @@ def _drain_stream(
 
     if stream is None:
         return
-    spool = _open_spool(spool_path) if spool_path else None
+    spool = None
+    if spool_path is not None:
+        try:
+            spool = _open_spool(spool_path)
+        except OSError as exc:
+            # Spool open failed (e.g. ELOOP — refusing to follow a symlink
+            # at the spool path). Continue draining into ``buf`` so the
+            # caller still gets the stream, just without on-disk archival.
+            ctx.events.append(
+                CanonicalEvent(
+                    type="error",
+                    subtype="spool_refused",
+                    text=f"refusing to open spool {label}: {exc}",
+                )
+            )
     try:
         while not ctx.stop_event.is_set():
             chunk = stream.readline(_MAX_LINE_BYTES)
@@ -144,7 +182,16 @@ def _drain_stream(
 
 
 def _scrub_event_in_place(event: CanonicalEvent, safety: SafetyPolicy) -> None:
-    """Walk a CanonicalEvent and rewrite every string field through ``safety.redact``."""
+    """Walk a CanonicalEvent and rewrite every string field through ``safety.redact``.
+
+    Fields walked: ``text``, ``content``, ``metadata``, ``raw`` and any
+    pydantic ``model_extra`` keys (CanonicalEvent has ``extra='allow'``).
+
+    Fields intentionally skipped: ``session_id`` / ``role`` / ``subtype`` /
+    ``type`` — these are regex-constrained (UUID-shaped session ids, fixed
+    role enum, structural subtype labels) and redacting them would lose
+    information the supervisor needs to route events.
+    """
 
     if event.text:
         event.text = safety.redact(event.text)
@@ -154,6 +201,10 @@ def _scrub_event_in_place(event: CanonicalEvent, safety: SafetyPolicy) -> None:
         event.metadata = _scrub_mapping(event.metadata, safety)
     if event.raw:
         event.raw = _scrub_mapping(event.raw, safety)
+    extra = getattr(event, "__pydantic_extra__", None)
+    if extra:
+        for key in list(extra.keys()):
+            extra[key] = _scrub_mapping(extra[key], safety)
 
 
 def _scrub_mapping(value, safety: SafetyPolicy, _depth: int = 0):

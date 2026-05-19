@@ -77,14 +77,20 @@ _KLOG_LINE = re.compile(
 
 _RE_GRPC_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTPS")
 _RE_HTTP_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTP\b")
-# Anchor end with ``\b`` so trailing alphanumerics (e.g. accidental log
-# concatenation) don't pull garbage into the captured conversation id.
-_RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F-]{8,})\b")
+# Real agy conversation ids are UUIDs (8-4-4-4-12 hex). Require ``>=2`` hex
+# chars after every dash so trailing junk like ``...-extra`` is rejected
+# (we'd otherwise pull in a single trailing hex like ``-e``).
+_RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F]{4,}(?:-[0-9a-fA-F]{2,})*)")
 # Tolerate format drift: ``Print mode: starting (k1=v1, k2="v2", ...)``.
 # We match the prefix, then extract ``key=value`` pairs from the body.
-_RE_PRINT_START_PREFIX = re.compile(r"Print mode: starting \((?P<body>.*?)\)")
+# The body class uses ``[^)]*`` so values containing literal ``)`` would
+# still close the prefix early — that mirrors how klog itself escapes such
+# characters (they never appear in the wild) and keeps the regex linear.
+_RE_PRINT_START_PREFIX = re.compile(r"Print mode: starting \((?P<body>[^)]*)\)")
 _RE_PRINT_START_KV = re.compile(r'(?P<k>\w+)=(?:"(?P<qv>[^"]*)"|(?P<rv>[^,\s)]+))')
-_RE_RESUMING_CONV = re.compile(r"Print mode: resuming conversation ([0-9a-fA-F-]{8,})\b")
+_RE_RESUMING_CONV = re.compile(
+    r"Print mode: resuming conversation ([0-9a-fA-F]{4,}(?:-[0-9a-fA-F]{2,})*)"
+)
 _RE_NEW_CONV = re.compile(r"Starting new conversation \(agent=(true|false)\)")
 _RE_AUTO_FLUSH = re.compile(
     r"Auto-flush: sending (\d+) queued input\(s\) \(combinedLength=(\d+), media=(\d+)\)"

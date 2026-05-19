@@ -388,6 +388,28 @@ def test_drain_stream_handles_missing_stream():
     assert ctx.stdout_buf == []
 
 
+def test_drain_stream_refuses_symlinked_spool(tmp_path):
+    """Pre-existing symlink at spool path must not be followed."""
+
+    import io
+
+    target = tmp_path / "real_secret.txt"
+    target.write_text("untouched", encoding="utf-8")
+    spool = tmp_path / "stdout.spool"
+    spool.symlink_to(target)
+
+    ctx = _new_ctx()
+    stream = io.StringIO("payload\n")
+    _drain_stream(stream, ctx.stdout_buf, ctx, spool, "stdout")
+    # Stream content reached the in-memory buffer.
+    assert "".join(ctx.stdout_buf) == "payload\n"
+    # But the symlink target was never written to.
+    assert target.read_text(encoding="utf-8") == "untouched"
+    # And an error event was synthesised so the caller knows.
+    refused = [e for e in ctx.events if e.subtype == "spool_refused"]
+    assert refused
+
+
 # ---------------------------------------------------------------------------
 # Env scrubbing in _build_subprocess_env
 # ---------------------------------------------------------------------------
@@ -473,6 +495,31 @@ def test_emit_redacts_text_metadata_and_raw(tmp_path, isolated_agy):
     assert evt.raw["aws"] == "***"
 
 
+def test_emit_redacts_pydantic_extra_fields(tmp_path, isolated_agy):
+    """CanonicalEvent has extra='allow'; extras must also be scrubbed."""
+
+    from agy_mcp.adapters.base import ListEventSink
+
+    sink = ListEventSink()
+    backend = AgyPrintBackend(bin_override=None)
+    ctx = _new_ctx()
+    ctx.sink = sink
+    backend._emit(
+        ctx,
+        CanonicalEvent(
+            type="assistant",
+            text="hi",
+            # Extra kwargs land in pydantic model_extra.
+            sneaky="Authorization: Bearer aaaaaaaaaaaaaaaaaaaaaaaaa",
+            nested_extra={"hidden_token": "ghp_realghtokenexamplelong1234567"},
+        ),
+    )
+    [evt] = sink.events
+    extra = getattr(evt, "__pydantic_extra__", {}) or {}
+    assert "aaaaaaaaaaaaaaaaaaaaaaaaa" not in str(extra.get("sneaky", ""))
+    assert extra.get("nested_extra", {}).get("hidden_token") == "***"
+
+
 # ---------------------------------------------------------------------------
 # CWD hardening (review P1 #5)
 # ---------------------------------------------------------------------------
@@ -535,6 +582,22 @@ def test_klog_created_conv_does_not_over_capture():
     )
     [evt] = ctx.events
     assert evt.session_id == "abcdef01-2345-6789-abcd-ef0123456789"
+
+
+def test_klog_created_conv_does_not_over_capture_trailing_dash():
+    """Dash-joined trailing tokens (no whitespace) must still terminate."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    _handle_klog_line(
+        "I0520 12:00:00.000  1234 conv.go:1] "
+        "Created conversation abcd1234-cafe-extra-nonhex-suffix\n",
+        ctx,
+        adapter,
+    )
+    [evt] = ctx.events
+    # ``extra`` and ``nonhex`` are not hex; capture stops at the last hex run.
+    assert evt.session_id == "abcd1234-cafe"
 
 
 # ---------------------------------------------------------------------------

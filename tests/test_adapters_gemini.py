@@ -242,3 +242,82 @@ def test_run_handles_spawn_failure(tmp_path, monkeypatch):
     result = backend.run(req)
     spawn_errors = [e for e in result.events if e.subtype == "spawn_failure"]
     assert spawn_errors
+
+
+# ---------------------------------------------------------------------------
+# Parity with agy adapter: env scrub + cwd refusal (Round 3 P3)
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_subprocess_env_scrubs_host_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk" "-veryverylongtoken1234567890ABCD")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ak-livenotredacted")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "AKIA" "IOSFODNN7EXAMPLE")
+    monkeypatch.setenv("HARMLESS_VAR", "keep-me")
+    backend = GeminiCliBackend(bin_override=None)
+    req = BridgeRequest(prompt="x", cwd=str(tmp_path))
+    env = backend._build_subprocess_env(req)
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY"):
+        assert env[name] == "***"
+    assert env["HARMLESS_VAR"] == "keep-me"
+
+
+def test_gemini_subprocess_env_scrubs_extra_env(tmp_path, monkeypatch):
+    backend = GeminiCliBackend(bin_override=None)
+    req = BridgeRequest(
+        prompt="x", cwd=str(tmp_path),
+        extra_env={"OPENAI_API_KEY": "sk-leakedviaextra1234567890ABCD"},
+    )
+    env = backend._build_subprocess_env(req)
+    assert env["OPENAI_API_KEY"] == "***"
+
+
+def test_gemini_run_refuses_missing_cwd(tmp_path):
+    backend = GeminiCliBackend(bin_override=None)
+    req = BridgeRequest(prompt="x", cwd=str(tmp_path / "no-such-dir"))
+    result = backend.run(req)
+    assert any(e.subtype == "invalid_cwd" for e in result.events)
+
+
+def test_gemini_run_refuses_file_as_cwd(tmp_path):
+    f = tmp_path / "not-a-dir"
+    f.write_text("x")
+    backend = GeminiCliBackend(bin_override=None)
+    req = BridgeRequest(prompt="x", cwd=str(f))
+    result = backend.run(req)
+    assert any(e.subtype == "invalid_cwd" for e in result.events)
+
+
+# ---------------------------------------------------------------------------
+# Comprehensive env-name coverage (Round 3 P3 #5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AZURE_OPENAI_API_KEY",
+        "STRIPE_API_KEY",
+        "SLACK_BOT_TOKEN",
+        "NPM_TOKEN",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "MONGODB_URI",
+        "SENTRY_DSN",
+        "VAULT_TOKEN",
+    ],
+)
+def test_default_scrub_env_names_all_redacted(monkeypatch, tmp_path, name):
+    monkeypatch.setenv(name, "should-not-leak-1234567890")
+    backend = GeminiCliBackend(bin_override=None)
+    env = backend._build_subprocess_env(BridgeRequest(prompt="x", cwd=str(tmp_path)))
+    assert env[name] == "***", f"{name} not scrubbed"
