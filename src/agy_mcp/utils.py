@@ -81,8 +81,10 @@ def redact_text(value: str, *, extra_patterns: tuple[re.Pattern[str], ...] = ())
         return value
     redacted = _PEM_BLOCK.sub(REDACTION_PLACEHOLDER, value)
     redacted = _JWT.sub(REDACTION_PLACEHOLDER, redacted)
-    redacted = _AUTHZ_HEADER.sub(r"\1\2" + REDACTION_PLACEHOLDER, redacted)
+    # Bearer first so "Authorization: Bearer <token>" gets its token caught
+    # before the AUTHZ_HEADER substitution collapses "Bearer" to "***".
     redacted = _BEARER_HEADER.sub(r"\1" + REDACTION_PLACEHOLDER, redacted)
+    redacted = _AUTHZ_HEADER.sub(r"\1\2" + REDACTION_PLACEHOLDER, redacted)
     redacted = _AWS_ACCESS_KEY_ID.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _SLACK_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _GITHUB_PAT_FG.sub(REDACTION_PLACEHOLDER, redacted)
