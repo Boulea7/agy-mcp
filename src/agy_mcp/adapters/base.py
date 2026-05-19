@@ -113,8 +113,8 @@ def _open_spool(path: Path):
     try:
         fd = os.open(path, flags, 0o600)
     except OSError as exc:
-        # ELOOP / a symlink existed: never fall back, always refuse.
-        if exc.errno in (errno.ELOOP, errno.EMLINK):
+        if exc.errno == errno.ELOOP:
+            # Path is a symlink — never fall back, always refuse.
             raise
         # Filesystem rejected the flag: fall back to a plain append after
         # one more symlink check so we still refuse a symlinked target.
@@ -134,8 +134,16 @@ def _drain_stream(
     ctx: _RunContext,
     spool_path: Path | None,
     label: str,
+    adapter: "BaseAdapter | None" = None,
 ) -> None:
-    """Copy stream content into ``buf`` and (optionally) to a spool file."""
+    """Copy stream content into ``buf`` and (optionally) to a spool file.
+
+    When ``adapter`` is provided, spool-open refusals are surfaced through
+    ``adapter.emit_event`` so the live sink (and the supervisor's session
+    store behind it) sees the failure with proper lock + redaction. Older
+    call sites that pass ``adapter=None`` get the in-memory event without
+    sink fan-out (legacy compatibility for unit tests).
+    """
 
     if stream is None:
         return
@@ -144,16 +152,16 @@ def _drain_stream(
         try:
             spool = _open_spool(spool_path)
         except OSError as exc:
-            # Spool open failed (e.g. ELOOP — refusing to follow a symlink
-            # at the spool path). Continue draining into ``buf`` so the
-            # caller still gets the stream, just without on-disk archival.
-            ctx.events.append(
-                CanonicalEvent(
-                    type="error",
-                    subtype="spool_refused",
-                    text=f"refusing to open spool {label}: {exc}",
-                )
+            event = CanonicalEvent(
+                type="error",
+                subtype="spool_refused",
+                text=f"refusing to open spool {label}: {exc}",
             )
+            if adapter is not None:
+                adapter.emit_event(ctx, event)
+            else:
+                with ctx.lock:
+                    ctx.events.append(event)
     try:
         while not ctx.stop_event.is_set():
             chunk = stream.readline(_MAX_LINE_BYTES)

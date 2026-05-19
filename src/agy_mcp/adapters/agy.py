@@ -77,10 +77,11 @@ _KLOG_LINE = re.compile(
 
 _RE_GRPC_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTPS")
 _RE_HTTP_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTP\b")
-# Real agy conversation ids are UUIDs (8-4-4-4-12 hex). Require ``>=2`` hex
-# chars after every dash so trailing junk like ``...-extra`` is rejected
-# (we'd otherwise pull in a single trailing hex like ``-e``).
-_RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F]{4,}(?:-[0-9a-fA-F]{2,})*)")
+# Real agy conversation ids are UUIDs (8-4-4-4-12 hex). Require ``>=8`` hex
+# chars in the first segment and ``>=2`` per subsequent dash-separated
+# group, so trailing junk like ``...-extra`` is rejected and we never
+# capture a sub-UUID prefix like a stray ``abcd``.
+_RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{2,})*)")
 # Tolerate format drift: ``Print mode: starting (k1=v1, k2="v2", ...)``.
 # We match the prefix, then extract ``key=value`` pairs from the body.
 # The body class uses ``[^)]*`` so values containing literal ``)`` would
@@ -89,7 +90,7 @@ _RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F]{4,}(?:-[0-9a-f
 _RE_PRINT_START_PREFIX = re.compile(r"Print mode: starting \((?P<body>[^)]*)\)")
 _RE_PRINT_START_KV = re.compile(r'(?P<k>\w+)=(?:"(?P<qv>[^"]*)"|(?P<rv>[^,\s)]+))')
 _RE_RESUMING_CONV = re.compile(
-    r"Print mode: resuming conversation ([0-9a-fA-F]{4,}(?:-[0-9a-fA-F]{2,})*)"
+    r"Print mode: resuming conversation ([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{2,})*)"
 )
 _RE_NEW_CONV = re.compile(r"Starting new conversation \(agent=(true|false)\)")
 _RE_AUTO_FLUSH = re.compile(
@@ -338,14 +339,14 @@ class AgyPrintBackend(BaseAdapter):
         threads.append(
             threading.Thread(
                 target=_drain_stream,
-                args=(proc.stdout, ctx.stdout_buf, ctx, stdout_path, "stdout"),
+                args=(proc.stdout, ctx.stdout_buf, ctx, stdout_path, "stdout", self),
                 daemon=True,
             )
         )
         threads.append(
             threading.Thread(
                 target=_drain_stream,
-                args=(proc.stderr, ctx.stderr_buf, ctx, stderr_path, "stderr"),
+                args=(proc.stderr, ctx.stderr_buf, ctx, stderr_path, "stderr", self),
                 daemon=True,
             )
         )

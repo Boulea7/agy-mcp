@@ -196,7 +196,7 @@ class GeminiCliBackend(BaseAdapter):
         )
         stderr_thread = threading.Thread(
             target=_drain_stream,
-            args=(proc.stderr, ctx.stderr_buf, ctx, stderr_path, "stderr"),
+            args=(proc.stderr, ctx.stderr_buf, ctx, stderr_path, "stderr", self),
             daemon=True,
         )
         stdout_thread.start()
