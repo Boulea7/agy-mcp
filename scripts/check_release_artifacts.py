@@ -20,8 +20,7 @@ import re
 import sys
 import tarfile
 import zipfile
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
@@ -33,6 +32,7 @@ REQUIRED_SDIST_FILES: set[str] = {
     "LICENSE",
     "PKG-INFO",
     "README.md",
+    "CHANGELOG.md",
     "pyproject.toml",
     "docs/architecture.md",
     "docs/cli-capabilities.md",

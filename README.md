@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+[![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-479%20passed-brightgreen.svg)](#)
 [![English](https://img.shields.io/badge/English-README-blue.svg)](docs/README_EN.md)
 
@@ -161,6 +162,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 | [`docs/security.md`](docs/security.md) | 威胁模型、防护清单、明确不防御项 |
 | [`docs/cli-capabilities.md`](docs/cli-capabilities.md) | `agy --help` 实测 + capability 矩阵（CLI 升级时刷新） |
 | [`docs/examples.md`](docs/examples.md) | 6 个典型场景：review、prototype、long、continue、doctor、install |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录（Keep a Changelog 格式） |
 
 英文版 README：[`docs/README_EN.md`](docs/README_EN.md)。
 

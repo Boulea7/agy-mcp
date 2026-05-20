@@ -1,13 +1,17 @@
 # agy-mcp (English)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
+[![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-479%20passed-brightgreen.svg)](#)
+[![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-README-red.svg)](../README.md)
+
 > **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
 > to **Google Antigravity CLI** (`agy`).
 > Ships with capability detection, async long-task supervision,
 > dual-backend routing (`agy` + `gemini-cli` compatibility fallback),
 > safe-by-default execution, Codex / Antigravity skills, cross-platform
 > doctor, and a stable stream-json-compatible event schema.
-
-[Chinese README](../README.md).
 
 ---
 
@@ -181,6 +185,7 @@ that repo knows when to call `agy`:
 | [`security.md`](security.md) | Threat model, defence catalogue, explicit non-defences |
 | [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix (refresh when CLI is upgraded) |
 | [`examples.md`](examples.md) | 6 scenarios: review, prototype, long, continue, doctor, install |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | Version history (Keep a Changelog format) |
 
 ## Development
 
