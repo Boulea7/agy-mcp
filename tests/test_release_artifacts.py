@@ -43,3 +43,15 @@ def test_release_check_rejects_unexpected_sdist_extras():
         "unexpected file shipped: docs/internal-roadmap.md" in problem
         for problem in problems
     )
+
+
+def test_release_check_allows_hatchling_root_gitignore():
+    files = sorted(REQUIRED_SDIST_FILES | {".gitignore"})
+    problems = _check_files(
+        "agy-mcp.tar.gz",
+        files,
+        required=REQUIRED_SDIST_FILES,
+        allowed=ALLOWED_SDIST_FILES,
+    )
+
+    assert problems == []

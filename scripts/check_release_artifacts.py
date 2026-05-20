@@ -65,6 +65,11 @@ REQUIRED_SDIST_FILES: set[str] = {
 }
 
 ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
+    # Hatchling includes the root .gitignore in sdists even when public
+    # project files are whitelisted. It carries no local state or secrets, so
+    # allow it explicitly while keeping other dotdirs and private prompts
+    # forbidden below.
+    ".gitignore",
     "src/agy_mcp/py.typed",
     "src/agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
     "src/agy_mcp/_skill_bodies/claude/references/prompt-patterns.md",
