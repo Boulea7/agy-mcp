@@ -219,14 +219,13 @@ stream is always preserved in the session store's `events.jsonl` so
 
 ## Fail-fast on missing OAuth
 
-If `~/.gemini/oauth_creds.json` is absent, `agy --print` will hang for
-the full `--print-timeout` (5+ minutes) before failing. The bridge
-short-circuits this at request validation: `doctor.run()` checks the
-file presence and fails fast with the message
-`"Google OAuth credentials missing; run \`agy login\` before any
-non-dry-run invocation."`. The doctor also lstat's the credentials file
-and warns when it is a symlink or a non-regular file (e.g.
-`/dev/zero`).
+If `~/.gemini/oauth_creds.json` is absent or is not a regular file,
+`agy --print` can hang for the full `--print-timeout` before failing.
+The bridge and supervisor short-circuit non-dry-run agy invocations
+before spawning the CLI with
+`backend='agy' is not authenticated; run agy once and log in.`. The
+doctor uses the same lstat-style credential check and warns when the
+path is a symlink or a non-regular file.
 
 ## Future work
 

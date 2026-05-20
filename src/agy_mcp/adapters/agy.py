@@ -21,6 +21,7 @@ import json
 import os
 import re
 import subprocess
+import stat
 import threading
 import time
 from pathlib import Path
@@ -119,7 +120,7 @@ class AgyPrintBackend(BaseAdapter):
             bin_path=bin_path or "",
             backend="agy",
             version=None,
-            authenticated=AGY_OAUTH_CREDS_PATH.exists(),
+            authenticated=_is_regular_file(AGY_OAUTH_CREDS_PATH),
             model=self._discover_model(),
             warnings=[],
         )
@@ -925,6 +926,14 @@ def _scrub_probe_env() -> dict[str, str]:
     """Environment used only for capability probes; secrets stripped."""
 
     return scrub_env(dict(os.environ))
+
+
+def _is_regular_file(path: Path) -> bool:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode)
 
 
 __all__ = [

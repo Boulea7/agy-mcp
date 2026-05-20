@@ -46,7 +46,7 @@ Wrapper policy: set `AGY_CLI_DISABLE_AUTO_UPDATE=1` for reproducible CI; honor
 
 | Path | Purpose | Wrapper interaction |
 |---|---|---|
-| `~/.gemini/oauth_creds.json` | OAuth tokens | **Read existence only**; if missing → fail fast (else `agy --print` hangs silently). |
+| `~/.gemini/oauth_creds.json` | OAuth tokens | **lstat only**; must be a regular file or agy fails fast before spawn. |
 | `~/.gemini/settings.json` | Global Gemini-family settings | Read-only: `model.name`. |
 | `~/.gemini/antigravity-cli/settings.json` | CLI-specific overrides | Read-only: `model`, `toolPermission`, `artifactReviewPolicy`. |
 | `~/.gemini/antigravity-cli/log/cli-*.log` | klog operational log | Replaced per-invocation via `--log-file <tmp>`; tailed for lifecycle events. |

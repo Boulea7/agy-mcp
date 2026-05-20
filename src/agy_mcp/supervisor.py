@@ -254,6 +254,16 @@ class Supervisor:
                 cwd=str(cwd_path),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
+        if backend_name == "agy" and not cap.authenticated:
+            return BridgeResponse(
+                success=False,
+                error=self.safety.redact(
+                    "backend='agy' is not authenticated; run agy once and log in.",
+                ),
+                warnings=preflight_warnings,
+                cwd=str(cwd_path),
+                adapter=AdapterMetadata(backend=backend_name),
+            ).touch()
 
         # Reserve a concurrency slot before we even touch the session
         # store, so a slot rejection doesn't leak a half-populated record.

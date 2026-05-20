@@ -421,6 +421,14 @@ def _run_unsafe(
             cwd=str(cwd_path),
             adapter=_adapter_meta(adapter, request),
         ).touch()
+    if backend_name == "agy" and not cap.authenticated and not request.dry_run:
+        return BridgeResponse(
+            success=False,
+            error="backend='agy' is not authenticated; run agy once and log in.",
+            warnings=[*gate_warnings, *route_warnings, *cap.warnings],
+            cwd=str(cwd_path),
+            adapter=_adapter_meta(adapter, request),
+        ).touch()
 
     effective_cwd = cwd_path
     worktree_warnings: list[str] = []

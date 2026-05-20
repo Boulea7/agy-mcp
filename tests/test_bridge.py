@@ -1035,6 +1035,17 @@ def test_run_unsafe_no_backend_short_circuits(monkeypatch, tmp_path: Path):
     assert any("agy missing" in w for w in resp.warnings)
 
 
+def test_run_unsafe_agy_unauthenticated_short_circuits(monkeypatch, tmp_path: Path):
+    cap = _capability("agy", authenticated=False, warnings=["OAuth credentials missing"])
+    fake = _FakeAdapter(capability=cap, run_result=_result())
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+    request = BridgeRequest(prompt="x", cwd=str(tmp_path), backend="agy")
+    resp = _run(request, _default_config(worktree_default=False), _safety())
+    assert resp.success is False
+    assert "not authenticated" in (resp.error or "")
+    assert fake.run_calls == []
+
+
 def test_run_unsafe_adapter_run_raises_returns_structured_envelope(
     monkeypatch, tmp_path: Path,
 ):

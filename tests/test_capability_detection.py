@@ -105,6 +105,30 @@ def test_agy_probe_against_fake_help(tmp_path, monkeypatch):
     assert any("OAuth credentials missing" in w for w in cap.warnings)
 
 
+def test_agy_probe_auth_requires_regular_file(tmp_path, monkeypatch):
+    wrapper = tmp_path / "fake_agy"
+    wrapper.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_AGY_PRINT}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    target = tmp_path / "target-oauth.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "oauth-link.json"
+    link.symlink_to(target)
+
+    backend = AgyPrintBackend(bin_override=str(wrapper))
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", link)
+    cap = backend.detect()
+    assert cap.authenticated is False
+
+    real = tmp_path / "oauth-real.json"
+    real.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", real)
+    cap = backend.detect(refresh=True)
+    assert cap.authenticated is True
+
+
 def test_agy_probe_missing_binary_returns_warning(tmp_path, monkeypatch):
     backend = AgyPrintBackend(bin_override=str(tmp_path / "definitely-not-there"))
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")

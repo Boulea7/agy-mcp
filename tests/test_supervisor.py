@@ -131,6 +131,7 @@ def _capability(
     *,
     backend: BackendName = "agy",
     supports_log_file: bool = False,
+    authenticated: bool = True,
 ) -> Capability:
     return Capability(
         bin_path=bin_path,
@@ -143,7 +144,7 @@ def _capability(
         supports_streaming=False,
         supports_tool_events=False,
         model=None,
-        authenticated=True,
+        authenticated=authenticated,
         warnings=[],
     )
 
@@ -272,6 +273,19 @@ def test_start_short_circuits_when_backend_unavailable(tmp_path: Path):
     assert response.success is False
     assert "agy" in (response.error or "")
     # No job dir should have been created.
+    assert not any(tmp_path.iterdir())
+
+
+def test_start_short_circuits_when_agy_unauthenticated(tmp_path: Path):
+    cap = _capability(authenticated=False)
+    cap.warnings = ["OAuth credentials missing"]
+    adapter = _ScriptedAdapter(capability=cap, events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path), backend="agy")
+    response = supervisor.start(request)
+    assert response.success is False
+    assert "not authenticated" in (response.error or "")
+    assert not adapter.run_requests
     assert not any(tmp_path.iterdir())
 
 
