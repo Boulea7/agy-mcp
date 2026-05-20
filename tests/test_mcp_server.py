@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,12 @@ from agy_mcp.models import (
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
 from agy_mcp.supervisor import Supervisor
+
+
+def _run_async(coro):
+    """Drive an async tool to completion from a sync test body."""
+
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -168,11 +175,13 @@ def test_tool_descriptions_present():
 
 
 def test_agy_dry_run_returns_command_preview(reset_state, tmp_path: Path):
-    out = server.agy_tool(
-        PROMPT="hello",
-        cd=str(tmp_path),
-        dry_run=True,
-        debug=True,
+    out = _run_async(
+        server.agy_tool(
+            PROMPT="hello",
+            cd=str(tmp_path),
+            dry_run=True,
+            debug=True,
+        )
     )
     assert out["success"] is True
     assert isinstance(out["adapter"], dict)
@@ -180,16 +189,18 @@ def test_agy_dry_run_returns_command_preview(reset_state, tmp_path: Path):
 
 
 def test_agy_invalid_request_returns_structured_failure(reset_state, tmp_path: Path):
-    out = server.agy_tool(PROMPT="   ", cd=str(tmp_path))
+    out = _run_async(server.agy_tool(PROMPT="   ", cd=str(tmp_path)))
     assert out["success"] is False
     assert out["error"]
 
 
 def test_agy_continue_requires_session_id(reset_state, tmp_path: Path):
-    out = server.agy_continue_tool(
-        SESSION_ID="",
-        PROMPT="hi",
-        cd=str(tmp_path),
+    out = _run_async(
+        server.agy_continue_tool(
+            SESSION_ID="",
+            PROMPT="hi",
+            cd=str(tmp_path),
+        )
     )
     assert out["success"] is False
     assert "SESSION_ID" in (out["error"] or "")
@@ -303,3 +314,82 @@ def test_agy_install_skill_unknown_target_records_warning(reset_state, tmp_path:
     # which is caught at the tool-level guard and surfaced as error.
     assert out["success"] is False
     assert "nonsense" in (out["error"] or "")
+
+
+def test_agy_install_skill_rejects_invalid_scope(reset_state):
+    """Phase 5 R1 sec P1: tool guard refuses anything outside user/project."""
+
+    out = server.agy_install_skill_tool(targets=["claude"], scope="root")  # type: ignore[arg-type]
+    assert out["success"] is False
+    assert "scope" in (out["error"] or "")
+
+
+def test_agy_install_skill_rejects_missing_project_root(reset_state, tmp_path: Path):
+    """Phase 5 R1 sec P1: project_root must exist as a real directory."""
+
+    missing = tmp_path / "does-not-exist"
+    out = server.agy_install_skill_tool(
+        targets=["claude"], scope="project", project_root=str(missing),
+    )
+    assert out["success"] is False
+    assert "project_root" in (out["error"] or "")
+
+
+def test_agy_install_skill_rejects_symlinked_project_root(reset_state, tmp_path: Path):
+    """Phase 5 R1 sec P1: bare symlink at the leaf is refused."""
+
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    out = server.agy_install_skill_tool(
+        targets=["claude"], scope="project", project_root=str(link),
+    )
+    assert out["success"] is False
+    assert "symlink" in (out["error"] or "")
+
+
+def test_agy_install_skill_rejects_user_scope_antigravity(reset_state):
+    """Phase 5 R1 sec P1: user-scope antigravity write is refused."""
+
+    out = server.agy_install_skill_tool(targets=["antigravity"], scope="user")
+    # No installs land; the resolver records a warning that ``antigravity``
+    # is not a user-scope target, and install_skills surfaces an error so
+    # the caller sees ``success=False``.
+    assert out["success"] is False
+    assert not out["installed"]
+    assert any("antigravity" in w for w in out["warnings"])
+
+
+def test_agy_install_skill_all_excludes_antigravity(reset_state, tmp_path: Path):
+    """Phase 5 R1 sec P1: ``all`` must NOT install antigravity (opt-in only)."""
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    out = server.agy_install_skill_tool(
+        targets=["all"], scope="project", project_root=str(project),
+    )
+    assert out["success"] is True
+    paths = {entry["target"] for entry in out["installed"]}
+    assert "antigravity" not in paths
+    assert {"claude", "codex"} <= paths
+
+
+def test_agy_status_unknown_uses_structured_failure(reset_state):
+    """Phase 5 R1 arch P1.3: not-found surfaces in the standard envelope."""
+
+    out = server.agy_status_tool("job_does_not_exist_consistent_envelope")
+    assert out["success"] is False
+    assert "not found" in (out["error"] or "")
+    # The envelope is a BridgeResponse dump, so it has cwd/error keys, not
+    # the bare ``job_id`` field of the previous shape.
+    assert "cwd" in out
+    assert "error" in out
+
+
+def test_agy_status_rejects_oversized_job_id(reset_state):
+    """Phase 5 R1 P2: refuse multi-megabyte job_id values."""
+
+    out = server.agy_status_tool("x" * 4096)
+    assert out["success"] is False
+    assert "job_id" in (out["error"] or "")

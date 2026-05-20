@@ -11,7 +11,6 @@ operator's ``$HOME``-rooted path never lands in the MCP transcript.
 
 from __future__ import annotations
 
-import os
 import platform
 import shutil
 import sys
@@ -64,23 +63,30 @@ def run_doctor(
     *,
     config: Config | None = None,
     safety: SafetyPolicy | None = None,
+    agy_adapter: AgyPrintBackend | None = None,
+    gemini_adapter: GeminiCliBackend | None = None,
+    session_store: SessionStore | None = None,
 ) -> DoctorReport:
     """Run every probe and return a structured report.
 
     Never raises — a failing probe becomes a ``DoctorCheck`` with
-    ``ok=False`` and a redacted detail string.
+    ``ok=False`` and a redacted detail string. ``agy_adapter``,
+    ``gemini_adapter``, and ``session_store`` may be passed in so the
+    doctor reuses the MCP server's already-probed singletons instead
+    of paying for fresh ``--help`` / ``--version`` subprocess calls
+    on every invocation (Phase 5 R1 arch P1.5).
     """
 
     cfg = config or get_config()
     sft = safety or SafetyPolicy.from_config(cfg)
     checks: list[DoctorCheck] = []
 
-    checks.append(_check_python())
-    checks.append(_check_uv())
-    checks.extend(_check_backend(AgyPrintBackend, sft, label="agy"))
-    checks.extend(_check_backend(GeminiCliBackend, sft, label="gemini"))
+    checks.append(_check_python(sft))
+    checks.append(_check_uv(sft))
+    checks.extend(_check_backend(agy_adapter or AgyPrintBackend(safety=sft), sft, label="agy"))
+    checks.extend(_check_backend(gemini_adapter or GeminiCliBackend(safety=sft), sft, label="gemini"))
     checks.append(_check_auth(sft))
-    checks.append(_check_session_store(cfg, sft))
+    checks.append(_check_session_store(cfg, sft, store=session_store))
 
     healthy = all(c.ok or c.severity != "error" for c in checks)
     return DoctorReport(
@@ -96,38 +102,39 @@ def run_doctor(
 # ---------------------------------------------------------------------------
 
 
-def _check_python() -> DoctorCheck:
+def _check_python(safety: SafetyPolicy) -> DoctorCheck:
     major, minor = sys.version_info[:2]
     ok = (major, minor) >= (3, 11)
     return DoctorCheck(
         name="python",
         ok=ok,
         severity="error" if not ok else "info",
-        detail=f"detected Python {sys.version.split()[0]}; requires >= 3.11",
+        detail=safety.redact(
+            f"detected Python {sys.version.split()[0]}; requires >= 3.11",
+        ),
     )
 
 
-def _check_uv() -> DoctorCheck:
+def _check_uv(safety: SafetyPolicy) -> DoctorCheck:
     bin_path = shutil.which("uv")
     if bin_path:
         return DoctorCheck(
             name="uv",
             ok=True,
-            detail=f"found at {_anonymise(bin_path)}",
+            detail=safety.redact(f"found at {bin_path}"),
         )
     return DoctorCheck(
         name="uv",
         ok=False,
         severity="warning",
-        detail="uv not found on PATH; install via "
-               "https://docs.astral.sh/uv/getting-started/installation/",
+        detail=safety.redact(
+            "uv not found on PATH; install via "
+            "https://docs.astral.sh/uv/getting-started/installation/"
+        ),
     )
 
 
-def _check_backend(
-    adapter_cls, safety: SafetyPolicy, *, label: str,
-) -> list[DoctorCheck]:
-    adapter = adapter_cls(safety=safety)
+def _check_backend(adapter, safety: SafetyPolicy, *, label: str) -> list[DoctorCheck]:
     try:
         cap = adapter.detect()
     except Exception as exc:  # noqa: BLE001
@@ -194,9 +201,21 @@ def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
     )
 
 
-def _check_session_store(config: Config, safety: SafetyPolicy) -> DoctorCheck:
+def _check_session_store(
+    config: Config, safety: SafetyPolicy, *, store: SessionStore | None,
+) -> DoctorCheck:
+    if store is not None:
+        return DoctorCheck(
+            name="session_store",
+            ok=True,
+            detail=safety.redact(f"session store at {store.root}"),
+        )
+    # Fallback: instantiate one for the report. This will mkdir(0o700)
+    # the root, which is idempotent with the cold-start path used by
+    # the MCP server. (Phase 5 R1 P2: prefer the singleton when
+    # available so the doctor probe stays side-effect-free.)
     try:
-        store = SessionStore(Path(config.session_store_root()).expanduser())
+        fresh = SessionStore(Path(config.session_store_root()).expanduser())
     except Exception as exc:  # noqa: BLE001
         return DoctorCheck(
             name="session_store",
@@ -204,21 +223,11 @@ def _check_session_store(config: Config, safety: SafetyPolicy) -> DoctorCheck:
             severity="error",
             detail=safety.redact(f"session store init failed: {exc}"),
         )
-    root = store.root
     return DoctorCheck(
         name="session_store",
         ok=True,
-        detail=safety.redact(f"session store at {root}"),
+        detail=safety.redact(f"session store at {fresh.root}"),
     )
-
-
-def _anonymise(path: str) -> str:
-    """Best-effort home anonymisation, matching ``utils.anonymise_paths`` style."""
-
-    home = str(Path.home())
-    if path.startswith(home):
-        return path.replace(home, "~", 1)
-    return path
 
 
 __all__ = ["DoctorCheck", "DoctorReport", "run_doctor"]

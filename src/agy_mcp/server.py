@@ -12,10 +12,11 @@ Tools (all return dicts with stable keys; never raise across the wire):
 * ``agy_doctor`` — environment + capability probe.
 * ``agy_install_skill`` — write the scaffold skill into target dirs.
 
-Threading model: the FastMCP runtime drives tools from an asyncio loop;
-the :class:`agy_mcp.supervisor.Supervisor` lives behind its own
-``RLock`` and a per-job worker thread, so tool calls are safe to fan out
-without an extra serialisation layer in this module.
+Threading model: the FastMCP runtime drives tools from an asyncio loop and
+calls sync tool functions inline. ``agy`` and ``agy_continue`` would block
+that loop while ``_bridge_run`` waits on a subprocess, so they are declared
+``async def`` and dispatch the blocking work to a worker thread via
+:func:`anyio.to_thread.run_sync` (Phase 5 R1 arch P1.1).
 
 Every tool routes its output through :class:`SafetyPolicy` before
 serialisation — adapter buffers, capability warnings, and error strings
@@ -30,14 +31,23 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
 from agy_mcp import __version__
+from agy_mcp.adapters.agy import AgyPrintBackend
+from agy_mcp.adapters.gemini import GeminiCliBackend
 from agy_mcp.bridge import _run as _bridge_run
 from agy_mcp.config import Config, get_config
 from agy_mcp.doctor import run_doctor
 from agy_mcp.install import SkillScope, SkillTarget, install_skills
-from agy_mcp.models import BridgeRequest, BridgeResponse
+from agy_mcp.models import (
+    BackendName,
+    BridgeRequest,
+    BridgeResponse,
+    Mode,
+    OutputProtocol,
+)
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
 from agy_mcp.supervisor import Supervisor
@@ -53,6 +63,15 @@ _config: Config | None = None
 _safety: SafetyPolicy | None = None
 _store: SessionStore | None = None
 _supervisor: Supervisor | None = None
+# Cached adapters for the doctor probe so we don't pay 4 subprocess calls
+# (one help + one version per backend) on every ``agy_doctor`` invocation.
+# Phase 5 R1 arch P1.5.
+_agy_adapter: AgyPrintBackend | None = None
+_gemini_adapter: GeminiCliBackend | None = None
+
+# Defence-in-depth cap so a malicious or buggy caller can't burn unbounded
+# memory by passing a multi-megabyte string in place of a job_id slug.
+_MAX_JOB_ID_LEN = 256
 
 
 def _ensure_state() -> tuple[Config, SafetyPolicy, SessionStore, Supervisor]:
@@ -71,15 +90,38 @@ def _ensure_state() -> tuple[Config, SafetyPolicy, SessionStore, Supervisor]:
         return _config, _safety, _store, _supervisor
 
 
+def _ensure_adapters() -> tuple[AgyPrintBackend, GeminiCliBackend]:
+    """Lazily build doctor adapter singletons.
+
+    Each adapter probes its CLI exactly once (caching the result), so the
+    doctor probe can reuse them across calls instead of forking
+    ``agy --help`` / ``agy --version`` / ``gemini --help`` /
+    ``gemini --version`` every invocation. The MCP server is the only
+    caller; tests bypass this by passing fresh adapters directly to
+    ``run_doctor``.
+    """
+
+    global _agy_adapter, _gemini_adapter
+    _, safety, _store_, _supervisor_ = _ensure_state()
+    with _state_lock:
+        if _agy_adapter is None:
+            _agy_adapter = AgyPrintBackend(safety=safety)
+        if _gemini_adapter is None:
+            _gemini_adapter = GeminiCliBackend(safety=safety)
+        return _agy_adapter, _gemini_adapter
+
+
 def _reset_state_for_tests() -> None:
     """Drop the cached singletons so tests can swap in fresh stores."""
 
-    global _config, _safety, _store, _supervisor
+    global _config, _safety, _store, _supervisor, _agy_adapter, _gemini_adapter
     with _state_lock:
         _config = None
         _safety = None
         _store = None
         _supervisor = None
+        _agy_adapter = None
+        _gemini_adapter = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,16 +158,27 @@ def _build_request(payload: dict[str, Any]) -> BridgeRequest:
 def _structured_failure(safety: SafetyPolicy, exc: BaseException, *, cwd: str = "") -> dict[str, Any]:
     """Top-level guard: any tool exception becomes a structured envelope."""
 
-    text = safety.redact(str(exc))
     return BridgeResponse(
         success=False,
-        error=text,
-        cwd=cwd,
+        error=safety.redact(str(exc)),
+        cwd=safety.redact(cwd),
     ).model_dump(mode="json")
 
 
 def _response_to_dict(resp: BridgeResponse) -> dict[str, Any]:
     return resp.model_dump(mode="json")
+
+
+def _validate_job_id(safety: SafetyPolicy, job_id: str) -> str | None:
+    """Return a redacted error string if ``job_id`` is invalid, else None."""
+
+    if not job_id:
+        return safety.redact("job_id is required")
+    if len(job_id) > _MAX_JOB_ID_LEN:
+        return safety.redact(
+            f"job_id exceeds {_MAX_JOB_ID_LEN} chars; refusing to look up",
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -143,19 +196,19 @@ def _response_to_dict(resp: BridgeResponse) -> dict[str, Any]:
         "/ output_protocol options."
     ),
 )
-def agy_tool(
+async def agy_tool(
     PROMPT: str,
     cd: str = ".",
     SESSION_ID: str | None = None,
     model: str | None = None,
     sandbox: bool = False,
     return_all_messages: bool = False,
-    mode: str = "ask",
+    mode: Mode = "ask",
     timeout: int = 900,
     allow_write: bool = False,
     worktree: bool | None = None,
-    backend: str = "auto",
-    output_protocol: str = "claude",
+    backend: BackendName = "auto",
+    output_protocol: OutputProtocol = "claude",
     debug: bool = False,
     dry_run: bool = False,
     extra_env: dict[str, str] | None = None,
@@ -183,7 +236,12 @@ def agy_tool(
         )
     except Exception as exc:  # noqa: BLE001 - validation guard
         return _structured_failure(safety, exc, cwd=cd)
-    response = _bridge_run(request, config, safety)
+    # ``_bridge_run`` launches the agy subprocess and blocks until it
+    # finishes — offload to a worker thread so the FastMCP asyncio loop
+    # stays free to dispatch other tool calls. (Phase 5 R1 arch P1.1)
+    response = await anyio.to_thread.run_sync(
+        _bridge_run, request, config, safety,
+    )
     return _response_to_dict(response)
 
 
@@ -200,19 +258,19 @@ def agy_tool(
         "Antigravity conversation."
     ),
 )
-def agy_continue_tool(
+async def agy_continue_tool(
     SESSION_ID: str,
     PROMPT: str,
     cd: str = ".",
     model: str | None = None,
     sandbox: bool = False,
     return_all_messages: bool = False,
-    mode: str = "ask",
+    mode: Mode = "ask",
     timeout: int = 900,
     allow_write: bool = False,
     worktree: bool | None = None,
-    backend: str = "auto",
-    output_protocol: str = "claude",
+    backend: BackendName = "auto",
+    output_protocol: OutputProtocol = "claude",
     debug: bool = False,
     dry_run: bool = False,
     extra_env: dict[str, str] | None = None,
@@ -244,7 +302,9 @@ def agy_continue_tool(
         )
     except Exception as exc:  # noqa: BLE001
         return _structured_failure(safety, exc, cwd=cd)
-    response = _bridge_run(request, config, safety)
+    response = await anyio.to_thread.run_sync(
+        _bridge_run, request, config, safety,
+    )
     return _response_to_dict(response)
 
 
@@ -267,12 +327,12 @@ def agy_start_tool(
     SESSION_ID: str | None = None,
     model: str | None = None,
     sandbox: bool = False,
-    mode: str = "ask",
+    mode: Mode = "ask",
     timeout: int = 900,
     allow_write: bool = False,
     worktree: bool | None = None,
-    backend: str = "auto",
-    output_protocol: str = "claude",
+    backend: BackendName = "auto",
+    output_protocol: OutputProtocol = "claude",
     debug: bool = False,
     extra_env: dict[str, str] | None = None,
     job_id: str | None = None,
@@ -300,6 +360,10 @@ def agy_start_tool(
         )
     except Exception as exc:  # noqa: BLE001
         return _structured_failure(safety, exc, cwd=cd)
+    if job_id is not None:
+        err = _validate_job_id(safety, job_id)
+        if err is not None:
+            return _structured_failure(safety, ValueError(err), cwd=cd)
     try:
         response = supervisor.start(request, job_id=job_id)
     except Exception as exc:  # noqa: BLE001 - top-level guard
@@ -318,16 +382,20 @@ def agy_start_tool(
 )
 def agy_status_tool(job_id: str) -> dict[str, Any]:
     config, safety, _store_, supervisor = _ensure_state()
+    err = _validate_job_id(safety, job_id)
+    if err is not None:
+        return _structured_failure(safety, ValueError(err))
     try:
         record = supervisor.status(job_id)
     except Exception as exc:  # noqa: BLE001
         return _structured_failure(safety, exc)
     if record is None:
-        return {
-            "success": False,
-            "error": safety.redact(f"job_id {job_id!r} not found"),
-            "job_id": job_id,
-        }
+        # Use the same envelope shape as other failures so consumers can
+        # rely on ``success/error`` keys regardless of why the lookup
+        # failed. (Phase 5 R1 arch P1.3)
+        return _structured_failure(
+            safety, ValueError(f"job_id {job_id!r} not found"),
+        )
     return {"success": True, "record": record.model_dump(mode="json")}
 
 
@@ -350,6 +418,9 @@ def agy_read_tool(
     translate: str | None = None,
 ) -> dict[str, Any]:
     config, safety, _store_, supervisor = _ensure_state()
+    err = _validate_job_id(safety, job_id)
+    if err is not None:
+        return _structured_failure(safety, ValueError(err))
     try:
         if translate is None:
             events = supervisor.read_events(job_id, since=since)
@@ -387,6 +458,9 @@ def agy_read_tool(
 )
 def agy_cancel_tool(job_id: str) -> dict[str, Any]:
     config, safety, _store_, supervisor = _ensure_state()
+    err = _validate_job_id(safety, job_id)
+    if err is not None:
+        return _structured_failure(safety, ValueError(err))
     try:
         signalled = supervisor.cancel(job_id)
     except Exception as exc:  # noqa: BLE001
@@ -433,9 +507,19 @@ def agy_sessions_tool(limit: int = 50) -> dict[str, Any]:
     ),
 )
 def agy_doctor_tool() -> dict[str, Any]:
-    config, safety, _store_, _supervisor_ = _ensure_state()
+    config, safety, store, _supervisor_ = _ensure_state()
     try:
-        report = run_doctor(config=config, safety=safety)
+        agy_adapter, gemini_adapter = _ensure_adapters()
+    except Exception as exc:  # noqa: BLE001 - never let init crash the tool
+        return _structured_failure(safety, exc)
+    try:
+        report = run_doctor(
+            config=config,
+            safety=safety,
+            agy_adapter=agy_adapter,
+            gemini_adapter=gemini_adapter,
+            session_store=store,
+        )
     except Exception as exc:  # noqa: BLE001
         return _structured_failure(safety, exc)
     return {"success": True, "report": report.to_dict(), "version": __version__}
@@ -451,23 +535,28 @@ def agy_doctor_tool() -> dict[str, Any]:
     description=(
         "Install the agy-mcp collaboration skill into one or more agent "
         "platforms. ``targets`` may include 'claude', 'codex', "
-        "'antigravity', or 'all' (default). ``scope`` is 'user' (default) "
-        "or 'project'; project scope requires ``project_root``."
+        "'antigravity', or 'all' (default expands to claude+codex; "
+        "antigravity is opt-in via an explicit target list). ``scope`` is "
+        "'user' (default) or 'project'; project scope requires "
+        "``project_root``."
     ),
 )
 def agy_install_skill_tool(
     targets: list[str] | None = None,
-    scope: str = "user",
+    scope: SkillScope = "user",
     project_root: str | None = None,
 ) -> dict[str, Any]:
     config, safety, _store_, _supervisor_ = _ensure_state()
-    chosen_targets = targets or ["all"]
+    if scope not in ("user", "project"):
+        return _structured_failure(
+            safety, ValueError(f"scope must be 'user' or 'project', got {scope!r}"),
+        )
+    chosen_targets = targets if targets else ["all"]
     try:
         validated_targets: list[SkillTarget] = [t for t in chosen_targets]  # type: ignore[list-item]
-        validated_scope: SkillScope = scope  # type: ignore[assignment]
         result = install_skills(
             targets=validated_targets,
-            scope=validated_scope,
+            scope=scope,
             project_root=Path(project_root) if project_root else None,
             safety=safety,
         )

@@ -1,14 +1,25 @@
 """Minimal Phase 5 skill installer — writes scaffold SKILL.md files to target dirs.
 
 Phase 7 will replace the placeholder bodies with the full skill content
-described in ``docs/`` and add per-platform path discovery (Claude
-project root, Codex .agents, Antigravity HOME). For Phase 5 we only need
-the shape the MCP ``agy_install_skill`` tool returns: a structured list
-of installed files plus any warnings.
+described in ``docs/`` and audit the per-platform path discovery once
+the Antigravity CLI actually documents a skills load path. For Phase 5
+we only need the shape the MCP ``agy_install_skill`` tool returns: a
+structured list of installed files plus any warnings.
 
-The scaffold is intentionally short so a Phase 7 rewrite cannot leave a
-half-installed skill on disk — every file is overwritten with the same
-content idempotently.
+Hardening landed in Phase 5 R1:
+
+* The ``antigravity`` user-scope target was REMOVED because the planned
+  write location (`~/.gemini/antigravity-cli/skills`) violates the
+  user's standing rule "不修改 ~/.gemini/ 下任何文件" and the agy CLI
+  has no documented skill load path. Phase 7 will pick a wrapper-owned
+  directory (e.g. ``~/.agy/skills``) once the Antigravity team
+  publishes one.
+* ``project_root`` is validated: it must be an existing directory whose
+  resolved path is itself, not a symlink, and the resulting
+  ``<root>/<scope-dir>/<skill>/SKILL.md`` path must remain inside the
+  resolved root.
+* Writes go through :func:`safe_write_text` so a pre-planted symlink at
+  the destination cannot redirect the scaffold body.
 """
 
 from __future__ import annotations
@@ -19,6 +30,7 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 from agy_mcp.safety import SafetyPolicy
+from agy_mcp.utils import safe_write_text
 
 SkillTarget = Literal["claude", "codex", "antigravity", "all"]
 SkillScope = Literal["user", "project"]
@@ -86,23 +98,53 @@ def install_skills(
     """
 
     sft = safety or SafetyPolicy()
-    chosen = _expand_targets(targets)
-    if scope == "project" and project_root is None:
-        return InstallResult(error=sft.redact("scope='project' requires project_root"))
+    if scope not in ("user", "project"):
+        return InstallResult(error=sft.redact(f"scope must be 'user' or 'project', got {scope!r}"))
+    try:
+        chosen = _expand_targets(targets)
+    except ValueError as exc:
+        return InstallResult(error=sft.redact(str(exc)))
+
+    validated_root: Path | None = None
+    if scope == "project":
+        if project_root is None:
+            return InstallResult(error=sft.redact("scope='project' requires project_root"))
+        try:
+            validated_root = _validate_project_root(project_root)
+        except ValueError as exc:
+            return InstallResult(error=sft.redact(str(exc)))
 
     result = InstallResult()
     for target in chosen:
         try:
-            target_dir = _resolve_target_dir(target, scope, project_root)
+            target_dir = _resolve_target_dir(target, scope, validated_root)
         except ValueError as exc:
             result.warnings.append(sft.redact(str(exc)))
             continue
         skill_dir = target_dir / "collaborating-with-antigravity"
         skill_file = skill_dir / "SKILL.md"
+        if scope == "project":
+            # Containment check: the resolved skill_file must remain
+            # under validated_root. Defense in depth against a target
+            # name that snuck a ``..`` past _resolve_target_dir.
+            assert validated_root is not None
+            try:
+                resolved_target = (target_dir).resolve()
+                resolved_target.relative_to(validated_root)
+            except (OSError, ValueError):
+                result.warnings.append(
+                    sft.redact(f"skill dir {skill_dir} escapes project_root"),
+                )
+                continue
+            # Refuse to write through a pre-existing symlinked skill_dir.
+            if skill_dir.exists() and skill_dir.is_symlink():
+                result.warnings.append(
+                    sft.redact(f"refusing to write through symlinked skill_dir {skill_dir}"),
+                )
+                continue
         try:
-            skill_dir.mkdir(parents=True, exist_ok=True)
             overwrote = skill_file.exists()
-            skill_file.write_text(_PLACEHOLDER_BODY, encoding="utf-8")
+            safe_write_text(skill_file, _PLACEHOLDER_BODY, mode=0o644)
         except OSError as exc:
             result.warnings.append(sft.redact(f"install to {skill_file} failed: {exc}"))
             continue
@@ -115,8 +157,15 @@ def install_skills(
             )
         )
 
-    if not result.installed and not result.warnings:
-        result.error = sft.redact("no targets installed")
+    if not result.installed:
+        # Surface as failure even when warnings exist, so a caller that
+        # asked for ``targets=["antigravity"], scope="user"`` (rejected
+        # by the user-scope target list) gets ``success=False`` rather
+        # than a silent no-op. Phase 5 R1 sec P1.
+        if result.warnings:
+            result.error = sft.redact("no targets installed (see warnings)")
+        else:
+            result.error = sft.redact("no targets installed")
     return result
 
 
@@ -125,10 +174,13 @@ def install_skills(
 # ---------------------------------------------------------------------------
 
 
+# Phase 5 R1 sec P1: ``antigravity`` user-scope target removed — writing
+# under ~/.gemini/ violates the user's standing rule, and the agy CLI
+# does not document a skill load path today. Phase 7 will replace this
+# with a wrapper-owned directory.
 _USER_SKILL_DIRS: dict[str, Path] = {
     "claude": Path.home() / ".claude" / "skills",
     "codex": Path.home() / ".agents" / "skills",
-    "antigravity": Path.home() / ".gemini" / "antigravity-cli" / "skills",
 }
 
 _PROJECT_SKILL_DIRS: dict[str, Path] = {
@@ -139,11 +191,16 @@ _PROJECT_SKILL_DIRS: dict[str, Path] = {
 
 
 def _expand_targets(targets: Iterable[SkillTarget]) -> list[str]:
+    """Expand ``"all"`` to the supported target list for the current scope."""
+
     out: list[str] = []
     for t in targets:
         if t == "all":
-            out.extend(["claude", "codex", "antigravity"])
-        elif t in _USER_SKILL_DIRS:
+            # ``all`` only expands to user-scope-safe targets. The
+            # antigravity project-scope target is opt-in via an
+            # explicit ``targets=["antigravity"]``.
+            out.extend(["claude", "codex"])
+        elif t in _PROJECT_SKILL_DIRS or t in _USER_SKILL_DIRS:
             out.append(t)
         else:
             raise ValueError(f"unknown skill target: {t!r}")
@@ -154,6 +211,33 @@ def _expand_targets(targets: Iterable[SkillTarget]) -> list[str]:
             deduped.append(t)
             seen.add(t)
     return deduped
+
+
+def _validate_project_root(project_root: Path) -> Path:
+    """Ensure ``project_root`` is an existing real directory, not a symlink.
+
+    The MCP caller controls this path, so we refuse anything that
+    could expand the install blast radius:
+
+    - Path must exist and be a directory.
+    - The resolved path must equal the unresolved path (refuses bare
+      symlinks at the leaf).
+    - We do NOT enforce an allowlist of legal roots — the operator
+      gave us this path and bears responsibility for it; we just make
+      sure we can't be tricked into writing through a symlink.
+    """
+
+    try:
+        resolved = project_root.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(
+            f"project_root does not resolve to a real path: {project_root}: {exc}",
+        ) from exc
+    if not resolved.is_dir():
+        raise ValueError(f"project_root is not a directory: {project_root}")
+    if project_root.expanduser().is_symlink():
+        raise ValueError(f"project_root is a symlink, refusing: {project_root}")
+    return resolved
 
 
 def _resolve_target_dir(target: str, scope: str, project_root: Path | None) -> Path:
