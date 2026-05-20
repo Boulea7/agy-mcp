@@ -26,10 +26,12 @@ the doctor report, and every install / status / cancel envelope.
 
 ## Env scrub list
 
-`SafetyPolicy` drops these env names before spawning a child:
+`SafetyPolicy` drops these env names before spawning a child (full
+canonical list in `src/agy_mcp/safety.py::DEFAULT_SCRUB_ENV_NAMES`):
 
 ```
-ANTHROPIC_API_KEY  OPENAI_API_KEY  GEMINI_API_KEY  GOOGLE_API_KEY
+ANTHROPIC_API_KEY  OPENAI_API_KEY  GEMINI_API_KEY
+GOOGLE_API_KEY  GOOGLE_APPLICATION_CREDENTIALS
 GITHUB_TOKEN  GH_TOKEN  GITHUB_PAT  GITLAB_TOKEN
 HF_TOKEN  HUGGINGFACE_TOKEN
 AWS_ACCESS_KEY_ID  AWS_SECRET_ACCESS_KEY  AWS_SESSION_TOKEN
@@ -37,9 +39,9 @@ AZURE_OPENAI_API_KEY  AZURE_CLIENT_SECRET  VERTEX_AI_API_KEY
 DATABRICKS_TOKEN  STRIPE_API_KEY
 SLACK_BOT_TOKEN  SLACK_USER_TOKEN
 NPM_TOKEN  PYPI_TOKEN
-DATABASE_URL  DATABASE_URI  REDIS_URL  MONGODB_URI  POSTGRES_URL
+DATABASE_URL  DATABASE_URI  REDIS_URL
+MONGODB_URI  POSTGRES_URL
 KUBECONFIG  SENTRY_DSN  VAULT_TOKEN  KAGGLE_KEY
-GOOGLE_APPLICATION_CREDENTIALS
 ```
 
 Extend the list in `~/.config/agy-mcp/config.toml`:
@@ -56,10 +58,14 @@ The policy denies obvious destructive patterns regardless of `mode`:
 - `rm -rf /` and family
 - `dd if=… of=/dev/…`
 - `:(){ :|:& };:` fork bombs
-- Writing to `~/.ssh/authorized_keys`, `~/.aws/credentials`, etc.
+- `chmod 777` against system paths
+- `mkfs` against block devices
 
-`mode="execute"` upgrades sensitive-read patterns from warning to block
-(reading `~/.ssh` keys, browser cookies, OS keychains).
+Sensitive-path mentions (`~/.ssh`, `~/.aws/credentials`, browser
+cookies, OS keychain entries) are **warned** in `ask` / `plan` /
+`review` modes and **blocked** in `execute` mode. The block is
+substring-based, so a prompt that reads, writes, or even mentions
+these paths in `execute` is refused.
 
 ## Worktree behaviour
 
@@ -109,6 +115,11 @@ Retention is governed by `session_store.retention_days` (default 30).
   tampering — the doctor only checks file shape.
 - A local attacker who can edit `~/.config/agy-mcp/config.toml` can
   disable safety. Treat the config file as sensitive.
+- A local attacker who can set ``AGY_BRIDGE_CMD`` in the operator's
+  environment runs as the operator — this env var is a **trust
+  boundary**, since the skill forwarder splits and executes its
+  value verbatim. Vet anything that exports it (`.envrc`, `direnv`,
+  shell init files) before trusting the bridge invocation.
 - We do not attempt to defeat a hostile `agy` binary; if PATH is
   poisoned, we run the wrong binary. The doctor reports the resolved
   path; verify it before trusting the session.

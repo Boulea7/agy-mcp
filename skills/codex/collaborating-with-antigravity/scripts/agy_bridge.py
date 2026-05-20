@@ -6,10 +6,14 @@ agy-mcp package alongside the skill; instead we prefer ``uvx`` which
 installs the wheel on demand from the user's pinned source.
 
 Selection order:
-  1. ``AGY_BRIDGE_CMD`` env var (full shell command, advanced override).
+  1. ``AGY_BRIDGE_CMD`` env var (full shell command, advanced override —
+     **trust boundary**, see references/security.md).
   2. ``python -m agy_mcp.bridge`` if importable from the current env.
-  3. ``uvx --from git+https://github.com/Boulea7/agy-mcp.git agy-bridge``
-     as the last-resort install-on-demand fallback.
+  3. ``uvx --from git+https://github.com/Boulea7/agy-mcp.git@main
+     agy-bridge`` as the last-resort install-on-demand fallback. The
+     ``@main`` pin guards against the URL being silently re-pointed by
+     a force-push; bump it to a tag (e.g. ``@v0.1.0``) when a release
+     ships.
 
 All argv is forwarded verbatim. We do NOT parse the bridge response —
 the caller (the Claude agent) reads the JSON line and decides what to do.
@@ -23,7 +27,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 
 def _has_module(name: str) -> bool:
@@ -52,7 +55,7 @@ def _select_command(argv: list[str]) -> list[str]:
         return [
             "uvx",
             "--from",
-            "git+https://github.com/Boulea7/agy-mcp.git",
+            "git+https://github.com/Boulea7/agy-mcp.git@main",
             "agy-bridge",
             *argv,
         ]
@@ -61,9 +64,11 @@ def _select_command(argv: list[str]) -> list[str]:
     err = {
         "success": False,
         "error": (
-            "agy-bridge not found. Install with `uv tool install --from "
-            "git+https://github.com/Boulea7/agy-mcp.git agy-mcp` or set "
-            "AGY_BRIDGE_CMD to a full shell command."
+            "agy-bridge not found. Install `uv` first "
+            "(https://docs.astral.sh/uv/getting-started/installation/), "
+            "then `uv tool install --from "
+            "git+https://github.com/Boulea7/agy-mcp.git@main agy-mcp`, "
+            "or set AGY_BRIDGE_CMD to a full shell command."
         ),
     }
     print(json.dumps(err, ensure_ascii=False))

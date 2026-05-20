@@ -90,7 +90,8 @@ unchanged. Pick the one that matches your downstream parser.
 - Secrets are scrubbed from every response and log via `SafetyPolicy`.
 - `--allow-write` is required for any mutation; safety policy denies
   destructive prompts even with the flag.
-- All process exits are reported with `exit_code` and `duration_ms`.
+- Long jobs expose `exit_code` and timing on the `JobRecord` returned
+  by `agy_status`.
 
 ## Detailed references
 

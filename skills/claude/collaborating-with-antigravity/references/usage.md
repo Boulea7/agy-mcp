@@ -10,10 +10,11 @@ semantics.
 agy-bridge --PROMPT <text> --cd <dir>
           [--SESSION_ID <id>] [--mode ask|plan|prototype|review|execute|browser|long]
           [--model <name>] [--sandbox] [--allow-write]
-          [--worktree / --no-worktree]
+          [--worktree default|true|false]
           [--backend auto|agy|gemini]
           [--output-protocol claude|raw|codex]
-          [--timeout <seconds>] [--return-all-messages]
+          [--timeout <seconds>] [--max-output-chars <int>]
+          [--return-all-messages]
           [--detach] [--dry-run] [--debug]
           [--extra-env KEY=value ...]
 ```
@@ -22,12 +23,15 @@ Notable defaults:
 
 - `--timeout` defaults to `900` seconds (15 min). Use a longer value for
   `long` mode or set `--detach` instead.
-- `--worktree` is auto-decided: `execute` + `--allow-write` triggers it
-  unless `--no-worktree` is set or the config disables it.
+- `--worktree default` (the default) lets config / env decide; pass
+  `--worktree true` to force-on or `--worktree false` to force-off.
 - `--backend auto` chooses `agy` when available, falling back to `gemini`
   when only `gemini` is on PATH.
 - `--output-protocol claude` is best for Claude Code; `codex` for OpenAI
   Codex; `raw` when you want canonical envelopes.
+- `--max-output-chars` caps the size of the buffered `agent_messages`
+  field (default `60000`); the bridge truncates with a marker rather
+  than returning the full buffer.
 
 ## Long jobs (start / status / read / cancel)
 

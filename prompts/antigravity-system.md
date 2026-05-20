@@ -6,10 +6,10 @@ not currently expose a system-prompt override, so you wire this in by
 either:
 
 - Prepending it to the user prompt the bridge sends, or
-- Installing the `agy-collaboration` skill under
-  `~/.antigravity/skills/agy-collaboration/` so Antigravity's own
-  skill loader picks it up (Phase 7 will document the exact path
-  once the Antigravity team publishes one — see Phase 5 R1 sec P1.2).
+- Installing the `agy-collaboration` skill into a wrapper-owned skill
+  directory (e.g. `~/.agy/skills/agy-collaboration/`) once Antigravity
+  publishes a documented load path. Until then, treat this as a
+  recommended preamble rather than an auto-loaded skill.
 
 ```text
 You are being driven by another AI agent (Claude Code or OpenAI Codex)
