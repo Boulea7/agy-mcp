@@ -827,3 +827,38 @@ def test_agy_status_job_id_pattern_aligned_with_store(reset_state):
     out = server.agy_status_tool("z" * 96)
     assert out["success"] is False
     assert "job_id" in (out["error"] or "")
+
+
+def test_agy_read_translate_schema_is_anyof_enum_or_null(reset_state):
+    """Phase 5 R3 P3.13: lock the agy_read.translate JSON schema shape.
+
+    The MCP tool surface advertises ``translate: OutputProtocol | None``;
+    pydantic generates an ``anyOf [{enum}, {null}]`` block on top of the
+    ``default: null``. A future pydantic / FastMCP upgrade that
+    flattened this back to a bare ``string`` would silently break
+    clients that branch on the null-default. Pin the shape with a
+    schema-level assertion rather than waiting for an integration
+    regression.
+    """
+
+    import asyncio
+
+    async def _get_schema() -> dict:
+        tools = await server.mcp.list_tools()
+        for t in tools:
+            if t.name == "agy_read":
+                return t.inputSchema
+        raise AssertionError("agy_read not registered with MCP server")
+
+    schema = asyncio.run(_get_schema())
+    translate = schema["properties"]["translate"]
+    assert translate["default"] is None
+    assert "anyOf" in translate, (
+        "translate field should keep its anyOf [enum, null] shape; "
+        "found flattened schema: " + repr(translate)
+    )
+    branches = translate["anyOf"]
+    enum_branch = next(b for b in branches if "enum" in b)
+    null_branch = next(b for b in branches if b.get("type") == "null")
+    assert set(enum_branch["enum"]) == {"raw", "claude", "codex"}
+    assert null_branch == {"type": "null"}

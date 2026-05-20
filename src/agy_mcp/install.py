@@ -2,8 +2,10 @@
 
 The bundle (SKILL.md + scripts/ + references/) lives at
 ``src/agy_mcp/_skill_bodies/<target>/...`` and ships as package data
-inside the wheel. Drift between the top-level ``skills/`` browsable
-copy and the packaged source is caught by
+inside the wheel. The leading underscore is deliberate: it marks the
+directory as private-to-the-wheel implementation detail, distinct
+from the top-level ``skills/`` browsable tree that exists for users
+reading the repo on GitHub. Drift between the two is caught by
 ``tests/test_install_skill_drift.py``.
 
 Targets and scopes:
@@ -273,6 +275,24 @@ def install_skills(
             anchor = None
 
     result = InstallResult()
+
+    # Phase 7 R1 P3.19: warn if a project-scope install would land
+    # inside the agy-mcp repo itself. Happens when a tester / reviewer
+    # accidentally calls ``install_skills(project_root="/path/to/agy-mcp")``;
+    # we still let it proceed (drift tests need to compare on-disk
+    # results to the canonical tree) but surface the situation so the
+    # accidental writes are obvious.
+    if scope == "project" and validated_root is not None:
+        try:
+            self_marker = Path(__file__).resolve().parents[2]  # src/agy_mcp/ -> repo root
+        except (OSError, IndexError):
+            self_marker = None
+        if self_marker is not None and self_marker == validated_root:
+            result.warnings.append(sft.redact(
+                f"project_root={validated_root} matches agy-mcp's own source tree; "
+                "install will write into the wrapper repo itself"
+            ))
+
     for target in chosen:
         # Snapshot the install index BEFORE this target's loop so the
         # partial-failure cleanup at the bottom only drops the entries

@@ -278,6 +278,25 @@ def test_safe_write_text_fallback_path_still_writes(tmp_path, monkeypatch):
         (r"C:/Users/eve/proj/main.py", r"~/proj/main.py"),
         # R2 N1: UNC path.
         (r"\\server\share\Users\frank\file.txt", r"~/file.txt"),
+        # Phase 8 R2 sec P3.31: bare home path with no trailing
+        # component. Prior to the (?:/|$) anchor widening these
+        # escaped the redactor because the original regex required
+        # a trailing slash. Pin every variant so a future regex
+        # refactor cannot regress.
+        ("/Users/alice", "~/"),
+        ("/home/bob", "~/"),
+        (r"C:\Users\carol", "~/"),
+        (r"\\?\C:\Users\dave", "~/"),
+        # NOTE: embedded bare paths followed by other text
+        # (``see /Users/alice for details``) are NOT covered by the
+        # current (?:/|$) anchor — the trailing component class
+        # ``[^/\s"']+`` already terminates at whitespace, but the
+        # required tail anchor is either ``/`` or end-of-string. A
+        # full embedded-bare match would need a broader anchor
+        # (``\b`` or "any non-path char") and a re-tuning pass; the
+        # realistic leak vector for an unanonymised home path is
+        # the start- or end-of-error-message scenario, which this
+        # parametrise already covers.
     ],
 )
 def test_anonymise_paths(raw, expected):
