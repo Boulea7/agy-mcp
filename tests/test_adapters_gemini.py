@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -203,6 +204,21 @@ def test_run_translates_stream_json_to_canonical_events(tmp_path, monkeypatch):
     # success result emitted because exit code 0.
     assert result.events[-1].type == "result"
     assert result.events[-1].subtype == "success"
+
+
+def test_run_terminates_after_turn_completed(tmp_path, monkeypatch):
+    wrapper = _wrapper(tmp_path)
+    monkeypatch.setenv("GEMINI_TEST_HANG_AFTER_COMPLETED", "5")
+    backend = GeminiCliBackend(bin_override=str(wrapper))
+    req = BridgeRequest(prompt="hi", cwd=str(tmp_path), timeout=10)
+    start = time.monotonic()
+    result = backend.run(req)
+    elapsed = time.monotonic() - start
+    assert result.exit_code == 0
+    assert elapsed < 3
+    assert result.events[-1].type == "result"
+    assert result.events[-1].subtype == "success"
+    assert result.events[-1].metadata["terminated_after_turn_completed"] is True
 
 
 def test_run_surfaces_decode_failures(tmp_path, monkeypatch):

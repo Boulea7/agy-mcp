@@ -110,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
         "event": "turn.completed",
         "thread_id": session,
     })
+    hang_after_completed = float(os.environ.get("GEMINI_TEST_HANG_AFTER_COMPLETED", "0") or 0)
+    if hang_after_completed > 0:
+        time.sleep(hang_after_completed)
 
     return exit_code
 

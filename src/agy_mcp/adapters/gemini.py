@@ -42,6 +42,7 @@ from agy_mcp.utils import (
 
 GEMINI_BINARY_NAME = "gemini"
 GEMINI_HELP_TIMEOUT_S = 10
+_TURN_COMPLETED_GRACE_S = 0.3
 
 
 class GeminiCliBackend(BaseAdapter):
@@ -202,9 +203,10 @@ class GeminiCliBackend(BaseAdapter):
                 artifacts=[],
             )
 
+        turn_completed = threading.Event()
         stdout_thread = threading.Thread(
             target=_stream_json_reader,
-            args=(proc.stdout, ctx, self),
+            args=(proc.stdout, ctx, self, turn_completed),
             daemon=True,
         )
         stderr_thread = threading.Thread(
@@ -219,11 +221,21 @@ class GeminiCliBackend(BaseAdapter):
         exit_code: int | None = None
         timed_out = False
         cancelled = False
+        completed_after_turn = False
+        turn_completed_at: float | None = None
         try:
             while True:
                 if proc.poll() is not None:
                     exit_code = proc.returncode
                     break
+                if turn_completed.is_set():
+                    if turn_completed_at is None:
+                        turn_completed_at = time.time()
+                    elif time.time() - turn_completed_at >= _TURN_COMPLETED_GRACE_S:
+                        completed_after_turn = True
+                        _shutdown_cascade(proc, escalation_cancel_event=None)
+                        exit_code = 0
+                        break
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
                     self._emit(
@@ -276,14 +288,18 @@ class GeminiCliBackend(BaseAdapter):
         stderr_text = "".join(ctx.stderr_buf)
         duration_ms = int((time.time() - start) * 1000)
 
-        if exit_code == 0 and not timed_out and not cancelled:
+        if (exit_code == 0 or completed_after_turn) and not timed_out and not cancelled:
             self._emit(
                 ctx,
                 CanonicalEvent(
                     type="result",
                     subtype="success",
                     session_id=ctx.seen_session_id[0],
-                    metadata={"duration_ms": duration_ms, "exit_code": exit_code},
+                    metadata={
+                        "duration_ms": duration_ms,
+                        "exit_code": exit_code,
+                        "terminated_after_turn_completed": completed_after_turn,
+                    },
                 ),
             )
         else:
@@ -359,7 +375,12 @@ _FIELD_TEXT = ("text", "content", "message")
 _FIELD_SESSION = ("session_id", "sessionId", "id", "thread_id")
 
 
-def _stream_json_reader(stream, ctx: _RunContext, adapter: GeminiCliBackend) -> None:
+def _stream_json_reader(
+    stream,
+    ctx: _RunContext,
+    adapter: GeminiCliBackend,
+    turn_completed: threading.Event | None = None,
+) -> None:
     if stream is None:
         return
     while not ctx.stop_event.is_set():
@@ -386,6 +407,9 @@ def _stream_json_reader(stream, ctx: _RunContext, adapter: GeminiCliBackend) -> 
         event = _translate_gemini_event(payload, ctx)
         if event is not None:
             adapter._emit(ctx, event)
+            if event.type == "result" and event.subtype == "turn_completed":
+                if turn_completed is not None:
+                    turn_completed.set()
 
 
 def _translate_gemini_event(payload: dict, ctx: _RunContext) -> CanonicalEvent | None:
