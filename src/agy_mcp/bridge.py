@@ -29,7 +29,6 @@ import tempfile
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any
 
 from agy_mcp.adapters import (
     AgyPrintBackend,
@@ -378,9 +377,12 @@ def _run_unsafe(
             # isolation (either explicitly or via config default) must NOT
             # silently fall back to writing the real checkout. This was a
             # fail-open hole flagged in Phase 3 review (H2).
+            # Symmetric with the cleanup branch below — redact so absolute
+            # paths like the leftover-dir hint don't leak verbatim
+            # (Phase 3 R3 security L1).
             return BridgeResponse(
                 success=False,
-                error=f"worktree creation failed: {exc}",
+                error=safety.redact(f"worktree creation failed: {exc}"),
                 warnings=route_warnings,
                 cwd=str(cwd_path),
                 adapter=_adapter_meta(adapter, request),

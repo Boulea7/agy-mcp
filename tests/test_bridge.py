@@ -778,6 +778,10 @@ def test_run_unsafe_explicit_worktree_failure_is_fatal(monkeypatch, tmp_path: Pa
     assert resp.success is False
     assert "worktree creation failed" in (resp.error or "")
     assert fake.run_calls == []
+    # Phase 3 R3 L1: the failure path passes through safety.redact, so
+    # absolute home paths must not leak into the envelope.
+    assert "/Users/" not in (resp.error or "")
+    assert "/home/" not in (resp.error or "")
 
 
 def test_run_unsafe_default_worktree_fails_closed_when_no_git(
