@@ -16,11 +16,13 @@ artefacts existing under ``dist/``.
 
 from __future__ import annotations
 
+import re
 import sys
 import tarfile
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
+from typing import NamedTuple
 
 DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 
@@ -105,6 +107,58 @@ FORBIDDEN_COMPONENTS: frozenset[str] = frozenset({
     ".claude",
     "__pycache__",
 })
+FORBIDDEN_CONTENT_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
+    (
+        "raw macOS home path",
+        re.compile(
+            rb"/Users/(?!"
+            rb"(?:me|user|username|you|your[-_]user|example)(?:/|$)"
+            rb")[A-Za-z0-9._-]+(?:/|$)"
+        ),
+    ),
+    (
+        "raw Linux home path",
+        re.compile(
+            rb"/home/(?!"
+            rb"(?:me|user|username|you|your[-_]user|example)(?:/|$)"
+            rb")[A-Za-z0-9._-]+(?:/|$)"
+        ),
+    ),
+    (
+        "raw Windows home path",
+        re.compile(
+            rb"[A-Za-z]:\\Users\\(?!"
+            rb"(?:me|user|username|you|your[-_]user|example)(?:\\|$)"
+            rb")[A-Za-z0-9._-]+(?:\\|$)"
+        ),
+    ),
+    (
+        "OpenAI-style API key",
+        re.compile(rb"sk-[A-Za-z0-9_-]{20,}"),
+    ),
+    (
+        "AWS access key id",
+        re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    ),
+    (
+        "Slack token",
+        re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    ),
+    (
+        "JWT token",
+        re.compile(
+            rb"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."
+            rb"[A-Za-z0-9_-]{10,}\b",
+        ),
+    ),
+    (
+        "authorization header value",
+        re.compile(
+            rb"(?i)\b(?:authorization|proxy-authorization)\s*:\s*"
+            rb"(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,}",
+        ),
+    ),
+)
 
 # Files allowed to ship even though their name flirts with a forbidden
 # pattern — for example ``prompts/CLAUDE.md`` is a documented public snippet
@@ -116,6 +170,18 @@ ALLOWED_DESPITE_FORBIDDEN: tuple[str, ...] = (
 )
 
 
+class ArtifactFile(NamedTuple):
+    path: str
+    data: bytes
+
+
+def _strip_sdist_prefix(name: str) -> str:
+    """Strip leading ``agy_mcp-x.y.z/`` for easier matching."""
+
+    head, _, rest = name.partition("/")
+    return rest if rest else head
+
+
 def _list_sdist(tarball: Path) -> list[str]:
     """Return file paths inside the sdist with the top-level prefix stripped."""
 
@@ -125,9 +191,7 @@ def _list_sdist(tarball: Path) -> list[str]:
             if not member.isfile():
                 continue
             name = member.name
-            # Strip leading ``agy_mcp-x.y.z/`` for easier matching.
-            head, _, rest = name.partition("/")
-            members.append(rest if rest else head)
+            members.append(_strip_sdist_prefix(name))
     return members
 
 
@@ -136,6 +200,38 @@ def _list_wheel(wheel: Path) -> list[str]:
 
     with zipfile.ZipFile(wheel) as zf:
         return [info.filename for info in zf.infolist() if not info.is_dir()]
+
+
+def _read_sdist(tarball: Path) -> list[ArtifactFile]:
+    """Return file paths and bytes inside the sdist."""
+
+    files: list[ArtifactFile] = []
+    with tarfile.open(tarball, "r:gz") as tf:
+        for member in tf.getmembers():
+            if not member.isfile():
+                continue
+            extracted = tf.extractfile(member)
+            if extracted is None:
+                continue
+            files.append(
+                ArtifactFile(
+                    path=_strip_sdist_prefix(member.name),
+                    data=extracted.read(),
+                )
+            )
+    return files
+
+
+def _read_wheel(wheel: Path) -> list[ArtifactFile]:
+    """Return file paths and bytes inside the wheel."""
+
+    files: list[ArtifactFile] = []
+    with zipfile.ZipFile(wheel) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            files.append(ArtifactFile(path=info.filename, data=zf.read(info)))
+    return files
 
 
 def _check_files(
@@ -183,6 +279,29 @@ def _check_files(
     return problems
 
 
+def _check_contents(label: str, files: list[ArtifactFile]) -> list[str]:
+    """Return problems for raw local paths or secret-shaped content."""
+
+    problems: list[str] = []
+    for file in files:
+        # Release artifacts should be source/text only, but skip likely binary
+        # payloads defensively so metadata hashes in future wheels do not
+        # produce unreadable snippets.
+        if b"\x00" in file.data:
+            continue
+        for kind, pattern in FORBIDDEN_CONTENT_PATTERNS:
+            match = pattern.search(file.data)
+            if match is None:
+                continue
+            snippet = match.group(0)[:80].decode("utf-8", errors="replace")
+            problems.append(
+                f"[{label}] forbidden content in {file.path}: "
+                f"{kind} ({snippet!r})"
+            )
+            break
+    return problems
+
+
 def main() -> int:
     if not DIST_DIR.is_dir():
         print(f"dist/ not found at {DIST_DIR}; run `uv build` first", file=sys.stderr)
@@ -199,7 +318,8 @@ def main() -> int:
 
     problems: list[str] = []
     for sdist in sdists:
-        files = _list_sdist(sdist)
+        artifact_files = _read_sdist(sdist)
+        files = [file.path for file in artifact_files]
         problems.extend(
             _check_files(
                 sdist.name,
@@ -208,11 +328,14 @@ def main() -> int:
                 allowed=ALLOWED_SDIST_FILES,
             )
         )
+        problems.extend(_check_contents(sdist.name, artifact_files))
     for wheel in wheels:
-        files = _list_wheel(wheel)
+        artifact_files = _read_wheel(wheel)
+        files = [file.path for file in artifact_files]
         # Wheels do not ship docs/, so we cannot enforce a required-set there
         # without false positives. Only forbidden-substring matters.
         problems.extend(_check_files(wheel.name, files, required=None))
+        problems.extend(_check_contents(wheel.name, artifact_files))
 
     if problems:
         print("Release artefact audit FAILED:", file=sys.stderr)
