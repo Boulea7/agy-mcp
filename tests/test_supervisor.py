@@ -286,6 +286,31 @@ def test_start_redacts_request_snapshot(tmp_path: Path):
     assert record.request["extra_env"] == {"MY_TOKEN": "***"}
 
 
+def test_start_redacts_public_cwd_but_runs_adapter_in_raw_cwd(tmp_path: Path):
+    events = [
+        CanonicalEvent(type="assistant", text="ok"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter = _ScriptedAdapter(capability=_capability(), events=events)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    raw_cwd = "/Users/alice/private-project"
+    response = supervisor.start(BridgeRequest(prompt="hello", cwd=raw_cwd))
+    assert response.success is True
+    assert response.cwd == "~/private-project"
+
+    assert _wait_for(
+        lambda: supervisor.status(response.job_id).status == "completed",
+    )
+    assert adapter.run_requests[0].cwd == raw_cwd
+    record = supervisor.status(response.job_id)
+    assert record.cwd == "~/private-project"
+    listed = supervisor.list_sessions(limit=10)
+    assert listed[0].cwd == "~/private-project"
+    persisted = supervisor.store.get_job(response.job_id)
+    assert persisted is not None
+    assert persisted.cwd == "~/private-project"
+
+
 def test_start_short_circuits_when_backend_unavailable(tmp_path: Path):
     cap = _capability(bin_path="")
     cap.warnings = ["agy missing"]

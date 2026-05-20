@@ -742,6 +742,39 @@ def test_run_unsafe_success_path(monkeypatch, tmp_path: Path):
     assert resp.all_messages == []
 
 
+def test_run_redacts_public_cwd_but_keeps_adapter_cwd_raw(monkeypatch):
+    cap = _capability("agy", supports_log_file=True)
+    fake = _FakeAdapter(
+        capability=cap,
+        run_result=_result(
+            events=[CanonicalEvent(type="assistant", text="ok")],
+            session_id="sess-OK",
+        ),
+    )
+
+    def _build(backend, cfg, safety):
+        return fake
+
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", _build)
+    raw_cwd = "/Users/alice/private-project"
+    request = BridgeRequest(prompt="hi", cwd=raw_cwd)
+    resp = _run(request, _default_config(), _safety())
+    assert resp.success is True
+    assert resp.cwd == "~/private-project"
+    assert fake.run_calls[0].cwd == raw_cwd
+
+
+def test_run_exception_redacts_public_cwd(monkeypatch):
+    def _explode(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr("agy_mcp.bridge._select_backend", _explode)
+    request = BridgeRequest(prompt="hello", cwd="/Users/alice/private-project")
+    resp = _run(request, _default_config(), _safety())
+    assert resp.success is False
+    assert resp.cwd == "~/private-project"
+
+
 def test_run_unsafe_return_all_messages_populates_translated_events(
     monkeypatch, tmp_path: Path,
 ):

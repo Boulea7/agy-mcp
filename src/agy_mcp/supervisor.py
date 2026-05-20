@@ -175,6 +175,16 @@ class Supervisor:
         self._job_slots = threading.Semaphore(max_concurrent_jobs)
         self._max_concurrent_jobs = max_concurrent_jobs
 
+    def _response_cwd(self, cwd: str | Path) -> str:
+        """Return a redacted cwd safe for public records and envelopes."""
+
+        return self.safety.redact(str(cwd))
+
+    def _public_record(self, record: JobRecord) -> JobRecord:
+        """Return a copy whose public path fields are redacted."""
+
+        return record.model_copy(update={"cwd": self._response_cwd(record.cwd)})
+
     # ------------------------------------------------------------------
     # Default adapter factory (delegates to bridge._select_backend)
     # ------------------------------------------------------------------
@@ -221,7 +231,7 @@ class Supervisor:
                     gate.reason or "request rejected by safety policy",
                 ),
                 warnings=gate_warnings,
-                cwd=str(cwd_path),
+                cwd=self._response_cwd(cwd_path),
                 adapter=AdapterMetadata(),
             ).touch()
 
@@ -251,7 +261,7 @@ class Supervisor:
                 success=False,
                 error=error_text,
                 warnings=preflight_warnings,
-                cwd=str(cwd_path),
+                cwd=self._response_cwd(cwd_path),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
         if backend_name == "agy" and not cap.authenticated:
@@ -261,7 +271,7 @@ class Supervisor:
                     "backend='agy' is not authenticated; run agy once and log in.",
                 ),
                 warnings=preflight_warnings,
-                cwd=str(cwd_path),
+                cwd=self._response_cwd(cwd_path),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
@@ -278,7 +288,7 @@ class Supervisor:
                     "jobs already running; retry after one finishes",
                 ),
                 warnings=preflight_warnings,
-                cwd=str(cwd_path),
+                cwd=self._response_cwd(cwd_path),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
@@ -307,7 +317,7 @@ class Supervisor:
                     success=False,
                     error=self.safety.redact(f"worktree creation failed: {exc}"),
                     warnings=preflight_warnings,
-                    cwd=str(cwd_path),
+                    cwd=self._response_cwd(cwd_path),
                     adapter=AdapterMetadata(backend=backend_name),
                 ).touch()
 
@@ -315,7 +325,7 @@ class Supervisor:
             record = self.store.create_job(
                 job_id=resolved_job_id,
                 session_id=effective_request.session_id,
-                cwd=effective_request.cwd,
+                cwd=self._response_cwd(effective_request.cwd),
                 request=_serialise_request(effective_request, self.safety),
                 backend=backend_name,
             )
@@ -326,7 +336,7 @@ class Supervisor:
                 success=False,
                 error=self.safety.redact(str(exc)),
                 warnings=preflight_warnings,
-                cwd=effective_request.cwd,
+                cwd=self._response_cwd(effective_request.cwd),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
         except OSError as exc:
@@ -341,7 +351,7 @@ class Supervisor:
                 success=False,
                 error=self.safety.redact(f"failed to create job record: {exc}"),
                 warnings=preflight_warnings,
-                cwd=effective_request.cwd,
+                cwd=self._response_cwd(effective_request.cwd),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
@@ -387,7 +397,7 @@ class Supervisor:
                     f"failed to spawn worker thread for {record.job_id}: {exc}",
                 ),
                 warnings=preflight_warnings,
-                cwd=effective_request.cwd,
+                cwd=self._response_cwd(effective_request.cwd),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
@@ -396,7 +406,7 @@ class Supervisor:
             SESSION_ID=effective_request.session_id or "",
             job_id=record.job_id,
             status="running",
-            cwd=effective_request.cwd,
+            cwd=self._response_cwd(effective_request.cwd),
             adapter=AdapterMetadata(
                 backend=backend_name,
                 bin_path=cap.bin_path or None,
@@ -425,27 +435,27 @@ class Supervisor:
         if record is None:
             return None
         if record.status != "running":
-            return record
+            return self._public_record(record)
         with self._lock:
             handle = self._jobs.get(job_id)
             handle_alive = handle is not None and handle.thread.is_alive()
             if handle_alive:
                 # Still under management — no reconciliation needed.
-                return record
+                return self._public_record(record)
             # Re-read inside the lock so a worker that just persisted
             # ``status=completed`` and is about to pop its handle wins
             # the race instead of being reclassified as failed.
             fresh = self.store.get_job(job_id)
             if fresh is None:
-                return record
+                return self._public_record(record)
             if fresh.status != "running":
-                return fresh
+                return self._public_record(fresh)
             finalised = self.store.finalize_job(
                 job_id,
                 status="failed",
                 error=self.safety.redact(_RECONCILE_ERROR),
             )
-            return finalised or fresh
+            return self._public_record(finalised or fresh)
 
     def read_events(self, job_id: str, *, since: int = 0) -> list[CanonicalEvent]:
         """Return canonical events from offset ``since`` onwards."""
@@ -484,7 +494,10 @@ class Supervisor:
             return True
 
     def list_sessions(self, *, limit: int | None = 50) -> list[JobRecord]:
-        return self.store.list_jobs(limit=limit)
+        return [
+            self._public_record(record)
+            for record in self.store.list_jobs(limit=limit)
+        ]
 
     # ------------------------------------------------------------------
     # Worker thread body

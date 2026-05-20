@@ -142,6 +142,12 @@ _EXTRA_ENV_NAME_DENY_PREFIXES: tuple[str, ...] = (
 _EXTRA_ENV_VALUE_BANNED = re.compile(r"[\x00\r\n]")
 
 
+def _response_cwd(safety: SafetyPolicy, cwd: str | Path) -> str:
+    """Return a redacted cwd safe for public response envelopes."""
+
+    return safety.redact(str(cwd))
+
+
 def _parse_extra_env(items: list[str]) -> tuple[dict[str, str], list[str]]:
     """Parse ``--extra-env KEY=value`` flags.
 
@@ -337,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
         response = BridgeResponse(
             success=False,
             error=safety.redact(str(exc)),
-            cwd=args.cd,
+            cwd=_response_cwd(safety, args.cd),
             adapter=AdapterMetadata(),
         ).touch()
         json.dump(response.model_dump(exclude_none=False), sys.stdout)
@@ -351,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                 "CLI --detach is not durable because the bridge process exits; "
                 "use the MCP agy_start tool for long-running jobs."
             ),
-            cwd=request.cwd,
+            cwd=_response_cwd(safety, request.cwd),
             adapter=AdapterMetadata(),
         ).touch()
     else:
@@ -380,7 +386,7 @@ def _run(request: BridgeRequest, config: Config, safety: SafetyPolicy) -> Bridge
         return BridgeResponse(
             success=False,
             error=safety.redact(str(exc)) + (" | tb=" + tb if request.debug else ""),
-            cwd=request.cwd,
+            cwd=_response_cwd(safety, request.cwd),
             adapter=AdapterMetadata(),
             command_preview=None,
             log_path=None,
@@ -401,7 +407,7 @@ def _run_unsafe(
         return BridgeResponse(
             success=False,
             error=gate.reason or "request rejected by safety policy",
-            cwd=str(cwd_path),
+            cwd=_response_cwd(safety, cwd_path),
             adapter=AdapterMetadata(),
         ).touch()
 
@@ -419,7 +425,7 @@ def _run_unsafe(
             success=False,
             error=" | ".join(route_warnings) or f"backend={backend_name!r} unavailable",
             warnings=list(cap.warnings),
-            cwd=str(cwd_path),
+            cwd=_response_cwd(safety, cwd_path),
             adapter=_adapter_meta(adapter, request),
         ).touch()
     if backend_name == "agy" and not cap.authenticated and not request.dry_run:
@@ -427,7 +433,7 @@ def _run_unsafe(
             success=False,
             error="backend='agy' is not authenticated; run agy once and log in.",
             warnings=[*gate_warnings, *route_warnings, *cap.warnings],
-            cwd=str(cwd_path),
+            cwd=_response_cwd(safety, cwd_path),
             adapter=_adapter_meta(adapter, request),
         ).touch()
 
@@ -460,7 +466,7 @@ def _run_unsafe(
                 success=False,
                 error=safety.redact(f"worktree creation failed: {exc}"),
                 warnings=[*gate_warnings, *route_warnings],
-                cwd=str(cwd_path),
+                cwd=_response_cwd(safety, cwd_path),
                 adapter=_adapter_meta(adapter, request),
             ).touch()
 
@@ -502,7 +508,7 @@ def _run_unsafe(
             success=False,
             error=run_error or "adapter raised an unknown error",
             warnings=all_warnings,
-            cwd=str(effective_cwd),
+            cwd=_response_cwd(safety, effective_cwd),
             adapter=_adapter_meta(adapter, request),
         ).touch()
 
@@ -537,7 +543,7 @@ def _run_unsafe(
         artifacts=result.artifacts,
         error=None if success else (_pick_error_text(result.events) or "non-zero exit"),
         warnings=all_warnings,
-        cwd=str(effective_cwd),
+        cwd=_response_cwd(safety, effective_cwd),
         adapter=_adapter_meta(adapter, request),
         command_preview=None,
         log_path=None,  # ephemeral spool dir is gone by now
@@ -558,7 +564,7 @@ def _dry_run_response(
             success=False,
             error=safety.redact(str(exc)),
             warnings=warnings,
-            cwd=str(cwd),
+            cwd=_response_cwd(safety, cwd),
             adapter=_adapter_meta(adapter, request),
         ).touch()
     preview = safety.redact_command(argv) if request.debug else None
@@ -566,7 +572,7 @@ def _dry_run_response(
         success=True,
         SESSION_ID=request.session_id or "",
         status="completed",
-        cwd=str(cwd),
+        cwd=_response_cwd(safety, cwd),
         adapter=_adapter_meta(adapter, request),
         command_preview=preview,
         warnings=warnings,
