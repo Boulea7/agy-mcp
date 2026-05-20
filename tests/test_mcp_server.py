@@ -268,6 +268,35 @@ def test_agy_read_rejects_invalid_job_id_without_echo(reset_state):
     assert "ctrlbytes" not in payload
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    ["agy_start", "agy_status", "agy_read", "agy_cancel"],
+)
+def test_job_id_rejects_secret_shaped_value_without_echo(
+    reset_state, tmp_path: Path, tool_name: str
+):
+    secret_job_id = "job_sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    if tool_name == "agy_start":
+        out = server.agy_start_tool(
+            PROMPT="hi",
+            cd=str(tmp_path),
+            job_id=secret_job_id,
+        )
+    elif tool_name == "agy_status":
+        out = server.agy_status_tool(secret_job_id)
+    elif tool_name == "agy_read":
+        out = server.agy_read_tool(secret_job_id)
+    else:
+        out = server.agy_cancel_tool(secret_job_id)
+
+    payload = json.dumps(out.model_dump(mode="json"))
+    assert out["success"] is False
+    assert secret_job_id not in payload
+    assert "job_id" in (out["error"] or "")
+    assert out.get("job_id") is None
+
+
 def test_agy_read_rejects_negative_since(reset_state):
     out = server.agy_read_tool("job_does_not_exist_12345", since=-1)
     assert out["success"] is False

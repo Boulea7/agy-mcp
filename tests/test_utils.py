@@ -99,6 +99,21 @@ def test_redact_command_redacts_each_arg():
     assert out[1] == "--prompt"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "job_sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "job_ghp" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "job_AKIA" "IOSFODNN7EXAMPLE",
+        "job_github_pat" "_11ABCDEFGHIJKLMNOPQRST_abcdef1234567890abcdef1234567890",
+    ],
+)
+def test_redact_text_handles_secret_shapes_after_safe_prefix(value: str):
+    out = redact_text(f"lookup failed for {value}")
+    assert value not in out
+    assert REDACTION_PLACEHOLDER in out
+
+
 def test_scrub_env_replaces_secret_named_keys():
     env = {
         "ANTHROPIC_API_KEY": "supersecret",

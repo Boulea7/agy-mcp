@@ -266,10 +266,14 @@ def _wrapper_failure(
     development time, not at serialisation.
     """
 
+    safe_extra = {
+        key: safety.redact(value) if isinstance(value, str) else value
+        for key, value in extra.items()
+    }
     return cls(
         success=False,
         error=safety.redact(str(exc)),
-        **extra,
+        **safe_extra,
     )
 
 
@@ -292,6 +296,8 @@ def _validate_job_id(safety: SafetyPolicy, job_id: str) -> str | None:
         return safety.redact(
             "job_id must match ^job_[A-Za-z0-9_-]{1,80}$",
         )
+    if safety.redact(job_id) != job_id:
+        return safety.redact("job_id must not contain secret-shaped text")
     return None
 
 
@@ -646,7 +652,11 @@ def agy_cancel_tool(job_id: str) -> CancelToolResponse:
         return _wrapper_failure(
             safety, exc, CancelToolResponse, job_id=job_id,
         )
-    return CancelToolResponse(success=True, job_id=job_id, signalled=signalled)
+    return CancelToolResponse(
+        success=True,
+        job_id=safety.redact(job_id),
+        signalled=signalled,
+    )
 
 
 # ---------------------------------------------------------------------------

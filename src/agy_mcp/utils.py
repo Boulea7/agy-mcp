@@ -51,13 +51,15 @@ _PEM_BLOCK = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
 )
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
-_AWS_ACCESS_KEY_ID = re.compile(r"\b(AKIA|ASIA|AROA|AGPA|AIDA|ANPA|ANVA)[0-9A-Z]{16}\b")
-_SLACK_TOKEN = re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")
-_GITHUB_PAT_FG = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+_AWS_ACCESS_KEY_ID = re.compile(
+    r"(?<![A-Za-z0-9])(AKIA|ASIA|AROA|AGPA|AIDA|ANPA|ANVA)[0-9A-Z]{16}(?![A-Za-z0-9])"
+)
+_SLACK_TOKEN = re.compile(r"(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])")
+_GITHUB_PAT_FG = re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}(?![A-Za-z0-9])")
 _VALUE_TOKEN = re.compile(
-    r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"
+    r"(?<![A-Za-z0-9])(?:gh[opusr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"
     r"AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z_-]{20,}|"
-    r"[A-Za-z0-9_-]{40,})\b"
+    r"[A-Za-z0-9_-]{40,})(?![A-Za-z0-9])"
 )
 _BEARER_HEADER = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-+/=]{8,})")
 _AUTHZ_HEADER = re.compile(
