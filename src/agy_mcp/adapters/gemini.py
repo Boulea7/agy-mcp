@@ -17,17 +17,18 @@ import time
 from pathlib import Path
 
 from agy_mcp.adapters.base import (
+    _MAX_LINE_BYTES,
     AdapterRunResult,
     BaseAdapter,
     EventSink,
-    _MAX_LINE_BYTES,
-    _RunContext,
     _drain_stream,
     _process_group_kwargs,
+    _RunContext,
     _shutdown_cascade,
     has_flag,
     resolve_cwd,
 )
+
 # Process-group helpers moved to adapters/base in Phase 4 R1 P2#8 so
 # every adapter that spawns a subtree can share the cancel cascade
 # without sibling-private imports.

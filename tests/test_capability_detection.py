@@ -11,17 +11,13 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 from agy_mcp.adapters.agy import (
-    AGY_OAUTH_CREDS_PATH,
     AgyPrintBackend,
     _parse_version,
     _parse_version_from_help,
 )
 from agy_mcp.adapters.base import detect_flags, has_flag
 from agy_mcp.adapters.gemini import GeminiCliBackend
-
 
 HERE = Path(__file__).parent
 FIXTURES = HERE / "fixtures"

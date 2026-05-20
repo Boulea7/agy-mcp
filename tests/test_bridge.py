@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -28,7 +25,6 @@ from agy_mcp.bridge import (
     _pick_error_text,
     _request_from_args,
     _run,
-    _run_unsafe,
     _select_backend,
     _wants_worktree,
     _with_cwd,
@@ -43,13 +39,11 @@ from agy_mcp.config import (
 from agy_mcp.models import (
     BackendName,
     BridgeRequest,
-    BridgeResponse,
     CanonicalEvent,
     Capability,
 )
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
-
 
 # ---------------------------------------------------------------------------
 # Helpers — fake adapter that records what was asked of it

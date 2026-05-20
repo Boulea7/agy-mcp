@@ -29,7 +29,6 @@ from __future__ import annotations
 import errno
 import os
 import re
-import shutil
 import stat
 import subprocess
 import threading

@@ -54,7 +54,6 @@ from agy_mcp.adapters import (
 from agy_mcp.config import Config, get_config
 from agy_mcp.models import (
     AdapterMetadata,
-    BackendName,
     BridgeRequest,
     BridgeResponse,
     CanonicalEvent,
@@ -73,7 +72,6 @@ from agy_mcp.worktree import (
     cleanup_worktree,
     create_worktree,
 )
-
 
 # ---------------------------------------------------------------------------
 # Sink that tees adapter events into the on-disk event log.

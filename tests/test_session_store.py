@@ -132,7 +132,7 @@ def test_purge_older_than_removes_aged_jobs(tmp_session_root: Path):
 
 def test_find_by_session_id_returns_most_recent(tmp_session_root: Path):
     store = SessionStore(tmp_session_root)
-    older = store.create_job(session_id="conv-x")
+    store.create_job(session_id="conv-x")  # older row; only used to populate the store
     time.sleep(0.05)
     newer = store.create_job(session_id="conv-x")
     found = store.find_by_session_id("conv-x")
@@ -217,9 +217,9 @@ def test_append_event_refuses_symlinked_log(tmp_session_root: Path):
     # Replace the auto-touched events.jsonl with a symlink at the same path.
     paths.events.unlink()
     paths.events.symlink_to(secret)
-    from agy_mcp.models import CanonicalEvent
-
     import pytest as _pytest
+
+    from agy_mcp.models import CanonicalEvent
 
     with _pytest.raises(OSError):
         store.append_event(record.job_id, CanonicalEvent(type="assistant", text="x"))

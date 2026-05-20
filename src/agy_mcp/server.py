@@ -51,7 +51,6 @@ from agy_mcp.models import (
     CancelToolResponse,
     DoctorToolResponse,
     InstallSkillToolResponse,
-    JobRecord,
     Mode,
     OutputProtocol,
     ReadToolResponse,

@@ -24,7 +24,6 @@ from agy_mcp.adapters.agy import (
 from agy_mcp.adapters.base import ListEventSink
 from agy_mcp.models import BridgeRequest, CanonicalEvent
 
-
 HERE = Path(__file__).parent
 FIXTURES = HERE / "fixtures"
 FAKE_AGY_PRINT = FIXTURES / "fake_agy_print.py"

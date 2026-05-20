@@ -22,7 +22,6 @@ from agy_mcp.adapters.gemini import (
 )
 from agy_mcp.models import BridgeRequest
 
-
 HERE = Path(__file__).parent
 FIXTURES = HERE / "fixtures"
 FAKE_GEMINI = FIXTURES / "fake_gemini_streamjson.py"
@@ -104,9 +103,8 @@ def test_build_command_raises_without_binary(tmp_path):
 
 
 def test_run_wraps_windows_cmd_binary_for_spawn(tmp_path, monkeypatch):
-    from agy_mcp.models import Capability
-
     import agy_mcp.utils as utils_mod
+    from agy_mcp.models import Capability
 
     captured: dict[str, object] = {}
     cap = Capability(

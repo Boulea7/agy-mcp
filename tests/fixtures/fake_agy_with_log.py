@@ -18,7 +18,6 @@ import sys
 import time
 from pathlib import Path
 
-
 HELP_TEXT = """\
 agy [flags]
 
@@ -106,8 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _write_line(
                 fp,
-                f"I0520 12:34:56.000200  1234 print.go:10] "
-                f"Starting new conversation (agent=false)",
+                "I0520 12:34:56.000200  1234 print.go:10] "
+                "Starting new conversation (agent=false)",
             )
             _write_line(
                 fp,

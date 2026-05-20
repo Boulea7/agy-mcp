@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_release_artifacts.py"
 _SPEC = importlib.util.spec_from_file_location("check_release_artifacts", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None

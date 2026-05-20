@@ -12,8 +12,7 @@ The translator never mutates the input event; it returns a new dict.
 
 from __future__ import annotations
 
-import re
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable
 
 from agy_mcp.models import CanonicalEvent, OutputProtocol
 from agy_mcp.safety import SafetyPolicy

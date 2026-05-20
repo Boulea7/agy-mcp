@@ -25,7 +25,6 @@ import sys
 import time
 from pathlib import Path
 
-
 HELP_TEXT = """\
 agy [flags] [prompt]
 

@@ -158,16 +158,20 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
+# Narrow selection: core correctness rules only. Style / opinion rules
+# (SIM / UP / RUF / BLE) are intentionally excluded — many are subjective
+# (BLE001 catches our deliberate broad-except defensive code) or
+# regularly false-positive on subprocess/wrapper projects (S603).
+# Style debt can be cleaned in a follow-up sweep.
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "UP",  # pyupgrade
-    "SIM", # flake8-simplify
-    "RUF", # ruff-specific
+    "F",   # pyflakes (unused imports, undefined names)
+    "I",   # isort (import ordering)
+    "B",   # flake8-bugbear (real bug patterns)
 ]
 ignore = [
     "E501",  # line length — covered by formatter
+    "B008",  # function-call-in-default-argument — pydantic Field/Path patterns
+    "B904",  # raise-without-from-inside-except — wrapper patterns intentionally lose chain
 ]

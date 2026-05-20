@@ -8,7 +8,6 @@ from agy_mcp.adapters.protocol import ProtocolTranslator, _redact_dict
 from agy_mcp.models import CanonicalEvent
 from agy_mcp.safety import SafetyPolicy
 
-
 # ---------------------------------------------------------------------------
 # raw
 # ---------------------------------------------------------------------------

@@ -20,26 +20,25 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import stat
+import subprocess
 import threading
 import time
 from pathlib import Path
 
 from agy_mcp.adapters.base import (
+    _MAX_LINE_BYTES,
     AdapterRunResult,
     BaseAdapter,
     EventSink,
-    _MAX_LINE_BYTES,
-    _RunContext,
     _drain_stream,
     _process_group_kwargs,
+    _RunContext,
     _shutdown_cascade,
     has_flag,
     resolve_cwd,
 )
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
-from agy_mcp.safety import SafetyPolicy
 from agy_mcp.utils import (
     augment_path_env_for_windows,
     is_windows,

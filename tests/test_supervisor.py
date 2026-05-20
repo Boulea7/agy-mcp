@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 from agy_mcp.adapters.base import AdapterRunResult, BaseAdapter, EventSink
 from agy_mcp.config import BackendConfig, Config, ExecuteConfig, SafetyConfig
@@ -24,7 +20,6 @@ from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
 from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
