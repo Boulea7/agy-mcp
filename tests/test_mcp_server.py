@@ -579,6 +579,96 @@ def test_agy_install_skill_recovers_from_modified_on_disk(reset_state, tmp_path:
     assert "LOCAL EDIT" not in body
 
 
+def test_agy_install_skill_tool_passes_force(reset_state, tmp_path: Path):
+    """Phase 7 R1 arch P2-3: ``force`` on the MCP tool surface plumbs
+    through to ``install_skills`` so callers can recover a corrupted
+    on-disk bundle without dropping to the CLI."""
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    out1 = server.agy_install_skill_tool(
+        targets=["claude"], scope="project", project_root=str(project),
+    )
+    assert out1["success"] is True
+    # Re-call with force=False: every entry should be skipped (idempotent).
+    out2 = server.agy_install_skill_tool(
+        targets=["claude"], scope="project", project_root=str(project),
+        force=False,
+    )
+    assert out2["success"] is True
+    assert all(e["overwrote"] is False for e in out2["installed"])
+    # Re-call with force=True: every entry is rewritten (overwrote=True).
+    out3 = server.agy_install_skill_tool(
+        targets=["claude"], scope="project", project_root=str(project),
+        force=True,
+    )
+    assert out3["success"] is True
+    assert out3["installed"]
+    assert all(e["overwrote"] is True for e in out3["installed"])
+
+
+def test_agy_install_skill_rejects_symlinked_intermediate(reset_state, tmp_path: Path):
+    """Phase 7 R1 arch P3-2 + sec P2-2: a symlinked intermediate
+    directory **inside** the validated project root is refused at write
+    time by ``safe_write_text(verify_under=…)``'s parent walk.
+
+    The user-supplied ``project_root`` itself is allowed to have system
+    symlinks in its ancestry (``/tmp/...``, ``/var/...`` on macOS) —
+    that's why ``_validate_project_root`` only checks the leaf and
+    relies on ``safe_write_text`` to enforce the actual security
+    boundary. The defence the security model cares about is the gap
+    between input validation and the file write: an attacker who
+    swaps ``<root>/.claude`` for a symlink to ``/etc`` between those
+    two events must not be able to land a file outside ``<root>``.
+    """
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    # Pre-create the .claude/skills tree as a symlink pointing to a
+    # sibling directory. ``install_skills`` will resolve project_root,
+    # then try to write under .claude/skills — the symlinked
+    # intermediate must be rejected.
+    sibling = tmp_path / "escape-target"
+    sibling.mkdir()
+    (project / ".claude").mkdir()
+    (project / ".claude" / "skills").symlink_to(sibling, target_is_directory=True)
+
+    out = server.agy_install_skill_tool(
+        targets=["claude"], scope="project", project_root=str(project),
+    )
+    # The containment check ``resolved_skill_dir.relative_to(validated_root)``
+    # catches this: ``.claude/skills`` resolves to ``escape-target``,
+    # which is outside ``project/``. No files land.
+    assert out["success"] is False
+    assert not out["installed"]
+    assert any("escapes" in w.lower() for w in out["warnings"])
+
+
+def test_agy_install_skill_corrupted_bundle_emits_warning(reset_state, monkeypatch, tmp_path: Path):
+    """Phase 7 R1 arch P3-3: cover the ``_read_packaged_file`` failure
+    branch — when the package data is missing or unreadable, the
+    installer emits a per-file warning and the envelope reports
+    ``success=False`` cleanly."""
+
+    from agy_mcp import install as install_mod
+
+    def _explode(target: str, rel_path: str) -> str:
+        raise FileNotFoundError(f"simulated missing bundle file {target}/{rel_path}")
+
+    monkeypatch.setattr(install_mod, "_read_packaged_file", _explode)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    out = server.agy_install_skill_tool(
+        targets=["claude"], scope="project", project_root=str(project),
+    )
+    assert out["success"] is False
+    # Every file failed, no installs landed; warnings carry the per-file
+    # detail (one per file in the bundle).
+    assert out["installed"] == []
+    assert any("missing bundle file" in w for w in out["warnings"])
+
+
 def test_agy_doctor_force_refresh_rebuilds_adapters(reset_state):
     """Phase 5 R2 sec P2-1: force_refresh drops cached singletons."""
 

@@ -115,7 +115,13 @@ def _bundle_layout(target: str) -> tuple[str, list[str]]:
 
 
 def _read_packaged_file(target: str, rel_path: str) -> str:
-    """Read ``agy_mcp/_skill_bodies/<target>/<rel_path>`` from the wheel."""
+    """Read ``agy_mcp/_skill_bodies/<target>/<rel_path>`` from the wheel.
+
+    In a non-editable wheel install the file is wheel-immutable. Under
+    ``pip install -e .`` / ``uv pip install -e .`` it instead points at
+    the user's source checkout, so a hostile working tree feeds hostile
+    install content — by design. (Phase 7 R1 sec P3-2.)
+    """
 
     res = _pkg_files("agy_mcp").joinpath("_skill_bodies").joinpath(target)
     for segment in rel_path.split("/"):
@@ -167,17 +173,40 @@ def _expand_targets(targets: Iterable[SkillTarget]) -> list[str]:
 
 
 def _validate_project_root(project_root: Path) -> Path:
-    """Ensure ``project_root`` is an existing real directory, not a symlink."""
+    """Resolve ``project_root`` and reject obvious symlink trickery.
 
+    Concretely checks:
+
+    * the path resolves to an existing directory (``resolve(strict=True)``),
+    * the resolved path is a directory,
+    * the **leaf** of the user-supplied path is not a symlink.
+
+    Ancestor symlinks (``/tmp/...`` → ``/private/tmp/...``,
+    ``/var/...`` → ``/private/var/...``) are deliberately **not**
+    rejected here: walking the user-supplied path's parents with
+    ``is_symlink()`` would refuse any path under ``/tmp`` on macOS
+    (every test fixture and most developer workflows), which is
+    not the intent. The escape path the security model actually
+    defends is the gap between input validation and the file
+    write: that boundary is closed by
+    :func:`agy_mcp.utils.safe_write_text`, which is invoked with
+    ``verify_under=<resolved project root>`` and walks every
+    intermediate component from that resolved root down to the
+    destination file with ``is_symlink()``, pre- AND post-rename.
+    (Phase 7 R1 sec P2-2 — accepted the docstring-only variant
+    the reviewer offered.)
+    """
+
+    user_path = project_root.expanduser()
     try:
-        resolved = project_root.expanduser().resolve(strict=True)
+        resolved = user_path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ValueError(
             f"project_root does not resolve to a real path: {project_root}: {exc}",
         ) from exc
     if not resolved.is_dir():
         raise ValueError(f"project_root is not a directory: {project_root}")
-    if project_root.expanduser().is_symlink():
+    if user_path.is_symlink():
         raise ValueError(f"project_root is a symlink, refusing: {project_root}")
     return resolved
 
@@ -245,6 +274,13 @@ def install_skills(
 
     result = InstallResult()
     for target in chosen:
+        # Snapshot the install index BEFORE this target's loop so the
+        # partial-failure cleanup at the bottom only drops the entries
+        # this iteration appended — earlier targets' successful
+        # ``overwrote=False`` rows (idempotent re-installs that happen
+        # to share the call with a failing target) must survive.
+        # Phase 7 R1 arch P2-1.
+        installed_before = len(result.installed)
         try:
             target_dir = _resolve_target_dir(target, scope, validated_root)
         except ValueError as exc:
@@ -257,12 +293,18 @@ def install_skills(
             continue
         skill_dir = target_dir / skill_dir_name
         if scope == "project":
-            # Containment check: every file we're about to write must
-            # resolve under validated_root.
+            # Containment check: the actual leaf we're about to write
+            # under (``skill_dir``) must resolve inside
+            # ``validated_root``. Resolving the parent (``target_dir``)
+            # is correct today because ``skill_dir_name`` is a
+            # hard-coded literal in ``_bundle_layout`` — but a future
+            # refactor that lets the leaf become target-driven would
+            # silently miss a ``../`` escape one level deeper. Phase 7
+            # R1 sec P2-1.
             assert validated_root is not None
             try:
-                resolved_target = target_dir.resolve()
-                resolved_target.relative_to(validated_root)
+                resolved_skill_dir = skill_dir.resolve()
+                resolved_skill_dir.relative_to(validated_root)
             except (OSError, ValueError):
                 result.warnings.append(
                     sft.redact(f"skill dir {skill_dir} escapes project_root"),
@@ -324,11 +366,11 @@ def install_skills(
                 )
             )
         if any_failure and not wrote_any_file:
-            # Drop the no-op entries we may have appended for unchanged
-            # files; surface as a warning instead.
-            result.installed = [
-                e for e in result.installed if e.target != target or e.overwrote
-            ]
+            # Drop entries this target appended (skipped-unchanged rows
+            # for files we DID get through before the failure). Earlier
+            # targets' entries survive because we snapshotted the index
+            # at the top of the loop.
+            del result.installed[installed_before:]
 
     if not result.installed:
         if result.warnings:

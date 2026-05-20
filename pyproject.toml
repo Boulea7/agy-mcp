@@ -59,6 +59,17 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agy_mcp"]
+# Phase 7 R1 sec P3-4: belt-and-braces exclude so a stray __pycache__,
+# editor scratch file, or platform turd cannot land inside the shipped
+# wheel — especially under ``src/agy_mcp/_skill_bodies/`` which carries
+# verbatim skill bodies.
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/.DS_Store",
+    "**/Thumbs.db",
+]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""

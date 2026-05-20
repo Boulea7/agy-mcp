@@ -638,13 +638,16 @@ def agy_doctor_tool(force_refresh: bool = False) -> dict[str, Any]:
         "``.antigravity/skills/`` under the supplied ``project_root``. "
         "Antigravity's wrapper-owned ``~/.agy/`` is used in user scope "
         "because the standing rule 'do not write under ~/.gemini/' rules "
-        "out the Antigravity CLI's own state directory."
+        "out the Antigravity CLI's own state directory. ``force=False`` "
+        "(the default) skips files whose on-disk body already matches; "
+        "``force=True`` rewrites every file unconditionally."
     ),
 )
 def agy_install_skill_tool(
     targets: list[str] | None = None,
     scope: SkillScope = "user",
     project_root: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     config, safety, _store_, _supervisor_ = _ensure_state()
     if scope not in ("user", "project"):
@@ -652,11 +655,14 @@ def agy_install_skill_tool(
             safety, ValueError(f"scope must be 'user' or 'project', got {scope!r}"),
         )
     chosen_targets = targets if targets else ["all"]
-    # P1-1 hardening: bound the list, reject non-str entries, and refuse
-    # any value outside the documented allow-list before the installer
-    # walks the dict. Stops a hostile caller from amplifying the
-    # iteration cost or sneaking ``None`` / int / object values into a
-    # path-resolution helper that would crash with a typed exception.
+    # Defence-in-depth at the tool boundary. The installer's own
+    # ``_expand_targets`` does the same string / allow-list check
+    # again, but the MCP entry point gets reachable from arbitrary
+    # caller configs, so we re-validate here AND apply
+    # ``_MAX_INSTALL_TARGETS`` (which ``_expand_targets`` does not
+    # know about). Phase 7 R1 arch P2-2: keep both layers but flag
+    # the duplication so future contributors don't relax one and
+    # leave the other exposed.
     if not isinstance(chosen_targets, list):
         return _structured_failure(
             safety, ValueError("targets must be a list of strings"),
@@ -686,6 +692,7 @@ def agy_install_skill_tool(
             scope=scope,
             project_root=Path(project_root) if project_root else None,
             safety=safety,
+            force=force,
         )
     except Exception as exc:  # noqa: BLE001
         return _structured_failure(safety, exc)
