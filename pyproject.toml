@@ -43,6 +43,14 @@ dev = [
     "ruff>=0.5",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+]
+
 [project.scripts]
 agymcp = "agy_mcp.cli:main"
 agy-bridge = "agy_mcp.bridge:main"

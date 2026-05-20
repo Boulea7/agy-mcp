@@ -29,7 +29,7 @@ HERE = Path(__file__).parent
 FIXTURES = HERE / "fixtures"
 FAKE_AGY_PRINT = FIXTURES / "fake_agy_print.py"
 FAKE_AGY_WITH_LOG = FIXTURES / "fake_agy_with_log.py"
-SAMPLE_KLOG = FIXTURES / "sample_klog.log"
+SAMPLE_KLOG = FIXTURES / "sample_klog.txt"
 
 
 # ---------------------------------------------------------------------------

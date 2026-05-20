@@ -1,0 +1,13 @@
+I0520 12:00:00.111111  1234 sidecar.go:1] Language server listening on random port at 60074 for HTTPS (gRPC)
+I0520 12:00:00.222222  1234 sidecar.go:2] Language server listening on random port at 60075 for HTTP server
+I0520 12:00:00.333333  1234 conv.go:1] Starting new conversation (agent=false)
+I0520 12:00:00.444444  1234 conv.go:2] Created conversation 12345678-aaaa-bbbb-cccc-1234567890ab
+I0520 12:00:00.555555  1234 print.go:1] Print mode: starting (promptLength=42, model="gemini-3-pro-preview-12-2025", conversationID="12345678-aaaa-bbbb-cccc-1234567890ab")
+I0520 12:00:00.666666  1234 flush.go:1] Auto-flush: sending 1 queued input(s) (combinedLength=42, media=0)
+I0520 12:00:00.777777  1234 stream.go:1] Starting conversation update stream for 12345678-aaaa-bbbb-cccc-1234567890ab
+I0520 12:00:00.888888  1234 rewind.go:1] Rewinding conversation 12345678-aaaa-bbbb-cccc-1234567890ab to step 3
+E0520 12:00:00.999999  1234 send.go:1] Print mode: SendUserMessage failed: backend returned 503
+E0520 12:00:01.000000  1234 auth.go:1] Print mode: auth timed out
+E0520 12:00:01.111111  1234 auth.go:2] Print mode: auth error: token rejected by server
+I0520 12:00:01.222222  1234 conv.go:99] Stopping conversation stream
+I0520 12:00:01.333333  1234 shutdown.go:1] Language server shutting down
