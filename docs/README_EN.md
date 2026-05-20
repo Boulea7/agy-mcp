@@ -133,7 +133,7 @@ that repo knows when to call `agy`:
 
 ```bash
 uv sync
-uv run pytest        # 392 tests
+uv run pytest        # 400 tests
 uv run agymcp        # FastMCP stdio server (manual testing)
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 ```

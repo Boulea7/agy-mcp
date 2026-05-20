@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-392%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-400%20passed-brightgreen.svg)](#)
 [![English](https://img.shields.io/badge/English-README-blue.svg)](docs/README_EN.md)
 
 > **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
@@ -124,7 +124,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 ```bash
 # clone 后
 uv sync
-uv run pytest        # 全量 392 个测试
+uv run pytest        # 全量 400 个测试
 uv run agymcp        # 启动 MCP stdio server（人工测试用）
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 ```
