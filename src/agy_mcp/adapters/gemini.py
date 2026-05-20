@@ -23,10 +23,8 @@ from agy_mcp.adapters.base import (
     _MAX_LINE_BYTES,
     _RunContext,
     _drain_stream,
-    _kill_group,
     _process_group_kwargs,
     _shutdown_cascade,
-    _terminate_group,
     has_flag,
     resolve_cwd,
 )
@@ -236,7 +234,9 @@ class GeminiCliBackend(BaseAdapter):
                             text="job cancelled by supervisor",
                         ),
                     )
-                    exit_code = _shutdown_cascade(proc, cancel_event=None)
+                    # See agy.py: escalation_cancel_event=None — first
+                    # cancel just initiated the cascade.
+                    exit_code = _shutdown_cascade(proc, escalation_cancel_event=None)
                     break
                 if time.time() >= deadline:
                     timed_out = True
@@ -248,7 +248,7 @@ class GeminiCliBackend(BaseAdapter):
                             text=f"gemini did not finish within {request.timeout}s",
                         ),
                     )
-                    exit_code = _shutdown_cascade(proc, cancel_event=None)
+                    exit_code = _shutdown_cascade(proc, escalation_cancel_event=None)
                     break
                 time.sleep(0.05)
         finally:
@@ -259,7 +259,10 @@ class GeminiCliBackend(BaseAdapter):
             # exit so we don't orphan a subagent the child might have spawned.
             if proc is not None and proc.poll() is None:
                 try:
-                    _shutdown_cascade(proc, cancel_event=None, terminate_grace=5, kill_grace=2)
+                    _shutdown_cascade(
+                        proc, escalation_cancel_event=None,
+                        terminate_grace=5, kill_grace=2,
+                    )
                 except OSError:
                     pass
             if proc is not None:

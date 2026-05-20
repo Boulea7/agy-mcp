@@ -374,7 +374,18 @@ def _open_append_no_follow(path: Path):
                 ) from exc
             return path.open("a", encoding="utf-8")
         raise
-    return os.fdopen(fd, "a", encoding="utf-8")
+    # Phase 4 R2 sec P3.1: if ``os.fdopen`` raises after the raw fd is
+    # in hand, close it explicitly so we don't leak. Practically
+    # near-zero risk (the wrapper does no I/O) but cheap insurance and
+    # matches the pattern in supervisor._safe_copyfile.
+    try:
+        return os.fdopen(fd, "a", encoding="utf-8")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
 
 def collect_artifact_paths(records: Iterable[JobRecord]) -> list[str]:

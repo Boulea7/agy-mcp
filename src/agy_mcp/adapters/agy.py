@@ -19,17 +19,11 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import re
-import signal
 import subprocess
-import sys
 import threading
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from agy_mcp.adapters.base import (
     AdapterRunResult,
@@ -38,17 +32,13 @@ from agy_mcp.adapters.base import (
     _MAX_LINE_BYTES,
     _RunContext,
     _drain_stream,
-    _kill_group,
     _process_group_kwargs,
-    _scrub_mapping,
     _shutdown_cascade,
-    _terminate_group,
     has_flag,
     resolve_cwd,
-    wait_with_cancel_poll,
 )
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
-from agy_mcp.safety import DEFAULT_SCRUB_ENV_NAMES, SafetyPolicy
+from agy_mcp.safety import SafetyPolicy
 from agy_mcp.utils import (
     is_windows,
     scrub_env,
@@ -415,7 +405,11 @@ class AgyPrintBackend(BaseAdapter):
                             text="job cancelled by supervisor",
                         ),
                     )
-                    exit_code = _shutdown_cascade(proc, cancel_event=None)
+                    # escalation_cancel_event=None: the first cancel just
+                    # initiated this cascade; passing the same event back
+                    # in would let a redundant re-check shortcut SIGKILL.
+                    # Double-cancel UX is tracked in followups.md.
+                    exit_code = _shutdown_cascade(proc, escalation_cancel_event=None)
                     break
                 if time.time() >= deadline:
                     timed_out = True
@@ -427,7 +421,8 @@ class AgyPrintBackend(BaseAdapter):
                             text=f"agy did not finish within {request.timeout}s",
                         ),
                     )
-                    exit_code = _shutdown_cascade(proc, cancel_event=None)
+                    # See cancel branch comment above re: None.
+                    exit_code = _shutdown_cascade(proc, escalation_cancel_event=None)
                     break
                 time.sleep(_TAIL_POLL_INTERVAL_S)
         finally:
@@ -440,7 +435,11 @@ class AgyPrintBackend(BaseAdapter):
             # process group so the grpc language server gets cleaned up.
             if proc is not None and proc.poll() is None:
                 try:
-                    _shutdown_cascade(proc, cancel_event=None, terminate_grace=5, kill_grace=2)
+                    # Cleanup-only cascade — no cancel signal here.
+                    _shutdown_cascade(
+                        proc, escalation_cancel_event=None,
+                        terminate_grace=5, kill_grace=2,
+                    )
                 except OSError:
                     pass
             if proc is not None:
@@ -557,10 +556,10 @@ class AgyPrintBackend(BaseAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Process-group helpers live in ``adapters/base`` since Phase 4 R1 P2#8 so
-# every adapter that spawns a subtree can reuse the same terminate cascade
-# without sibling imports. (``signal`` import retained: agy still uses it
-# directly in the wait loop for klog SIGUSR1 dispatch.)
+# Process-group helpers (``_process_group_kwargs``, ``_terminate_group``,
+# ``_kill_group``) and the cancel/timeout cascade (``_shutdown_cascade``)
+# live in ``adapters/base`` since Phase 4 R1 P2#8 so every adapter that
+# spawns a subtree reuses the same code without sibling imports.
 # ---------------------------------------------------------------------------
 
 

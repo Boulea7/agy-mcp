@@ -470,6 +470,28 @@ class Supervisor:
         # warnings (Phase 4 R1 P1#5).
         record = self.store.get_job(job_id)
         if record is None:
+            # Phase 4 R2 P2.2: the meta file disappeared mid-run (e.g. a
+            # concurrent ``retention.purge_older_than`` raced us, or the
+            # operator deleted it manually). Without a re-materialised
+            # record, ``status(job_id)`` would return ``None`` forever
+            # and the terminal status would be silently lost. Emit a
+            # diagnostic to the event log so post-mortem inspection is
+            # possible, then bail — re-creating the meta would conflict
+            # with the FileExistsError invariant added in R1 P1.2.
+            try:
+                self.store.append_event(
+                    job_id,
+                    CanonicalEvent(
+                        type="error",
+                        subtype="meta_lost",
+                        text=self.safety.redact(
+                            f"job meta vanished before finalize: status={status!r}",
+                        ),
+                    ),
+                )
+            except OSError:
+                # Event log might also be gone — nothing more we can do.
+                pass
             return
         record.status = status
         record.exit_code = exit_code
@@ -552,6 +574,10 @@ def _safe_copyfile(src: Path, dst: Path) -> None:
     than ``shutil.copyfile`` so the destination flags include
     ``O_NOFOLLOW`` (when supported) — copyfile internally calls
     ``open(dst, 'wb')`` which lacks that protection.
+
+    On failure, attempts to unlink the (possibly truncated) destination
+    so the job dir does not retain a half-written file (Phase 4 R2 sec
+    P3.2).
     """
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
@@ -559,11 +585,20 @@ def _safe_copyfile(src: Path, dst: Path) -> None:
         flags |= os.O_NOFOLLOW
     fd = os.open(dst, flags, 0o600)
     try:
-        with os.fdopen(fd, "wb") as dst_fp, src.open("rb") as src_fp:
-            shutil.copyfileobj(src_fp, dst_fp, length=64 * 1024)
+        dst_fp = os.fdopen(fd, "wb")
     except BaseException:
         try:
             os.close(fd)
+        except OSError:
+            pass
+        raise
+    try:
+        with dst_fp, src.open("rb") as src_fp:
+            shutil.copyfileobj(src_fp, dst_fp, length=64 * 1024)
+    except BaseException:
+        # Best-effort cleanup of the truncated partial file.
+        try:
+            os.unlink(dst)
         except OSError:
             pass
         raise

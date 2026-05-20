@@ -128,7 +128,17 @@ def _open_spool(path: Path):
                 raise OSError(errno.ELOOP, f"refusing to follow symlink: {path}") from exc
             return path.open("a", encoding="utf-8")
         raise
-    return os.fdopen(fd, "a", encoding="utf-8")
+    # Phase 4 R2 sec P3.1: close the raw fd explicitly if ``os.fdopen``
+    # raises after the open — practically near-zero risk but the cleanup
+    # cost is negligible.
+    try:
+        return os.fdopen(fd, "a", encoding="utf-8")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
 
 def _drain_stream(
@@ -474,7 +484,7 @@ def wait_with_cancel_poll(
 def _shutdown_cascade(
     proc: "subprocess.Popen",
     *,
-    cancel_event: "threading.Event | None" = None,
+    escalation_cancel_event: "threading.Event | None" = None,
     terminate_grace: float = 10.0,
     kill_grace: float = 5.0,
 ) -> int | None:
@@ -485,19 +495,32 @@ def _shutdown_cascade(
     polite grace can shorten the wait rather than blocking the whole loop.
     Returns the child's exit code, or ``None`` if it survived both phases.
 
+    ``escalation_cancel_event``: an OPTIONAL secondary cancel signal that
+    can shortcut the polite grace (useful when the operator hits cancel a
+    second time and wants the SIGKILL right now). Adapters today call
+    this function FROM their own cancel/timeout branch, so they pass
+    ``None`` — the first cancel already started this cascade and polling
+    the same event would be redundant. A future "double-cancel = immediate
+    SIGKILL" UX (tracked in followups.md) is the reason the parameter
+    exists at all.
+
     Replaces the inline ``terminate -> wait(10) -> kill -> wait(5)`` blocks
     that previously lived in the adapter wait loops (Phase 4 R1 P1#7).
     """
 
     _terminate_group(proc)
     exit_code = wait_with_cancel_poll(
-        proc, total_timeout=terminate_grace, cancel_event=cancel_event,
+        proc,
+        total_timeout=terminate_grace,
+        cancel_event=escalation_cancel_event,
     )
     if exit_code is not None:
         return exit_code
     _kill_group(proc)
     return wait_with_cancel_poll(
-        proc, total_timeout=kill_grace, cancel_event=cancel_event,
+        proc,
+        total_timeout=kill_grace,
+        cancel_event=escalation_cancel_event,
     )
 
 
