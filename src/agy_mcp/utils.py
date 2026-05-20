@@ -284,6 +284,15 @@ def safe_write_text(
     could swap a parent component (`<root>/.claude` → symlink to
     `/etc`) between input validation and the actual write.
     (Phase 5 R2 security P1-2.)
+
+    The walk is **narrow, not airtight**: ``is_symlink`` plus
+    ``resolve`` is two syscalls, and a determined attacker with local
+    write access to a parent directory could still race the mkstemp /
+    rename pair. The post-rename re-walk is a detect-after-the-fact
+    signal — it raises and surfaces the breach to the caller, but the
+    file has already been placed under the swapped parent. See
+    ``docs/review-followups.md`` (Phase 5 R3 sec P2 / arch P2) for the
+    full-atomic ``openat``-based fix earmarked for Phase 7.
     """
 
     ensure_directory(path.parent)
@@ -332,8 +341,12 @@ def safe_write_text(
         if verify_under is not None:
             # Post-write check: even if every parent component was a real
             # directory pre-write, an attacker could have moved a symlink
-            # in during the mkstemp/open window. Confirm the tempfile's
-            # realpath is still inside verify_under before promoting it.
+            # in during the mkstemp/open window. Re-walk the parent chain
+            # with ``is_symlink()`` (using lstat semantics, not resolve()
+            # which would collapse symlinks pointing back into the root
+            # and let the relative_to pass — see Phase 5 R3 security P2)
+            # before promoting it.
+            _verify_parents_no_symlink(tmp, verify_under)
             try:
                 resolved_tmp = tmp.resolve(strict=True)
                 resolved_tmp.relative_to(verify_under.resolve(strict=True))
@@ -343,8 +356,10 @@ def safe_write_text(
                 ) from exc
         os.replace(tmp, path)
         if verify_under is not None:
-            # Final paranoia check: post-rename, ensure the destination is
-            # still inside verify_under (catches a swap during os.replace).
+            # Final paranoia check: post-rename, ensure every parent
+            # component is still a real directory (lstat-based) AND the
+            # destination remains inside verify_under (resolve-based).
+            _verify_parents_no_symlink(path, verify_under)
             try:
                 resolved_path = path.resolve(strict=True)
                 resolved_path.relative_to(verify_under.resolve(strict=True))

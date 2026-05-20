@@ -227,7 +227,7 @@ def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
             severity="warning",
             detail=safety.redact(
                 f"Google OAuth credentials at {AGY_OAUTH_CREDS_PATH} is not "
-                "a regular file (st_mode=0o{st.st_mode:o}).",
+                f"a regular file (st_mode=0o{st.st_mode:o})."
             ),
         )
     return DoctorCheck(

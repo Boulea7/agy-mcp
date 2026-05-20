@@ -509,21 +509,49 @@ def test_agy_continue_rejects_oversized_session_id(reset_state, tmp_path: Path):
 def test_supervisor_rejects_burst_over_concurrency_cap(reset_state, tmp_path: Path):
     """Phase 5 R2 sec P1-3: supervisor.start refuses past max_concurrent_jobs."""
 
-    # Reach into the fixture-provided supervisor and shrink its slot count to
-    # 1 so we can deterministically trip the rejection on the second start.
+    import threading
+
+    # Wrap the existing adapter so the first job blocks on an event.
+    # Without this, the recording adapter is instant and the slot is
+    # released before the second start can race the limiter, so the
+    # rejection branch is never exercised. (Phase 5 R3 arch P2-4.)
     sup = server._supervisor
+    assert sup is not None
+    cap = _capability()
+    block = threading.Event()
+    release_seen = threading.Event()
+
+    class _BlockingAdapter(_RecordingAdapter):
+        def run(self, request, *, log_path=None, stdout_path=None,
+                stderr_path=None, event_sink=None, cancel_event=None):
+            release_seen.set()
+            block.wait(timeout=5.0)
+            return super().run(
+                request,
+                log_path=log_path,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                event_sink=event_sink,
+                cancel_event=cancel_event,
+            )
+
+    events = [CanonicalEvent(type="system", subtype="init")]
+    blocking_adapter = _BlockingAdapter(cap=cap, events=events)
+    sup._adapter_factory = lambda req, c, s: (blocking_adapter, [])  # type: ignore[attr-defined]
     sup._max_concurrent_jobs = 1  # type: ignore[attr-defined]
-    sup._job_slots = __import__("threading").Semaphore(1)  # type: ignore[attr-defined]
+    sup._job_slots = threading.Semaphore(1)  # type: ignore[attr-defined]
+
     first = server.agy_start_tool(PROMPT="hi", cd=str(tmp_path))
     assert first["success"] is True
+    assert release_seen.wait(timeout=2.0), "first job never reached run()"
     second = server.agy_start_tool(PROMPT="hi2", cd=str(tmp_path))
-    # The first may have finished by the time the second runs (test
-    # adapter is instant), so either it succeeds OR it surfaces the
-    # busy envelope. Both are acceptable; what matters is that no
-    # background thread leaks.
-    assert second["success"] in (True, False)
-    if not second["success"]:
-        assert "busy" in (second["error"] or "")
+    assert second["success"] is False
+    assert "busy" in (second["error"] or "")
+    block.set()  # release the first job so the worker can finish
+    assert _wait_until(
+        lambda: server.agy_status_tool(first["job_id"])["record"]["status"]
+        == "completed",
+    )
 
 
 def test_safe_write_text_blocks_symlinked_parent(tmp_path: Path):
@@ -540,3 +568,65 @@ def test_safe_write_text_blocks_symlinked_parent(tmp_path: Path):
     target = root / "sub" / "file.txt"
     with pytest.raises(OSError, match="symlink"):
         safe_write_text(target, "data", verify_under=root)
+
+
+def test_bridge_request_extra_env_rejects_reserved_underscore(reset_state, tmp_path: Path):
+    """Phase 5 R3 sec P3: refuse the POSIX-reserved env name '_'."""
+
+    out = _run_async(
+        server.agy_tool(
+            PROMPT="hi",
+            cd=str(tmp_path),
+            extra_env={"_": "ignored"},
+        )
+    )
+    assert out["success"] is False
+    assert "extra_env" in (out["error"] or "")
+
+
+def test_doctor_check_auth_handles_symlink_credentials(reset_state, tmp_path, monkeypatch):
+    """Phase 5 R2/R3 sec: symlinked oauth_creds → warning, no f-string bug."""
+
+    from agy_mcp import doctor as doc_mod
+
+    target = tmp_path / "real_creds.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "oauth_creds.json"
+    link.symlink_to(target)
+    monkeypatch.setattr(doc_mod, "AGY_OAUTH_CREDS_PATH", link)
+    safety = SafetyPolicy()
+    check = doc_mod._check_auth(safety)
+    assert check.ok is False
+    assert check.severity == "warning"
+    assert "symlink" in check.detail
+
+
+def test_doctor_check_auth_handles_non_regular(reset_state, tmp_path, monkeypatch):
+    """Phase 5 R3 sec P1: non-regular file path interpolates octal mode."""
+
+    from agy_mcp import doctor as doc_mod
+
+    # A directory satisfies lstat without being a regular file or a symlink
+    # (S_ISLNK is False, S_ISREG is False). The branch that previously had
+    # the broken f-string runs.
+    bogus = tmp_path / "creds_dir"
+    bogus.mkdir()
+    monkeypatch.setattr(doc_mod, "AGY_OAUTH_CREDS_PATH", bogus)
+    safety = SafetyPolicy()
+    check = doc_mod._check_auth(safety)
+    assert check.ok is False
+    assert "regular file" in check.detail
+    # Verify the f-string interpolated rather than leaking the literal
+    # ``{st.st_mode:o}``.
+    assert "{st.st_mode" not in check.detail
+    assert "st_mode=0o" in check.detail
+
+
+def test_agy_status_job_id_pattern_aligned_with_store(reset_state):
+    """Phase 5 R3 sec P2: server gate matches session_store regex."""
+
+    # A 96-char id (max allowed pre-R3) should now fail the server gate
+    # rather than failing later at create_job inside the supervisor.
+    out = server.agy_status_tool("z" * 96)
+    assert out["success"] is False
+    assert "job_id" in (out["error"] or "")

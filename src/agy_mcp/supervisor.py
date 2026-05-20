@@ -259,6 +259,20 @@ class Supervisor:
                 cwd=request.cwd,
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
+        except OSError as exc:
+            # ``ensure_directory`` inside ``create_job`` can raise plain
+            # ``OSError`` (disk full, EACCES, ENOSPC). Without the
+            # release here the slot we just took would be retired
+            # permanently, slowly draining the concurrency cap.
+            # (Phase 5 R3 arch P1-1.)
+            self._job_slots.release()
+            return BridgeResponse(
+                success=False,
+                error=self.safety.redact(f"failed to create job record: {exc}"),
+                warnings=[*route_warnings_redacted, *cap_warnings],
+                cwd=request.cwd,
+                adapter=AdapterMetadata(backend=backend_name),
+            ).touch()
 
         cancel_event = threading.Event()
         thread = threading.Thread(
@@ -274,7 +288,36 @@ class Supervisor:
         )
         with self._lock:
             self._jobs[record.job_id] = handle
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            # Thread start failure (RLIMIT_NPROC, OOM in stack allocation)
+            # means ``_run_job`` will never run and its ``finally`` will
+            # never release the slot. Release here so the cap doesn't
+            # drift permanently downwards. (Phase 5 R3 sec P2.)
+            self._job_slots.release()
+            with self._lock:
+                self._jobs.pop(record.job_id, None)
+            try:
+                rec = self.store.get_job(record.job_id)
+                if rec is not None:
+                    rec.status = "failed"
+                    rec.error = self.safety.redact(
+                        f"failed to start worker thread: {exc}",
+                    )
+                    rec.touch()
+                    self.store.update_job(rec)
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
+            return BridgeResponse(
+                success=False,
+                error=self.safety.redact(
+                    f"failed to spawn worker thread for {record.job_id}: {exc}",
+                ),
+                warnings=[*route_warnings_redacted, *cap_warnings],
+                cwd=request.cwd,
+                adapter=AdapterMetadata(backend=backend_name),
+            ).touch()
 
         return BridgeResponse(
             success=True,

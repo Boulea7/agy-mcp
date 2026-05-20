@@ -27,6 +27,7 @@ a ``/Users/<user>/`` path.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 from pathlib import Path
@@ -73,17 +74,22 @@ _gemini_adapter: GeminiCliBackend | None = None
 # Defence-in-depth cap so a malicious or buggy caller can't burn unbounded
 # memory by passing a multi-megabyte string in place of a job_id slug. We
 # also pin a charset so structured failures don't echo control bytes back
-# to the caller (Phase 5 R2 security P2-2).
-_MAX_JOB_ID_LEN = 96
-_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,96}$")
+# to the caller (Phase 5 R2 security P2-2). The pattern aligns with the
+# session_store's own regex (`^job_[A-Za-z0-9_-]{1,80}$`, max 84 chars)
+# so the server gate never accepts more than the deeper layer will store
+# (Phase 5 R3 security P2).
+_MAX_JOB_ID_LEN = 84
+_JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
 _MAX_SESSION_ID_LEN = 96
 # Concurrency limiter for the async bridge tools. anyio's default thread
 # limiter is global to the process (40); ``_bridge_run`` itself spawns
 # additional reader threads + a subprocess per call, so we add a finer cap
 # to keep a flood of concurrent MCP calls from exhausting local resources
-# (Phase 5 R2 security P1-3).
+# (Phase 5 R2 security P1-3). ``anyio.CapacityLimiter`` is loop-affine —
+# each instance is bound to the asyncio loop that created it — so we cache
+# per running loop id rather than process-globally (Phase 5 R3 arch P1).
 _BRIDGE_CONCURRENCY = 8
-_bridge_limiter: anyio.CapacityLimiter | None = None
+_bridge_limiters_by_loop: dict[int, anyio.CapacityLimiter] = {}
 _bridge_limiter_lock = threading.Lock()
 
 # Defence-in-depth cap on the install-skill argument surface
@@ -138,21 +144,32 @@ def _ensure_adapters(*, force_refresh: bool = False) -> tuple[AgyPrintBackend, G
         return _agy_adapter, _gemini_adapter
 
 
-def _get_bridge_limiter() -> anyio.CapacityLimiter:
-    """Return (and lazily build) the per-process bridge concurrency cap."""
+async def _get_bridge_limiter() -> anyio.CapacityLimiter:
+    """Return (and lazily build) the per-loop bridge concurrency cap.
 
-    global _bridge_limiter
+    ``anyio.CapacityLimiter`` binds to the asyncio loop active when the
+    instance is constructed, so a process-global singleton breaks when
+    a second loop is spun up (tests using ``asyncio.run`` per call,
+    embedded sidecar loops, hot reloads). We key the cache on the id
+    of the current running loop so each loop sees a fresh, valid
+    limiter that still enforces the per-loop cap across concurrent
+    calls. (Phase 5 R3 arch P1.)
+    """
+
+    loop = asyncio.get_running_loop()
+    key = id(loop)
     with _bridge_limiter_lock:
-        if _bridge_limiter is None:
-            _bridge_limiter = anyio.CapacityLimiter(_BRIDGE_CONCURRENCY)
-        return _bridge_limiter
+        limiter = _bridge_limiters_by_loop.get(key)
+        if limiter is None:
+            limiter = anyio.CapacityLimiter(_BRIDGE_CONCURRENCY)
+            _bridge_limiters_by_loop[key] = limiter
+        return limiter
 
 
 def _reset_state_for_tests() -> None:
     """Drop the cached singletons so tests can swap in fresh stores."""
 
     global _config, _safety, _store, _supervisor, _agy_adapter, _gemini_adapter
-    global _bridge_limiter
     with _state_lock:
         _config = None
         _safety = None
@@ -161,7 +178,7 @@ def _reset_state_for_tests() -> None:
         _agy_adapter = None
         _gemini_adapter = None
     with _bridge_limiter_lock:
-        _bridge_limiter = None
+        _bridge_limiters_by_loop.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +238,7 @@ def _validate_job_id(safety: SafetyPolicy, job_id: str) -> str | None:
     if not _JOB_ID_PATTERN.match(job_id):
         # Don't echo the raw value back — it might contain control bytes.
         return safety.redact(
-            "job_id must match [A-Za-z0-9_-]{1,96}",
+            "job_id must match ^job_[A-Za-z0-9_-]{1,80}$",
         )
     return None
 
@@ -306,7 +323,7 @@ async def agy_tool(
     # The CapacityLimiter caps concurrent bridge calls per process so a
     # flood of MCP requests can't exhaust local resources. (Phase 5 R2
     # security P1-3.)
-    limiter = _get_bridge_limiter()
+    limiter = await _get_bridge_limiter()
     response = await anyio.to_thread.run_sync(
         _bridge_run, request, config, safety, limiter=limiter,
     )
@@ -373,7 +390,7 @@ async def agy_continue_tool(
         )
     except Exception as exc:  # noqa: BLE001
         return _structured_failure(safety, exc, cwd=cd)
-    limiter = _get_bridge_limiter()
+    limiter = await _get_bridge_limiter()
     response = await anyio.to_thread.run_sync(
         _bridge_run, request, config, safety, limiter=limiter,
     )

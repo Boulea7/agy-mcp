@@ -144,11 +144,23 @@ def install_skills(
                 continue
         try:
             overwrote = skill_file.exists()
+            # User-scope writes get ``verify_under=Path.home()`` so the
+            # parent-symlink walk closes the home-relative TOCTOU window
+            # too (Phase 5 R3 sec P3). Project-scope passes the validated
+            # root the operator handed us.
+            anchor: Path | None
+            if scope == "project":
+                anchor = validated_root
+            else:
+                try:
+                    anchor = Path.home().resolve(strict=True)
+                except OSError:
+                    anchor = None
             safe_write_text(
                 skill_file,
                 _PLACEHOLDER_BODY,
                 mode=0o644,
-                verify_under=validated_root if scope == "project" else None,
+                verify_under=anchor,
             )
         except OSError as exc:
             result.warnings.append(sft.redact(f"install to {skill_file} failed: {exc}"))
