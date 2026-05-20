@@ -213,9 +213,10 @@ target protocol.
 
 `max_output_chars` (default `60000`) caps the buffered
 `agent_messages` field returned in the synchronous envelope. Truncation
-is signalled with a `[truncated: N chars omitted]` marker; the full
-stream is always preserved in the session store's `events.jsonl` so
-`agy_read(job_id, translate="raw")` returns the canonical record.
+uses the same `...[truncated]...` middle marker as stdout/stderr tails
+and adds a warning to the response. The full stream is always preserved
+in the session store's `events.jsonl` so `agy_read(job_id,
+translate="raw")` returns the canonical record.
 
 ## Fail-fast on missing OAuth
 

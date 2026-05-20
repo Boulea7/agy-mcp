@@ -47,6 +47,7 @@ from agy_mcp.models import (
     CanonicalEvent,
 )
 from agy_mcp.safety import SafetyPolicy, is_git_workspace
+from agy_mcp.utils import truncate_middle
 from agy_mcp.worktree import (
     WorktreeError,
     create_worktree,
@@ -513,6 +514,16 @@ def _run_unsafe(
     translated = translator.translate_many(result.events)
 
     assistant_text = _pick_assistant_text(result.events)
+    if len(assistant_text) > request.max_output_chars:
+        original_len = len(assistant_text)
+        assistant_text = truncate_middle(
+            assistant_text,
+            max_chars=request.max_output_chars,
+        )
+        all_warnings.append(
+            "agent_messages truncated from "
+            f"{original_len} to {len(assistant_text)} chars by max_output_chars"
+        )
     success = result.exit_code == 0
     status = "completed" if success else "failed"
     all_messages = translated if request.return_all_messages else []

@@ -1077,6 +1077,27 @@ def test_run_unsafe_warnings_field_is_populated_on_success(
     assert "a capability warning" in resp.warnings
 
 
+def test_run_unsafe_truncates_agent_messages(monkeypatch, tmp_path: Path):
+    huge_text = "A" * 120
+    cap = _capability("agy")
+    fake = _FakeAdapter(
+        capability=cap,
+        run_result=_result(
+            events=[
+                CanonicalEvent(type="assistant", text=huge_text),
+                CanonicalEvent(type="result", subtype="success"),
+            ],
+        ),
+    )
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+    request = BridgeRequest(prompt="x", cwd=str(tmp_path), max_output_chars=40)
+    resp = _run(request, _default_config(worktree_default=False), _safety())
+    assert resp.success is True
+    assert len(resp.agent_messages) <= 40
+    assert "...[truncated]..." in resp.agent_messages
+    assert any("agent_messages truncated" in warning for warning in resp.warnings)
+
+
 def test_run_debug_traceback_anonymises_home_path(monkeypatch, tmp_path: Path):
     """Phase 3 R1 / M3: tracebacks must not leak /Users/<u>/ in the envelope."""
 
