@@ -67,15 +67,30 @@ def test_build_command_includes_stream_json_and_resume(tmp_path):
         sandbox=True, model="gemini-3-pro",
     )
     argv = backend.build_command(req, log_path=None)
-    assert "--prompt" in argv
-    assert "hello" in argv
+    # H1 fix: prompt/model/resume use fused --flag=value form so a hostile
+    # value starting with -- cannot peel off as a fresh flag.
+    assert "--prompt=hello" in argv
     assert "-o" in argv
     assert "stream-json" in argv
     assert "--sandbox" in argv
-    assert "--model" in argv
-    assert argv[argv.index("--model") + 1] == "gemini-3-pro"
-    assert "--resume" in argv
-    assert argv[argv.index("--resume") + 1] == "sess-1"
+    assert "--model=gemini-3-pro" in argv
+    assert "--resume=sess-1" in argv
+
+
+def test_gemini_build_command_resists_flag_prompt_injection(tmp_path):
+    """Phase 3 R1 / H1 regression: hostile prompt starting with -- must not
+    peel off as a fresh flag in argv."""
+
+    wrapper = _wrapper(tmp_path)
+    backend = GeminiCliBackend(bin_override=str(wrapper))
+    req = BridgeRequest(prompt="--sandbox", cwd=str(tmp_path))
+    argv = backend.build_command(req, log_path=None)
+    # The hostile string must live INSIDE --prompt=<value>, never as a free
+    # argv element where the downstream parser could consume it as a flag.
+    # (--sandbox-as-real-flag may still be added by request.sandbox; here
+    # request.sandbox is False so a bare "--sandbox" would prove injection.)
+    assert "--sandbox" not in argv
+    assert any(a == "--prompt=--sandbox" for a in argv)
 
 
 def test_build_command_raises_without_binary(tmp_path):

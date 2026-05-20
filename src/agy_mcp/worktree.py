@@ -26,9 +26,11 @@ digits, dot, underscore, dash; max 80 chars.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -152,7 +154,15 @@ def create_worktree(
     rejected, git command failed, worktree already exists, etc.).
     """
 
-    cwd = Path(cwd).expanduser().resolve()
+    # strict=True refuses dangling symlinks fail-closed (Phase 3 review P1.4).
+    # Without it, a broken symlink at ``cwd`` would silently resolve to its
+    # nonexistent target and ``git rev-parse`` would run in whatever ``cwd``
+    # the parent process happened to be in.
+    try:
+        cwd = Path(cwd).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise WorktreeError(f"cwd does not resolve to a real path: {cwd!r}: {exc}") from exc
+
     root = repo_root(cwd)
     if root is None:
         raise WorktreeError(f"cwd is not a git repository: {cwd}")
@@ -161,21 +171,31 @@ def create_worktree(
     worktree_path = _worktree_path_for(root, name)
     branch = f"agy-mcp/{name}"
 
-    if worktree_path.exists():
+    # Atomic-create worktree_path with 0o700 mode in a single syscall. This
+    # collapses the prior ``exists() → mkdir → chmod → git add`` window where
+    # a concurrent attacker could plant a symlink between the exists check
+    # and the git invocation (Phase 3 review M1). ``os.mkdir`` is the right
+    # primitive here because it never follows symlinks for the leaf and it
+    # refuses if the leaf already exists.
+    parent = worktree_path.parent
+    _ensure_parent_dir(parent)
+
+    # Pre-create the worktree leaf so we own it and can hand it to git. Git's
+    # ``worktree add`` accepts an existing empty directory; this guarantees
+    # the leaf cannot be a symlink because os.mkdir refused to follow one.
+    try:
+        os.mkdir(worktree_path, mode=0o700)
+    except FileExistsError as exc:
         raise WorktreeError(
             f"worktree path already exists: {worktree_path} — choose a different "
             "session id or call cleanup_worktree() first"
-        )
+        ) from exc
+    except OSError as exc:
+        raise WorktreeError(f"failed to allocate worktree dir {worktree_path}: {exc}") from exc
 
-    # Ensure the parent ``.agy-mcp/worktrees`` directory exists with safe perms.
-    parent = worktree_path.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    try:
-        parent.chmod(0o700)
-    except OSError:
-        # Best-effort on filesystems that ignore chmod.
-        pass
-
+    # git refuses to add into a non-empty directory; passing an empty dir
+    # works on git >= 2.32. On older git we'd need rmdir-then-add, but the
+    # project requires >= 2.40 (see pyproject.toml).
     argv = [
         "git", "worktree", "add",
         "-b", branch,
@@ -192,8 +212,11 @@ def create_worktree(
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        # Roll back the empty dir we just allocated so a retry can succeed.
+        _safe_rmdir(worktree_path)
         raise WorktreeError(f"git worktree add failed to launch: {exc}") from exc
     if proc.returncode != 0:
+        _safe_rmdir(worktree_path)
         # Surface a redact-safe error: git's stderr never contains secrets
         # in this command, but we cap it to keep the response envelope small.
         stderr = (proc.stderr or "").strip()[:500]
@@ -207,6 +230,53 @@ def create_worktree(
         base_repo=root,
         base_ref=base_ref,
     )
+
+
+def _ensure_parent_dir(parent: Path) -> None:
+    """Create ``parent`` with 0o700 perms, refusing if it's a symlink.
+
+    ``Path.chmod`` follows symlinks (it calls ``os.chmod`` not ``os.lchmod``),
+    so the previous "mkdir then chmod" sequence had a TOCTOU window where an
+    attacker could swap the parent to a symlink targeting a sensitive dir
+    (Phase 3 review M2). We refuse fail-closed if anything in the parent
+    chain is already a symlink.
+    """
+
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        st = os.lstat(parent)
+    except OSError as exc:
+        raise WorktreeError(f"failed to stat worktree parent {parent}: {exc}") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise WorktreeError(
+            f"refusing to use symlinked worktree parent: {parent}"
+        )
+    # Use the no-follow chmod variant where supported; otherwise fall back to
+    # plain chmod (the lstat guard above already excluded symlinks, so plain
+    # chmod is safe here).
+    try:
+        os.chmod(parent, 0o700, follow_symlinks=False)  # type: ignore[call-arg]
+    except (OSError, NotImplementedError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in (
+            errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL,
+        ):
+            raise WorktreeError(f"failed to chmod worktree parent: {exc}") from exc
+        try:
+            os.chmod(parent, 0o700)
+        except OSError:
+            # Best-effort on filesystems that ignore chmod entirely.
+            pass
+
+
+def _safe_rmdir(path: Path) -> None:
+    """Remove an empty directory we just created. Never follows symlinks."""
+
+    try:
+        os.rmdir(path)
+    except OSError:
+        # Either already gone, contains stuff git wrote, or a symlink we
+        # refused to traverse. Leave it for human inspection.
+        pass
 
 
 def cleanup_worktree(
@@ -269,8 +339,13 @@ def cleanup_worktree(
         _delete_branch(handle)
 
 
-def _delete_branch(handle: WorktreeHandle) -> None:
-    """Delete the branch created by ``git worktree add -b`` (best-effort)."""
+def _delete_branch(handle: WorktreeHandle) -> bool:
+    """Delete the branch created by ``git worktree add -b`` (best-effort).
+
+    Returns True on success, False otherwise (branch gone, git error, spawn
+    failure). Callers can log the False result in debug mode without crashing
+    the cleanup flow.
+    """
 
     try:
         proc = subprocess.run(  # noqa: S603 - argv hard-coded
@@ -282,12 +357,8 @@ def _delete_branch(handle: WorktreeHandle) -> None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        # Branch deletion is best-effort; the user can `git branch -D` later.
-        return
-    # Ignore non-zero exit codes here: the branch may already be gone (e.g.
-    # the user cleaned up manually). Surfacing this as an error would be
-    # noisy without buying anything.
-    _ = proc
+        return False
+    return proc.returncode == 0
 
 
 # ---------------------------------------------------------------------------

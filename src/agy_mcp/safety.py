@@ -97,6 +97,13 @@ class SafetyPolicy:
     """Bundled policy applied across the bridge / supervisor / adapter layers."""
 
     config: SafetyConfig = field(default_factory=SafetyConfig)
+    # Pre-compiled extra patterns; lazily populated so callers that mutate
+    # ``config.redact_extra_patterns`` between requests still see fresh
+    # regexes (Phase 3 review P2.2: avoid recompiling per redact call).
+    _redact_patterns: tuple[re.Pattern[str], ...] | None = field(
+        default=None, repr=False,
+    )
+    _redact_signature: tuple[str, ...] | None = field(default=None, repr=False)
 
     @classmethod
     def from_config(cls, config: Config | None = None) -> "SafetyPolicy":
@@ -114,13 +121,18 @@ class SafetyPolicy:
         names = (*DEFAULT_SCRUB_ENV_NAMES, *self.config.scrub_extra_env)
         return scrub_env(env, extra_names=names)
 
+    def _extra_patterns(self) -> tuple[re.Pattern[str], ...]:
+        signature = tuple(self.config.redact_extra_patterns)
+        if self._redact_patterns is None or self._redact_signature != signature:
+            self._redact_patterns = tuple(re.compile(p) for p in signature)
+            self._redact_signature = signature
+        return self._redact_patterns
+
     def redact(self, text: str) -> str:
-        patterns = tuple(re.compile(p) for p in self.config.redact_extra_patterns)
-        return redact_text(text, extra_patterns=patterns)
+        return redact_text(text, extra_patterns=self._extra_patterns())
 
     def redact_command(self, argv: list[str]) -> list[str]:
-        patterns = tuple(re.compile(p) for p in self.config.redact_extra_patterns)
-        return redact_command(argv, extra_patterns=patterns)
+        return redact_command(argv, extra_patterns=self._extra_patterns())
 
     # ------------------------------------------------------------------
     # Command / prompt screening

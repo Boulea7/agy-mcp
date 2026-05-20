@@ -47,7 +47,6 @@ from agy_mcp.models import (
     CanonicalEvent,
 )
 from agy_mcp.safety import SafetyPolicy, is_git_workspace
-from agy_mcp.utils import redact_command
 from agy_mcp.worktree import (
     WorktreeError,
     WorktreeHandle,
@@ -97,8 +96,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Override the config output protocol.")
     p.add_argument("--return-all-messages", action="store_true",
                    help="Embed every translated event in the response body.")
-    p.add_argument("--detach", action="store_true",
-                   help="(reserved for Phase 4) — currently runs in-process.")
+    p.add_argument(
+        "--detach", action="store_true",
+        help="(reserved for Phase 4) — rejected today; pass --PROMPT directly.",
+    )
     p.add_argument("--debug", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="Build argv + capability snapshot without spawning.")
@@ -112,6 +113,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 _EXTRA_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+# Control chars that must never appear in env values — a smuggled \n splits
+# the value into a fake second variable when echoed via printenv / eval
+# (Phase 3 review M5). NUL is rejected by the kernel anyway; we add CR/LF.
+_EXTRA_ENV_VALUE_BANNED = re.compile(r"[\x00\r\n]")
 
 
 def _parse_extra_env(items: list[str]) -> dict[str, str]:
@@ -120,6 +125,8 @@ def _parse_extra_env(items: list[str]) -> dict[str, str]:
     Names that look like environment variables (uppercase + underscore +
     digit) are accepted; anything else is silently dropped — we don't want
     a poisoned flag like ``--extra-env "/etc/passwd=x"`` to reach the env.
+    Values containing NUL / CR / LF are also dropped to block smuggling of
+    a fake second variable into the child env.
     """
 
     out: dict[str, str] = {}
@@ -129,6 +136,8 @@ def _parse_extra_env(items: list[str]) -> dict[str, str]:
         k, _, v = raw.partition("=")
         k = k.strip()
         if not k or not _EXTRA_ENV_NAME_RE.match(k):
+            continue
+        if _EXTRA_ENV_VALUE_BANNED.search(v):
             continue
         out[k] = v
     return out
@@ -196,12 +205,13 @@ def _select_backend(
             )
         return adapter, warnings
 
-    # auto routing
+    # auto routing — lazy-probe gemini only when agy is unhealthy. Each
+    # _build_adapter call re-probes, so unconditional gemini detection in the
+    # healthy-agy path is wasted latency (see Phase 3 review P1.2).
     agy = _build_adapter("agy", config, safety)
     cap_agy = agy.detect()
     if cap_agy.bin_path and cap_agy.authenticated and cap_agy.supports_print:
         return agy, warnings
-    # Fall back to gemini if available.
     gemini = _build_adapter("gemini", config, safety)
     cap_gem = gemini.detect()
     if cap_gem.bin_path and cap_gem.supports_streaming:
@@ -233,6 +243,11 @@ def _wants_worktree(request: BridgeRequest, config: Config) -> bool:
 
 
 _SESSION_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
+# Collapse runs of dots so a seed like ``foo/../bar`` doesn't survive as
+# ``foo-..-bar``, which would later confuse git ref-name validation
+# (Phase 3 review M4). Git rejects ``..`` in refnames; we'd rather not lean
+# on git's error message for an easy upstream filter.
+_SESSION_SLUG_DOT_RUN = re.compile(r"\.{2,}")
 
 
 def _make_session_slug(seed: str | None) -> str:
@@ -245,7 +260,9 @@ def _make_session_slug(seed: str | None) -> str:
     """
 
     if seed:
-        sanitised = _SESSION_SLUG_RE.sub("-", seed).lstrip(".-_") or "session"
+        sanitised = _SESSION_SLUG_RE.sub("-", seed)
+        sanitised = _SESSION_SLUG_DOT_RUN.sub(".", sanitised)
+        sanitised = sanitised.lstrip(".-_") or "session"
         return sanitised[:80]
     return "job-" + uuid.uuid4().hex[:16]
 
@@ -261,9 +278,19 @@ def main(argv: list[str] | None = None) -> int:
 
     config = get_config()
     safety = SafetyPolicy.from_config(config)
-    request = _request_from_args(args, config)
 
-    response = _run(request, config, safety)
+    if args.detach:
+        # Refuse loudly until Phase 4 wires the supervisor in — silent no-op
+        # was the worst of both worlds (Phase 3 review P3.1).
+        response = BridgeResponse(
+            success=False,
+            error="--detach is not implemented yet (reserved for Phase 4 supervisor)",
+            cwd=args.cd,
+            adapter=AdapterMetadata(),
+        ).touch()
+    else:
+        request = _request_from_args(args, config)
+        response = _run(request, config, safety)
     json.dump(response.model_dump(exclude_none=False), sys.stdout)
     sys.stdout.write("\n")
     return 0 if response.success else 1
@@ -310,6 +337,18 @@ def _run_unsafe(
     cap = adapter.detect()
     backend_name = cap.backend
 
+    # Short-circuit before any side effect when the routed backend has no
+    # usable binary. Creating a worktree just to tear it down moments later
+    # leaks state and wastes time (Phase 3 review P1.3).
+    if not cap.bin_path and not request.dry_run:
+        return BridgeResponse(
+            success=False,
+            error=" | ".join(route_warnings) or f"backend={backend_name!r} unavailable",
+            warnings=list(cap.warnings),
+            cwd=str(cwd_path),
+            adapter=_adapter_meta(adapter, request),
+        ).touch()
+
     worktree_handle: WorktreeHandle | None = None
     effective_cwd = cwd_path
     worktree_warnings: list[str] = []
@@ -319,14 +358,17 @@ def _run_unsafe(
             worktree_handle = create_worktree(cwd_path, slug)
             effective_cwd = worktree_handle.path
         except WorktreeError as exc:
-            if request.worktree is True:
-                return BridgeResponse(
-                    success=False,
-                    error=f"worktree creation failed: {exc}",
-                    cwd=str(cwd_path),
-                    adapter=AdapterMetadata(backend=backend_name),
-                ).touch()
-            worktree_warnings.append(f"worktree fallback to direct write: {exc}")
+            # Fail-closed: any execute+allow_write run that *asked for* worktree
+            # isolation (either explicitly or via config default) must NOT
+            # silently fall back to writing the real checkout. This was a
+            # fail-open hole flagged in Phase 3 review (H2).
+            return BridgeResponse(
+                success=False,
+                error=f"worktree creation failed: {exc}",
+                warnings=route_warnings,
+                cwd=str(cwd_path),
+                adapter=_adapter_meta(adapter, request),
+            ).touch()
 
     if request.dry_run:
         return _dry_run_response(
@@ -336,6 +378,8 @@ def _run_unsafe(
 
     sink = ListEventSink()
     log_path = None
+    result = None
+    run_error: str | None = None
     with tempfile.TemporaryDirectory(prefix="agy-mcp-") as spool_dir:
         spool_root = Path(spool_dir)
         if cap.supports_log_file:
@@ -350,12 +394,29 @@ def _run_unsafe(
                 stderr_path=stderr_path,
                 event_sink=sink,
             )
+        except Exception as exc:  # noqa: BLE001 - keep worktree cleanup reachable
+            # An exception escaping adapter.run() would otherwise skip the
+            # BridgeResponse path entirely (Phase 3 review P1.1). We translate
+            # it into a structured failure that still carries the warnings
+            # already gathered, so the caller doesn't lose context.
+            run_error = safety.redact(str(exc))
         finally:
             if worktree_handle is not None:
                 try:
                     cleanup_worktree(worktree_handle, force=True)
                 except WorktreeError as exc:
                     worktree_warnings.append(f"worktree cleanup failed: {exc}")
+
+    all_warnings = [*route_warnings, *worktree_warnings, *cap.warnings]
+
+    if result is None:
+        return BridgeResponse(
+            success=False,
+            error=run_error or "adapter raised an unknown error",
+            warnings=all_warnings,
+            cwd=str(effective_cwd),
+            adapter=_adapter_meta(adapter, request),
+        ).touch()
 
     translator = ProtocolTranslator(
         request.output_protocol,
@@ -369,7 +430,7 @@ def _run_unsafe(
     status = "completed" if success else "failed"
     all_messages = translated if request.return_all_messages else []
 
-    response = BridgeResponse(
+    return BridgeResponse(
         success=success,
         SESSION_ID=result.session_id or request.session_id or "",
         status=status,
@@ -377,17 +438,12 @@ def _run_unsafe(
         all_messages=all_messages,
         artifacts=result.artifacts,
         error=None if success else (_pick_error_text(result.events) or "non-zero exit"),
+        warnings=all_warnings,
         cwd=str(effective_cwd),
         adapter=_adapter_meta(adapter, request),
         command_preview=None,
         log_path=None,  # ephemeral spool dir is gone by now
     ).touch()
-
-    all_warnings = [*route_warnings, *worktree_warnings, *cap.warnings]
-    if response.success and all_warnings:
-        response.error = " | ".join(all_warnings)
-
-    return response
 
 
 def _dry_run_response(
@@ -403,10 +459,11 @@ def _dry_run_response(
         return BridgeResponse(
             success=False,
             error=safety.redact(str(exc)),
+            warnings=warnings,
             cwd=str(cwd),
             adapter=_adapter_meta(adapter, request),
         ).touch()
-    preview = redact_command(argv) if request.debug else None
+    preview = safety.redact_command(argv) if request.debug else None
     return BridgeResponse(
         success=True,
         SESSION_ID=request.session_id or "",
@@ -414,7 +471,7 @@ def _dry_run_response(
         cwd=str(cwd),
         adapter=_adapter_meta(adapter, request),
         command_preview=preview,
-        error=" | ".join(warnings) if warnings else None,
+        warnings=warnings,
     ).touch()
 
 

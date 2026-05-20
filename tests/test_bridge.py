@@ -273,6 +273,21 @@ def test_parse_extra_env_keeps_value_verbatim_for_valid_keys():
     assert out == {"MY_TOKEN": "secret-value-here"}
 
 
+def test_parse_extra_env_rejects_control_chars_in_value():
+    """Phase 3 R1 / M5: newline/CR/NUL in value must drop the entry — they
+    smuggle a fake second variable into the child env when echoed."""
+
+    out = _parse_extra_env(
+        [
+            "FOO=line1\nline2",
+            "BAR=carriage\rreturn",
+            "BAZ=null\x00byte",
+            "OK=clean",
+        ]
+    )
+    assert out == {"OK": "clean"}
+
+
 def test_parse_extra_env_last_value_wins():
     out = _parse_extra_env(["FOO=first", "FOO=second"])
     assert out == {"FOO": "second"}
@@ -309,6 +324,15 @@ def test_session_slug_strips_leading_dot_dash_underscore():
 def test_session_slug_caps_length_at_80():
     slug = _make_session_slug("a" * 500)
     assert len(slug) <= 80
+
+
+def test_session_slug_collapses_dot_runs():
+    """Phase 3 R1 / M4: ``..`` inside a slug becomes ``.`` so git refname
+    validation never sees the forbidden ``..`` sequence."""
+
+    slug = _make_session_slug("a..b")
+    assert ".." not in slug
+    assert slug == "a.b"
 
 
 def test_session_slug_falls_back_to_session_when_sanitised_empty():
@@ -594,7 +618,9 @@ def test_dry_run_response_concatenates_warnings():
         ["warning-one", "warning-two"],
     )
     assert resp.success is True
-    assert resp.error == "warning-one | warning-two"
+    # Warnings now land in resp.warnings, NOT resp.error (Phase 3 R1 P0 fix).
+    assert resp.error is None
+    assert resp.warnings == ["warning-one", "warning-two"]
 
 
 # ---------------------------------------------------------------------------
@@ -754,23 +780,18 @@ def test_run_unsafe_explicit_worktree_failure_is_fatal(monkeypatch, tmp_path: Pa
     assert fake.run_calls == []
 
 
-def test_run_unsafe_default_worktree_falls_back_when_no_git(
+def test_run_unsafe_default_worktree_fails_closed_when_no_git(
     monkeypatch, tmp_path: Path,
 ):
-    """worktree=None + config-default-True + non-git cwd → fallback (warn, run anyway)."""
+    """worktree=None + config-default-True + non-git cwd → fail CLOSED, not fall back.
+
+    Phase 3 review H2 / P0 fix: silently writing to the main checkout when
+    isolation was requested-by-default is a fail-open hole; the bridge must
+    refuse the run and let the caller decide whether to disable isolation.
+    """
 
     cap = _capability("agy")
-    fake = _FakeAdapter(
-        capability=cap,
-        run_result=_result(
-            events=[
-                CanonicalEvent(type="system", subtype="init"),
-                CanonicalEvent(type="assistant", text="done"),
-                CanonicalEvent(type="result", subtype="success"),
-            ],
-            session_id="sess-fb",
-        ),
-    )
+    fake = _FakeAdapter(capability=cap, run_result=_result())
     monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
     monkeypatch.setattr("agy_mcp.bridge.is_git_workspace", lambda cwd: True)
 
@@ -782,10 +803,9 @@ def test_run_unsafe_default_worktree_falls_back_when_no_git(
         worktree=None,
     )
     resp = _run(request, _default_config(worktree_default=True), _safety())
-    # Run still succeeded, but error field carries the fallback warning.
-    assert resp.success is True
-    assert "worktree fallback" in (resp.error or "")
-    assert fake.run_calls and fake.run_calls[0].cwd == str(tmp_path.resolve())
+    assert resp.success is False
+    assert "worktree creation failed" in (resp.error or "")
+    assert fake.run_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -840,3 +860,114 @@ def test_main_returns_one_on_failure(monkeypatch, capsys, tmp_path: Path):
     payload = json.loads(out.splitlines()[-1])
     assert payload["success"] is False
     assert "destructive" in payload["error"]
+
+
+def test_main_rejects_detach(monkeypatch, capsys, tmp_path: Path):
+    """Phase 3 R1 / P3.1: --detach is reserved for Phase 4; reject loudly."""
+
+    monkeypatch.setattr("agy_mcp.bridge.get_config", lambda: _default_config())
+    rc = main(
+        [
+            "--PROMPT", "hi",
+            "--cd", str(tmp_path),
+            "--detach",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    payload = json.loads(out.splitlines()[-1])
+    assert payload["success"] is False
+    assert "--detach" in payload["error"]
+
+
+def test_run_unsafe_no_backend_short_circuits(monkeypatch, tmp_path: Path):
+    """Phase 3 R1 / P1.3: missing binary must NOT create a worktree before
+    bailing out."""
+
+    cap = _capability("agy", bin_path="", warnings=["agy missing"])
+    fake = _FakeAdapter(capability=cap, run_result=_result())
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+    # Force is_git_workspace to True so the safety gate doesn't short-circuit
+    # for unrelated reasons.
+    monkeypatch.setattr("agy_mcp.bridge.is_git_workspace", lambda cwd: True)
+
+    request = BridgeRequest(
+        prompt="x",
+        cwd=str(tmp_path),
+        mode="execute",
+        allow_write=True,
+        backend="agy",
+    )
+    resp = _run(request, _default_config(worktree_default=True), _safety())
+    assert resp.success is False
+    assert fake.run_calls == []
+    # Capability warning is preserved for the caller's diagnostic.
+    assert any("agy missing" in w for w in resp.warnings)
+
+
+def test_run_unsafe_adapter_run_raises_returns_structured_envelope(
+    monkeypatch, tmp_path: Path,
+):
+    """Phase 3 R1 / P1.1: an exception escaping adapter.run() must be
+    translated into a BridgeResponse so warnings + adapter metadata survive."""
+
+    cap = _capability("agy")
+    fake = _FakeAdapter(capability=cap, run_result=_result())
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("kaboom from inside adapter.run")
+
+    monkeypatch.setattr(fake, "run", _explode)
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+
+    request = BridgeRequest(prompt="x", cwd=str(tmp_path))
+    resp = _run(request, _default_config(worktree_default=False), _safety())
+    assert resp.success is False
+    assert "kaboom" in (resp.error or "")
+    # Adapter metadata must still be populated, not stripped to defaults.
+    assert resp.adapter.backend == "agy"
+    assert resp.adapter.bin_path == cap.bin_path
+
+
+def test_run_unsafe_warnings_field_is_populated_on_success(
+    monkeypatch, tmp_path: Path,
+):
+    """Phase 3 R1 / P0: success runs put advisory text in `warnings`, never
+    in `error`."""
+
+    cap = _capability("agy", warnings=["a capability warning"])
+    fake = _FakeAdapter(
+        capability=cap,
+        run_result=_result(
+            events=[
+                CanonicalEvent(type="system", subtype="init"),
+                CanonicalEvent(type="assistant", text="done"),
+                CanonicalEvent(type="result", subtype="success"),
+            ],
+            session_id="sess-warn",
+        ),
+    )
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+    request = BridgeRequest(prompt="x", cwd=str(tmp_path))
+    resp = _run(request, _default_config(worktree_default=False), _safety())
+    assert resp.success is True
+    assert resp.error is None  # never carries warnings on success
+    assert "a capability warning" in resp.warnings
+
+
+def test_run_debug_traceback_anonymises_home_path(monkeypatch, tmp_path: Path):
+    """Phase 3 R1 / M3: tracebacks must not leak /Users/<u>/ in the envelope."""
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr("agy_mcp.bridge._select_backend", _explode)
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path), debug=True)
+    resp = _run(request, _default_config(), _safety())
+    assert resp.success is False
+    err = resp.error or ""
+    # The traceback section is non-empty in debug mode AND the home prefix
+    # is collapsed to ``~/``.
+    assert "| tb=" in err
+    assert "/Users/" not in err
+    assert "/home/" not in err

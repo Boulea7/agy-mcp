@@ -9,6 +9,7 @@ import pytest
 
 from agy_mcp.utils import (
     REDACTION_PLACEHOLDER,
+    anonymise_paths,
     ensure_directory,
     expand_user_path,
     is_windows,
@@ -255,3 +256,31 @@ def test_safe_write_text_fallback_path_still_writes(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "open", fake_open)
     safe_write_text(target, "fallback-content")
     assert target.read_text(encoding="utf-8") == "fallback-content"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 R1 / M3 — anonymise_paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("/Users/alice/agy-mcp/file.py", "~/agy-mcp/file.py"),
+        ("/home/bob/projects/x", "~/projects/x"),
+        ("/Users/alice/x and /Users/bob/y", "~/x and ~/y"),
+        ("nothing to anonymise here", "nothing to anonymise here"),
+        ("", ""),
+        (r"C:\Users\carol\Documents", r"~/Documents"),
+    ],
+)
+def test_anonymise_paths(raw, expected):
+    assert anonymise_paths(raw) == expected
+
+
+def test_redact_text_anonymises_home_path_alongside_secret():
+    raw = "Traceback: open /Users/alice/.aws/credentials with token sk-abcdef1234567890abcdef1234567890"
+    out = redact_text(raw)
+    assert "/Users/alice" not in out
+    assert "sk-abcdef1234567890abcdef1234567890" not in out
+    assert "~/" in out

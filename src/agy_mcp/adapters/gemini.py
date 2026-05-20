@@ -94,15 +94,19 @@ class GeminiCliBackend(BaseAdapter):
         if not cap.bin_path:
             raise RuntimeError("gemini binary not found; set GEMINI_BIN.")
         prompt = windows_escape(request.prompt) if is_windows() else request.prompt
-        argv: list[str] = [cap.bin_path, "--prompt", prompt]
+        # H1 (Phase 3 review): fused ``--prompt=<value>`` keeps the prompt
+        # inside a single argv element so a hostile prompt starting with
+        # ``--`` cannot peel off into a fresh flag. Same treatment for
+        # caller-supplied ``--model`` and ``--resume`` values.
+        argv: list[str] = [cap.bin_path, f"--prompt={prompt}"]
         if cap.supports_streaming:
             argv += ["-o", "stream-json"]
         if request.sandbox and cap.supports_sandbox:
             argv.append("--sandbox")
         if request.model:
-            argv += ["--model", request.model]
+            argv += [f"--model={request.model}"]
         if request.session_id and cap.supports_conversation:
-            argv += ["--resume", request.session_id]
+            argv += [f"--resume={request.session_id}"]
         return argv
 
     def run(

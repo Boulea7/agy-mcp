@@ -67,6 +67,29 @@ _AUTHZ_HEADER = re.compile(
 
 REDACTION_PLACEHOLDER = "***"
 
+# Anonymise per-user paths to keep operator usernames + tooling layout out
+# of error envelopes (Phase 3 review M3). The regex collapses leading
+# ``/Users/<u>/`` (macOS) and ``/home/<u>/`` (Linux) to ``~/`` so the rest
+# of the path stays diagnostic. Windows ``C:\Users\<u>\`` is normalised
+# similarly. We intentionally keep relative paths and ``/etc``-style system
+# paths untouched.
+_HOME_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"/Users/[^/\s\"']+/"),
+    re.compile(r"/home/[^/\s\"']+/"),
+    re.compile(r"(?i)C:\\Users\\[^\\\s\"']+\\"),
+)
+
+
+def anonymise_paths(value: str) -> str:
+    """Replace ``/Users/<user>/`` style prefixes with ``~/`` for privacy."""
+
+    if not value:
+        return value
+    out = value
+    for pat in _HOME_PATH_PATTERNS:
+        out = pat.sub("~/", out)
+    return out
+
 
 def redact_text(value: str, *, extra_patterns: tuple[re.Pattern[str], ...] = ()) -> str:
     """Redact secret-shaped substrings inside a free-text string.
@@ -74,7 +97,9 @@ def redact_text(value: str, *, extra_patterns: tuple[re.Pattern[str], ...] = ())
     Order matters: structural patterns (PEM blocks, JWTs) come first so that
     their internal contents are not partially redacted by the generic token
     regex. ``extra_patterns`` is appended last so callers can extend without
-    overriding built-ins.
+    overriding built-ins. The home-path anonymiser runs last so that any
+    paths surviving the token sweep land as ``~/...`` rather than
+    ``/Users/<u>/...``.
     """
 
     if not value:
@@ -91,6 +116,9 @@ def redact_text(value: str, *, extra_patterns: tuple[re.Pattern[str], ...] = ())
     redacted = _VALUE_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
     for pat in extra_patterns:
         redacted = pat.sub(REDACTION_PLACEHOLDER, redacted)
+    # Path anonymisation runs last so secret-shaped tokens inside the path
+    # are already redacted by the time we collapse ``/Users/<u>/`` to ``~/``.
+    redacted = anonymise_paths(redacted)
     return redacted
 
 
@@ -305,6 +333,7 @@ def configure_utf8_stdio() -> None:
 __all__ = [
     "REDACTION_PLACEHOLDER",
     "SECRET_ENV_NAME_PATTERN",
+    "anonymise_paths",
     "configure_utf8_stdio",
     "ensure_directory",
     "expand_user_path",

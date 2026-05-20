@@ -127,7 +127,12 @@ class BridgeResponse(BaseModel):
     agent_messages: str | list[dict[str, Any]] = ""
     all_messages: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    # ``error`` is reserved for failures (success=False). Non-fatal advisory
+    # text — fallback notices, route warnings, capability warnings — must use
+    # ``warnings`` instead so consumers can keep ``if resp.error: retry``
+    # semantics. See Phase 3 review (P0).
     error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
     cwd: str = ""
     adapter: AdapterMetadata = Field(default_factory=AdapterMetadata)
     # ``command_preview`` is only emitted when caller asked for both

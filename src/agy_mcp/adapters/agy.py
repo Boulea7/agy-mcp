@@ -221,7 +221,16 @@ class AgyPrintBackend(BaseAdapter):
             raise RuntimeError(
                 "Installed `agy` does not advertise --print; check `agy --help`."
             )
-        argv: list[str] = [cap.bin_path, "--print", self._prepare_prompt(request.prompt)]
+        # H1 (Phase 3 review): use ``--print=<prompt>`` rather than
+        # ``--print <prompt>`` so a hostile prompt starting with ``--`` (e.g.
+        # ``--dangerously-skip-permissions``) cannot peel off into a fresh
+        # flag. The fused form keeps the prompt inside a single argv element
+        # regardless of how the downstream CLI's parser handles values that
+        # look like flags.
+        argv: list[str] = [
+            cap.bin_path,
+            f"--print={self._prepare_prompt(request.prompt)}",
+        ]
 
         if cap.supports_print_timeout:
             # Reserve wrapper-side grace for klog drain + child cleanup.
@@ -233,7 +242,10 @@ class AgyPrintBackend(BaseAdapter):
             argv.append("--sandbox")
         if request.session_id:
             if cap.supports_conversation:
-                argv += ["--conversation", request.session_id]
+                # ``--conversation=<id>`` for the same reason as --print=
+                # above: session_id is caller-supplied and could be crafted
+                # to look like a flag.
+                argv += [f"--conversation={request.session_id}"]
         elif cap.supports_continue and request.backend == "agy":
             # Only auto-continue when the caller explicitly chose the agy
             # backend and gave no session id; for auto/gemini routing the

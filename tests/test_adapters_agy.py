@@ -73,8 +73,9 @@ def test_build_command_includes_print_timeout_and_log_file(tmp_path, isolated_ag
     log = tmp_path / "agy.log"
     argv = backend.build_command(req, log_path=log)
     assert argv[0] == str(wrapper)
-    assert "--print" in argv
-    assert "hello" in argv
+    # H1 fix: prompt is fused into --print=<value> so a hostile prompt
+    # starting with -- cannot leak through as a flag.
+    assert "--print=hello" in argv
     assert "--print-timeout" in argv
     idx = argv.index("--print-timeout")
     # Wrapper holds 30s back as grace window.
@@ -91,8 +92,25 @@ def test_build_command_resumes_with_conversation_id(tmp_path, isolated_agy):
         prompt="continue", cwd=str(tmp_path), session_id="conv-existing-123"
     )
     argv = backend.build_command(req, log_path=None)
-    assert "--conversation" in argv
-    assert argv[argv.index("--conversation") + 1] == "conv-existing-123"
+    # H1 fix: --conversation=<id> rather than ["--conversation", id].
+    assert "--conversation=conv-existing-123" in argv
+
+
+def test_build_command_resists_flag_prompt_injection(tmp_path, isolated_agy):
+    """Phase 3 R1 / H1 regression: hostile prompt starting with -- must not
+    peel off as a fresh flag in argv."""
+
+    wrapper = _make_wrapper(tmp_path, FAKE_AGY_PRINT)
+    backend = AgyPrintBackend(bin_override=str(wrapper))
+    req = BridgeRequest(
+        prompt="--dangerously-skip-permissions",
+        cwd=str(tmp_path),
+    )
+    argv = backend.build_command(req, log_path=None)
+    # The hostile string must live INSIDE --print=<value>, never as a free
+    # argv element where the downstream parser could consume it as a flag.
+    assert "--dangerously-skip-permissions" not in argv
+    assert any(a.endswith("=--dangerously-skip-permissions") for a in argv)
 
 
 def test_build_command_raises_without_binary(tmp_path, monkeypatch):
