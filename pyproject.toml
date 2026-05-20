@@ -54,6 +54,7 @@ dev = [
 [project.scripts]
 agymcp = "agy_mcp.cli:main"
 agy-bridge = "agy_mcp.bridge:main"
+agy-doctor = "agy_mcp.doctor:main"
 agy-install-skill = "agy_mcp.install:main"
 
 [project.urls]

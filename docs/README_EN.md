@@ -48,7 +48,7 @@ claude mcp add agy -s user --transport stdio -- agymcp
 agy-install-skill --target all
 
 # 5. Verify (no real agy API calls)
-python -m agy_mcp.doctor
+agy-doctor
 agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 ```
 
@@ -136,6 +136,7 @@ uv sync
 uv run pytest        # 400 tests
 uv run agymcp        # FastMCP stdio server (manual testing)
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
+uv run agy-doctor    # environment and auth probe
 ```
 
 The two `upstream` reference repos live under `.refs/` (gitignored).

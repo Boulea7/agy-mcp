@@ -45,7 +45,7 @@ claude mcp add agy -s user --transport stdio -- agymcp
 agy-install-skill --target all
 
 # 5. 验证（不调用真实 agy API）
-python -m agy_mcp.doctor
+agy-doctor
 agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 ```
 
@@ -127,6 +127,7 @@ uv sync
 uv run pytest        # 全量 400 个测试
 uv run agymcp        # 启动 MCP stdio server（人工测试用）
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
+uv run agy-doctor    # 环境与鉴权探测
 ```
 
 参考仓库放在 `.refs/`（gitignored）；运行 `git clone https://example.invalid/upstream

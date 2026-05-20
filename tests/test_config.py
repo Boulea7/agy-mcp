@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -120,3 +121,9 @@ def test_invalid_env_protocol_is_rejected(isolated_env, tmp_path: Path, monkeypa
     config = load_config(path=tmp_path / "missing.toml")
     assert config.backend.output_protocol == "claude"
     assert "ignored bad AGY_MCP_OUTPUT_PROTOCOL" in config.source
+
+
+def test_pyproject_exposes_doctor_console_script():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    assert data["project"]["scripts"]["agy-doctor"] == "agy_mcp.doctor:main"

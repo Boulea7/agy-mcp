@@ -48,12 +48,13 @@ uv tool install --from git+https://github.com/Boulea7/agy-mcp.git agy-mcp
 pip install --user "agy-mcp @ git+https://github.com/Boulea7/agy-mcp.git"
 ```
 
-This puts three commands on `PATH`:
+This puts four commands on `PATH`:
 
 | Command | Purpose |
 |---|---|
 | `agymcp` | FastMCP stdio server (used by `claude mcp add` / Codex `mcp_servers.agy`) |
 | `agy-bridge` | Standalone JSON-bridge CLI (used by Skills via `agy_bridge.py` forwarder) |
+| `agy-doctor` | Environment + auth probe |
 | `agy-install-skill` | Install the SKILL bundle into Claude / Codex / Antigravity skill dirs |
 
 ## 3. Register `agymcp` as an MCP server
@@ -129,7 +130,7 @@ own state directory and the project policy refuses to write there.
 agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 
 # Full environment report (Python, uv, agy/gemini binaries, OAuth, session store)
-python -m agy_mcp.doctor
+agy-doctor
 ```
 
 You should see a JSON envelope with `success=true`, a `command_preview`
@@ -164,7 +165,7 @@ agy_doctor(force_refresh=True)
 
 ```bash
 # Or from the shell (no MCP client running):
-python -m agy_mcp.doctor
+agy-doctor
 ```
 
 The shell variant always re-probes; the MCP tool caches between
