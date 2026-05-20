@@ -32,7 +32,7 @@ def test_skill_forwarder_uses_fixed_uvx_package_spec(monkeypatch, target: str):
     assert command == [
         "uvx",
         "--from",
-        "agy-mcp==0.1.0",
+        "agy-mcp==0.1.2",
         "agy-bridge",
         "--PROMPT",
         "hello",

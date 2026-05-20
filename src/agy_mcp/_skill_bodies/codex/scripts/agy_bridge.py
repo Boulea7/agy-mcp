@@ -9,7 +9,7 @@ Selection order:
   1. ``AGY_BRIDGE_CMD`` env var (full shell command, advanced override —
      **trust boundary**, see references/security.md).
   2. ``python -m agy_mcp.bridge`` if importable from the current env.
-  3. ``uvx --from agy-mcp==0.1.0 agy-bridge`` as the last-resort
+  3. ``uvx --from agy-mcp==0.1.2 agy-bridge`` as the last-resort
      install-on-demand fallback. Use a fixed package version here;
      branch refs are mutable and not acceptable for the skill launcher.
 
@@ -26,7 +26,7 @@ import shutil
 import subprocess
 import sys
 
-BRIDGE_PACKAGE_SPEC = "agy-mcp==0.1.0"
+BRIDGE_PACKAGE_SPEC = "agy-mcp==0.1.2"
 
 
 def _has_module(name: str) -> bool:
