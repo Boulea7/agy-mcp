@@ -429,7 +429,7 @@ def _run_unsafe(
             error=" | ".join(route_warnings) or f"backend={backend_name!r} unavailable",
             warnings=list(cap.warnings),
             cwd=_response_cwd(safety, cwd_path),
-            adapter=_adapter_meta(adapter, request),
+            adapter=_adapter_meta(adapter, request, safety),
         ).touch()
     if backend_name == "agy" and not cap.authenticated and not request.dry_run:
         return BridgeResponse(
@@ -437,7 +437,7 @@ def _run_unsafe(
             error="backend='agy' is not authenticated; run agy once and log in.",
             warnings=[*gate_warnings, *route_warnings, *cap.warnings],
             cwd=_response_cwd(safety, cwd_path),
-            adapter=_adapter_meta(adapter, request),
+            adapter=_adapter_meta(adapter, request, safety),
         ).touch()
 
     effective_cwd = cwd_path
@@ -470,7 +470,7 @@ def _run_unsafe(
                 error=safety.redact(f"worktree creation failed: {exc}"),
                 warnings=[*gate_warnings, *route_warnings],
                 cwd=_response_cwd(safety, cwd_path),
-                adapter=_adapter_meta(adapter, request),
+                adapter=_adapter_meta(adapter, request, safety),
             ).touch()
 
     if request.dry_run:
@@ -512,7 +512,7 @@ def _run_unsafe(
             error=run_error or "adapter raised an unknown error",
             warnings=all_warnings,
             cwd=_response_cwd(safety, effective_cwd),
-            adapter=_adapter_meta(adapter, request),
+            adapter=_adapter_meta(adapter, request, safety),
         ).touch()
 
     translator = ProtocolTranslator(
@@ -547,7 +547,7 @@ def _run_unsafe(
         error=None if success else (_pick_error_text(result.events) or "non-zero exit"),
         warnings=all_warnings,
         cwd=_response_cwd(safety, effective_cwd),
-        adapter=_adapter_meta(adapter, request),
+        adapter=_adapter_meta(adapter, request, safety),
         command_preview=None,
         log_path=None,  # ephemeral spool dir is gone by now
     ).touch()
@@ -568,7 +568,7 @@ def _dry_run_response(
             error=safety.redact(str(exc)),
             warnings=warnings,
             cwd=_response_cwd(safety, cwd),
-            adapter=_adapter_meta(adapter, request),
+            adapter=_adapter_meta(adapter, request, safety),
         ).touch()
     preview = safety.redact_command(argv) if request.debug else None
     return BridgeResponse(
@@ -576,7 +576,7 @@ def _dry_run_response(
         SESSION_ID=request.session_id or "",
         status="completed",
         cwd=_response_cwd(safety, cwd),
-        adapter=_adapter_meta(adapter, request),
+        adapter=_adapter_meta(adapter, request, safety),
         command_preview=preview,
         warnings=warnings,
     ).touch()
@@ -591,11 +591,15 @@ def _with_cwd(request: BridgeRequest, new_cwd: Path) -> BridgeRequest:
     return request.model_copy(update={"cwd": str(new_cwd)})
 
 
-def _adapter_meta(adapter: BaseAdapter, request: BridgeRequest) -> AdapterMetadata:
+def _adapter_meta(
+    adapter: BaseAdapter,
+    request: BridgeRequest,
+    safety: SafetyPolicy,
+) -> AdapterMetadata:
     cap = adapter.detect()
     return AdapterMetadata(
         backend=cap.backend,
-        bin_path=cap.bin_path or None,
+        bin_path=safety.redact(cap.bin_path) if cap.bin_path else None,
         version=cap.version,
         model=request.model or cap.model,
         output_protocol=request.output_protocol,

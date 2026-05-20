@@ -324,6 +324,25 @@ def test_start_short_circuits_when_backend_unavailable(tmp_path: Path):
     assert not any(tmp_path.iterdir())
 
 
+def test_start_running_envelope_redacts_adapter_bin_path(tmp_path: Path):
+    raw_bin_path = str(Path.home() / ".local" / "bin" / "agy")
+    adapter = _ScriptedAdapter(
+        capability=_capability(bin_path=raw_bin_path),
+        events=[CanonicalEvent(type="assistant", text="hi")],
+        delay_per_event=0.01,
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+
+    response = supervisor.start(BridgeRequest(prompt="hi", cwd=str(tmp_path)))
+
+    assert response.success is True
+    assert response.adapter.bin_path == "~/.local/bin/agy"
+    assert raw_bin_path not in response.model_dump_json()
+    assert _wait_for(
+        lambda: supervisor.status(response.job_id).status == "completed",
+    )
+
+
 def test_start_short_circuits_when_agy_unauthenticated(tmp_path: Path):
     cap = _capability(authenticated=False)
     cap.warnings = ["OAuth credentials missing"]

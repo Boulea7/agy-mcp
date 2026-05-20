@@ -14,8 +14,10 @@ from agy_mcp import server
 from agy_mcp.adapters.base import AdapterRunResult, BaseAdapter, EventSink
 from agy_mcp.config import BackendConfig, Config, ExecuteConfig, SafetyConfig
 from agy_mcp.models import (
+    AdapterMetadata,
     BackendName,
     BridgeRequest,
+    BridgeResponse,
     CanonicalEvent,
     Capability,
 )
@@ -193,6 +195,49 @@ def test_agy_dry_run_returns_command_preview(reset_state, tmp_path: Path):
     assert adapter.bin_path
     assert isinstance(adapter.model_dump(), dict)
     assert out["command_preview"] is not None
+
+
+def test_mcp_call_tool_redacts_adapter_bin_path_in_structured_content(
+    reset_state, monkeypatch, tmp_path: Path,
+):
+    raw_bin_path = str(Path.home() / ".local" / "bin" / "agy")
+
+    def _fake_bridge_run(request, config, safety):
+        redacted_bin_path = safety.redact(raw_bin_path)
+        return BridgeResponse(
+            success=True,
+            status="completed",
+            agent_messages="hello",
+            SESSION_ID=request.session_id or "",
+            cwd=safety.redact(request.cwd),
+            adapter=AdapterMetadata(
+                backend="agy",
+                bin_path=redacted_bin_path,
+                version="1.0.0",
+                output_protocol=request.output_protocol,
+            ),
+            command_preview=[redacted_bin_path, "--print", "hello"],
+        )
+
+    monkeypatch.setattr(server, "_bridge_run", _fake_bridge_run)
+
+    content, structured = _run_async(
+        server.mcp.call_tool(
+            "agy",
+            {
+                "PROMPT": "hello",
+                "cd": str(tmp_path),
+                "dry_run": True,
+                "debug": True,
+            },
+        )
+    )
+
+    text_fallback = "\n".join(getattr(item, "text", "") for item in content)
+    structured_blob = json.dumps(structured)
+    assert raw_bin_path not in text_fallback
+    assert raw_bin_path not in structured_blob
+    assert structured["adapter"]["bin_path"] == "~/.local/bin/agy"
 
 
 def test_agy_invalid_request_returns_structured_failure(reset_state, tmp_path: Path):

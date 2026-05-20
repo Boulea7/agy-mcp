@@ -540,7 +540,7 @@ def test_adapter_meta_picks_request_model_over_capability():
     cap.model = "auto-model"
     fake = _FakeAdapter(capability=cap, run_result=_result())
     request = BridgeRequest(prompt="x", model="user-pick", output_protocol="raw")
-    meta = _adapter_meta(fake, request)
+    meta = _adapter_meta(fake, request, _safety())
     assert meta.model == "user-pick"
     assert meta.output_protocol == "raw"
     assert meta.backend == "agy"
@@ -552,7 +552,7 @@ def test_adapter_meta_falls_back_to_capability_model():
     cap.model = "auto-model"
     fake = _FakeAdapter(capability=cap, run_result=_result())
     request = BridgeRequest(prompt="x")
-    meta = _adapter_meta(fake, request)
+    meta = _adapter_meta(fake, request, _safety())
     assert meta.model == "auto-model"
 
 
@@ -840,6 +840,25 @@ def test_run_unsafe_dry_run_does_not_call_run(monkeypatch, tmp_path: Path):
     assert fake.run_calls == []
 
 
+def test_run_unsafe_dry_run_redacts_adapter_bin_path(monkeypatch, tmp_path: Path):
+    raw_bin_path = str(Path.home() / ".local" / "bin" / "agy")
+    cap = _capability("agy", bin_path=raw_bin_path)
+    fake = _FakeAdapter(
+        capability=cap,
+        run_result=_result(),
+        build_argv=[raw_bin_path, "--print", "hi"],
+    )
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path), dry_run=True, debug=True)
+    resp = _run(request, _default_config(), _safety())
+
+    assert resp.success is True
+    assert resp.adapter.bin_path == "~/.local/bin/agy"
+    assert resp.command_preview == ["~/.local/bin/agy", "--print", "hi"]
+    assert raw_bin_path not in resp.model_dump_json()
+
+
 def test_run_unsafe_explicit_worktree_failure_is_fatal(monkeypatch, tmp_path: Path):
     """worktree=True (explicit) MUST refuse the run if the worktree can't be created."""
 
@@ -1073,7 +1092,8 @@ def test_run_unsafe_adapter_run_raises_returns_structured_envelope(
     """Phase 3 R1 / P1.1: an exception escaping adapter.run() must be
     translated into a BridgeResponse so warnings + adapter metadata survive."""
 
-    cap = _capability("agy")
+    raw_bin_path = str(Path.home() / ".local" / "bin" / "agy")
+    cap = _capability("agy", bin_path=raw_bin_path)
     fake = _FakeAdapter(capability=cap, run_result=_result())
 
     def _explode(*args, **kwargs):
@@ -1088,7 +1108,8 @@ def test_run_unsafe_adapter_run_raises_returns_structured_envelope(
     assert "kaboom" in (resp.error or "")
     # Adapter metadata must still be populated, not stripped to defaults.
     assert resp.adapter.backend == "agy"
-    assert resp.adapter.bin_path == cap.bin_path
+    assert resp.adapter.bin_path == "~/.local/bin/agy"
+    assert raw_bin_path not in resp.model_dump_json()
 
 
 def test_run_unsafe_warnings_field_is_populated_on_success(

@@ -409,7 +409,7 @@ class Supervisor:
             cwd=self._response_cwd(effective_request.cwd),
             adapter=AdapterMetadata(
                 backend=backend_name,
-                bin_path=cap.bin_path or None,
+                bin_path=self.safety.redact(cap.bin_path) if cap.bin_path else None,
                 version=cap.version,
                 model=effective_request.model or cap.model,
                 output_protocol=effective_request.output_protocol,
