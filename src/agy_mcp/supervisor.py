@@ -250,7 +250,7 @@ class Supervisor:
                 request=_serialise_request(request),
                 backend=backend_name,
             )
-        except (FileExistsError, ValueError) as exc:
+        except (FileExistsError, TypeError, ValueError) as exc:
             self._job_slots.release()  # release the slot we just took
             return BridgeResponse(
                 success=False,
