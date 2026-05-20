@@ -60,6 +60,15 @@ class Capability(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=False)
 
+    # ``bin_path`` is always the absolute, resolved filesystem path of
+    # the probed binary as returned by ``shutil.which(...)`` followed
+    # by ``Path(...).resolve()``. Producers (``adapters/base.py
+    # ::BaseAdapter.locate_binary`` and the doctor module) MUST honour
+    # this invariant so downstream redaction and capability caching
+    # can key on a canonical string. Phase 5 R4 P3.23: typed as plain
+    # ``str`` rather than ``Path`` to keep the model JSON-serialisable
+    # without a custom encoder; the constraint is enforced by
+    # convention rather than the type system.
     bin_path: str
     backend: Literal["agy", "gemini"]
     version: str | None = None

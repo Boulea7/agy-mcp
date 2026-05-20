@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,14 @@ _MAX_SESSION_ID_LEN = 96
 # each instance is bound to the asyncio loop that created it — so we cache
 # per running loop id rather than process-globally (Phase 5 R3 arch P1).
 _BRIDGE_CONCURRENCY = 8
-_bridge_limiters_by_loop: dict[int, anyio.CapacityLimiter] = {}
+# Phase 5 R3 P3.14: keyed on the running loop object itself via
+# WeakKeyDictionary so a GC'd loop drops its limiter automatically.
+# (The previous ``dict[int, ...]`` keyed on ``id(loop)`` was correct
+# under cache-replace-on-collision semantics, but kept stale limiters
+# alive for the process lifetime when a loop was discarded.)
+_bridge_limiters_by_loop: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, anyio.CapacityLimiter
+] = weakref.WeakKeyDictionary()
 _bridge_limiter_lock = threading.Lock()
 
 # Defence-in-depth cap on the install-skill argument surface
@@ -150,24 +158,32 @@ async def _get_bridge_limiter() -> anyio.CapacityLimiter:
     ``anyio.CapacityLimiter`` binds to the asyncio loop active when the
     instance is constructed, so a process-global singleton breaks when
     a second loop is spun up (tests using ``asyncio.run`` per call,
-    embedded sidecar loops, hot reloads). We key the cache on the id
-    of the current running loop so each loop sees a fresh, valid
-    limiter that still enforces the per-loop cap across concurrent
-    calls. (Phase 5 R3 arch P1.)
+    embedded sidecar loops, hot reloads). We cache one limiter per
+    running loop via a ``weakref.WeakKeyDictionary`` so a discarded
+    loop frees its limiter automatically — and a re-used ``id(loop)``
+    cannot resurrect a stale limiter from a dead loop (Phase 5 R3
+    arch P1 + R3 P3.14).
     """
 
     loop = asyncio.get_running_loop()
-    key = id(loop)
     with _bridge_limiter_lock:
-        limiter = _bridge_limiters_by_loop.get(key)
+        limiter = _bridge_limiters_by_loop.get(loop)
         if limiter is None:
             limiter = anyio.CapacityLimiter(_BRIDGE_CONCURRENCY)
-            _bridge_limiters_by_loop[key] = limiter
+            _bridge_limiters_by_loop[loop] = limiter
         return limiter
 
 
 def _reset_state_for_tests() -> None:
-    """Drop the cached singletons so tests can swap in fresh stores."""
+    """Drop the cached singletons so tests can swap in fresh stores.
+
+    Holds ``_state_lock`` and ``_bridge_limiter_lock`` while wiping.
+    **Invariant for future maintainers:** callbacks invoked while
+    those locks are held MUST NOT call back into ``_ensure_state``
+    / ``_ensure_adapters`` / ``_get_bridge_limiter``, or the test
+    teardown will deadlock. The current implementation only mutates
+    module-level globals — keep it that way (Phase 5 R2 P3.7).
+    """
 
     global _config, _safety, _store, _supervisor, _agy_adapter, _gemini_adapter
     with _state_lock:
@@ -290,6 +306,13 @@ async def agy_tool(
     dry_run: bool = False,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    # Phase 5 R4 P3.11: ``extra_env`` keeps ``| None = None`` on the
+    # tool surface (MCP clients omit the key entirely on most callers)
+    # but normalises to ``{}`` immediately so the downstream
+    # ``BridgeRequest`` field (declared as ``dict[str, str]``) matches.
+    # The JSON-schema view ends up as ``anyOf [{object}, {null}]``;
+    # that is intentional and documented here so a future schema audit
+    # doesn't try to "fix" it back to a bare ``object``.
     config, safety, _store_, _supervisor_ = _ensure_state()
     if SESSION_ID is not None:
         err = _validate_session_id(safety, SESSION_ID)
