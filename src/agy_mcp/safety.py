@@ -59,8 +59,15 @@ DEFAULT_SCRUB_ENV_NAMES: tuple[str, ...] = (
 # unconditionally, "suspicious" gets surfaced as a warning. Patterns must not
 # use end-of-string anchors — the screened text can contain arbitrary
 # preamble/postamble from the model.
+_SHELL_WS = r"(?:\s+|\$\{IFS\}|\$IFS)+"
 _DESTRUCTIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?im)\brm\s+(?:-[rRfF]+\s+|--recursive\s+|--force\s+)+(?:/|~|\$HOME)"),
+    re.compile(
+        r"(?im)\brm"
+        + _SHELL_WS
+        + r"(?:(?:-[rRfF]+|--recursive|--force|--)"
+        + _SHELL_WS
+        + r")+(?:/|~|\$HOME)"
+    ),
     re.compile(r"(?im)\bsudo\s+rm\b"),
     re.compile(r"(?im)\bchmod\s+-?R?\s*777\b"),
     re.compile(r"(?im)\bmkfs\.[a-z0-9]+"),

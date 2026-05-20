@@ -21,6 +21,7 @@ from agy_mcp.models import (
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
 from agy_mcp.supervisor import Supervisor
+from agy_mcp.utils import is_windows
 
 
 def _run_async(coro):
@@ -558,6 +559,32 @@ def test_agy_install_skill_force_false_is_idempotent(reset_state, tmp_path: Path
     # skip every file and still record overwrote=False.
     assert r2.installed
     assert all(e.overwrote is False for e in r2.installed)
+
+
+@pytest.mark.skipif(is_windows(), reason="symlink privileges vary on Windows")
+def test_agy_install_skill_replaces_matching_leaf_symlink(reset_state, tmp_path: Path):
+    from agy_mcp.install import _read_packaged_file, install_skills
+
+    project = tmp_path / "proj"
+    skill_root = project / ".claude" / "skills" / "collaborating-with-antigravity"
+    skill_root.mkdir(parents=True)
+    body = _read_packaged_file("claude", "SKILL.md")
+    outside = tmp_path / "outside-skill.md"
+    outside.write_text(body, encoding="utf-8")
+    dest = skill_root / "SKILL.md"
+    dest.symlink_to(outside)
+
+    result = install_skills(
+        targets=["claude"], scope="project", project_root=project,
+    )
+
+    assert result.success is True
+    assert dest.is_file()
+    assert not dest.is_symlink()
+    assert dest.read_text(encoding="utf-8") == body
+    assert outside.read_text(encoding="utf-8") == body
+    installed = {entry.path: entry.overwrote for entry in result.installed}
+    assert any(path.endswith("SKILL.md") and overwrote for path, overwrote in installed.items())
 
 
 def test_agy_install_skill_force_true_rewrites_unchanged(reset_state, tmp_path: Path):

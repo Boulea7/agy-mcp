@@ -51,7 +51,11 @@ def test_utc_now_iso_is_sortable():
         ("Bearer abcdef1234567890abcdef1234567890", True),
         ("Authorization: gho" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", True),
         ("X-Api-Key: shh-12345-secret-xyz-678", True),
+        ('X-Api-Key: "abc123"', True),
         ("X-Auth-Token=verylongheadervaluexyz123456", True),
+        ("api_key=abc123", True),
+        ("password='hunter2'", True),
+        ("url=https://example.test?api_key=abc123&x=1", True),
         ("sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", True),
         ("AIza" "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", True),
         ("ya29" ".aaaaaaaaaaaaaaaaaaaaaaaa", True),
@@ -500,6 +504,32 @@ def test_safe_write_text_openat_refuses_path_outside_root(tmp_path):
     # ``path.parent`` literally outside the root: relative_to fails.
     with pytest.raises(OSError, match="not under"):
         safe_write_text(sibling / "out.txt", "nope", verify_under=root)
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_openat_refuses_dotdot_escape(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    target = root / ".." / "outside" / "escaped.txt"
+    with pytest.raises(OSError, match="traversal"):
+        safe_write_text(target, "nope", verify_under=root)
+    assert not (outside / "escaped.txt").exists()
+
+
+def test_safe_write_text_fallback_refuses_dotdot_escape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    monkeypatch.setattr("agy_mcp.utils._has_openat_support", lambda: False)
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    target = root / ".." / "outside" / "escaped.txt"
+    with pytest.raises(OSError, match="traversal"):
+        safe_write_text(target, "nope", verify_under=root)
+    assert not (outside / "escaped.txt").exists()
 
 
 @pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")

@@ -56,6 +56,8 @@ def test_default_scrub_env_names_includes_provider_keys():
         "please rm -rf /",
         "rm -rf / # cleanup",            # P1 fix: mid-string match required
         "rm -rf /etc and then continue", # P1 fix: not anchored to $
+        "rm -rf -- /",
+        "rm -rf${IFS}/",
         "step1\nrm -rf /\nstep2",          # multiline embedded
         "run sudo rm -rf /etc",
         "chmod -R 777 /var",

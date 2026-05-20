@@ -64,7 +64,13 @@ _AUTHZ_HEADER = re.compile(
     r"(?i)\b("
     r"Authorization|X-Api-Key|X-Auth-Token|X-Auth-Key|Api-Key|Apikey"
     r"|Proxy-Authorization|X-Goog-Api-Key|X-OpenAI-Key|X-Anthropic-Key"
-    r")(\s*[:=]\s*)([^\s\"',;]+)"
+    r")(\s*[:=]\s*)([\"']?)([^\s\"',;]+)([\"']?)"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b("
+    r"api[_-]?key|token|secret|password|passwd|credential|client[_-]?secret"
+    r"|access[_-]?key|private[_-]?key|session[_-]?key|signing[_-]?key"
+    r")(\s*[:=]\s*)([\"']?)([^\s\"',;&]+)([\"']?)"
 )
 
 REDACTION_PLACEHOLDER = "***"
@@ -126,7 +132,14 @@ def redact_text(value: str, *, extra_patterns: tuple[re.Pattern[str], ...] = ())
     # Bearer first so "Authorization: Bearer <token>" gets its token caught
     # before the AUTHZ_HEADER substitution collapses "Bearer" to "***".
     redacted = _BEARER_HEADER.sub(r"\1" + REDACTION_PLACEHOLDER, redacted)
-    redacted = _AUTHZ_HEADER.sub(r"\1\2" + REDACTION_PLACEHOLDER, redacted)
+    redacted = _AUTHZ_HEADER.sub(
+        r"\1\2\3" + REDACTION_PLACEHOLDER + r"\5",
+        redacted,
+    )
+    redacted = _SECRET_ASSIGNMENT.sub(
+        r"\1\2\3" + REDACTION_PLACEHOLDER + r"\5",
+        redacted,
+    )
     redacted = _AWS_ACCESS_KEY_ID.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _SLACK_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _GITHUB_PAT_FG.sub(REDACTION_PLACEHOLDER, redacted)
@@ -550,18 +563,12 @@ def _safe_write_text_openat(
     the write escape the root.
     """
 
-    try:
-        resolved_root = verify_under.resolve(strict=True)
-    except OSError as exc:
-        raise OSError(f"verify_under root does not resolve: {verify_under}") from exc
-    if not resolved_root.is_dir():
-        raise OSError(f"verify_under root is not a directory: {verify_under}")
-    try:
-        rel = path.parent.relative_to(resolved_root)
-    except ValueError as exc:
-        raise OSError(
-            f"refusing to write {path}: parent {path.parent} not under {verify_under}",
-        ) from exc
+    resolved_root, rel_parts = _relative_parts_under_verified_root(
+        path.parent,
+        verify_under,
+        action="write",
+        target=path,
+    )
 
     cloexec = getattr(os, "O_CLOEXEC", 0)
     root_flags = os.O_DIRECTORY | os.O_NOFOLLOW | cloexec
@@ -570,7 +577,7 @@ def _safe_write_text_openat(
     opened_intermediate: list[int] = []
     try:
         # Walk relative segments via openat(dir_fd=parent_fd).
-        for segment in rel.parts:
+        for segment in rel_parts:
             try:
                 os.mkdir(segment, mode=0o755, dir_fd=parent_fd)
             except FileExistsError:
@@ -654,23 +661,14 @@ def _verify_parents_no_symlink(path: Path, root: Path) -> None:
     components above the trusted root.
     """
 
-    try:
-        resolved_root = root.resolve(strict=True)
-    except OSError as exc:
-        raise OSError(f"verify_under root does not resolve: {root}") from exc
-    if not resolved_root.is_dir():
-        raise OSError(f"verify_under root is not a directory: {root}")
-    # Build the chain of intermediate components from root down to
-    # path.parent. ``path.parent.relative_to(resolved_root)`` errors if
-    # the parent is not under root at all — exactly what we want.
-    try:
-        rel = path.parent.relative_to(resolved_root)
-    except ValueError as exc:
-        raise OSError(
-            f"refusing to write {path}: parent {path.parent} not under {root}",
-        ) from exc
+    resolved_root, rel_parts = _relative_parts_under_verified_root(
+        path.parent,
+        root,
+        action="write",
+        target=path,
+    )
     cur = resolved_root
-    for segment in rel.parts:
+    for segment in rel_parts:
         cur = cur / segment
         if cur.is_symlink():
             raise OSError(
@@ -681,18 +679,14 @@ def _verify_parents_no_symlink(path: Path, root: Path) -> None:
 def _ensure_directory_under_verified_root(parent: Path, root: Path) -> None:
     """Create ``parent`` under ``root`` without following symlink components."""
 
-    try:
-        resolved_root = root.resolve(strict=True)
-    except OSError as exc:
-        raise OSError(f"verify_under root does not resolve: {root}") from exc
-    try:
-        rel = parent.relative_to(resolved_root)
-    except ValueError as exc:
-        raise OSError(
-            f"refusing to create {parent}: parent not under {root}",
-        ) from exc
+    resolved_root, rel_parts = _relative_parts_under_verified_root(
+        parent,
+        root,
+        action="create",
+        target=parent,
+    )
     cur = resolved_root
-    for segment in rel.parts:
+    for segment in rel_parts:
         cur = cur / segment
         try:
             st = os.lstat(cur)
@@ -709,6 +703,35 @@ def _ensure_directory_under_verified_root(parent: Path, root: Path) -> None:
             raise OSError(
                 f"refusing to create {parent}: parent component {cur} is not a directory",
             )
+
+
+def _relative_parts_under_verified_root(
+    parent: Path,
+    root: Path,
+    *,
+    action: str,
+    target: Path,
+) -> tuple[Path, tuple[str, ...]]:
+    """Return lexical parent parts under a resolved root, rejecting traversal."""
+
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise OSError(f"verify_under root does not resolve: {root}") from exc
+    if not resolved_root.is_dir():
+        raise OSError(f"verify_under root is not a directory: {root}")
+    try:
+        rel = parent.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(
+            f"refusing to {action} {target}: parent {parent} not under {root}",
+        ) from exc
+    rel_parts = rel.parts
+    if any(segment in ("", ".", os.pardir) for segment in rel_parts):
+        raise OSError(
+            f"refusing to {action} {target}: parent contains traversal segment",
+        )
+    return resolved_root, rel_parts
 
 
 # ---------------------------------------------------------------------------

@@ -350,10 +350,11 @@ def install_skills(
                 continue
             dest = skill_dir / rel_path
             try:
-                overwrote = dest.exists()
+                overwrote = dest.exists() or dest.is_symlink()
                 if (
                     not force
                     and overwrote
+                    and not dest.is_symlink()
                     and dest.read_text(encoding="utf-8") == body
                 ):
                     # Skip unchanged file; still record as installed so
