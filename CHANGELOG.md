@@ -6,6 +6,28 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-21
+
+### Fixed
+
+- **CI hermeticity**: 5 tests required a real ``agy`` / ``gemini``
+  binary on PATH and consequently failed on every GitHub Actions
+  runner (which has neither). Two-part fix:
+  - ``AgyPrintBackend.run`` and ``GeminiCliBackend.run`` now validate
+    the requested ``cwd`` BEFORE invoking ``build_command``; this lets
+    the ``invalid_cwd`` defence-in-depth event fire even when the
+    underlying binary isn't installed, instead of being masked by a
+    ``binary not found`` ``RuntimeError``. Strictly an improvement —
+    invalid-cwd now produces a structured event the wrapper can react
+    to in any environment.
+  - ``test_agy_dry_run_returns_command_preview`` now points
+    ``config.backend.agy_bin`` at the existing ``fake_agy_print.py``
+    fixture wrapper, so the dry-run path resolves a binary on hosts
+    that lack ``agy``.
+- **CI lint coverage**: workflow now runs ``ruff check src tests
+  scripts`` (was ``src tests``) so future drift in the release-gate
+  script is caught upstream rather than at release time.
+
 ## [0.1.1] — 2026-05-21
 
 ### Added
@@ -101,6 +123,7 @@ First public-ready cut.
   dry-run on three modes, real `agy --print` call with session
   resume.
 
-[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Boulea7/agy-mcp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Boulea7/agy-mcp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Boulea7/agy-mcp/releases/tag/v0.1.0

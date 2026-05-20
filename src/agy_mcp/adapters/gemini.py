@@ -130,10 +130,12 @@ class GeminiCliBackend(BaseAdapter):
         cancel_event: threading.Event | None = None,
     ) -> AdapterRunResult:
         cap = self.detect()
-        argv = self.build_command(request, log_path=log_path)
 
         # Refuse to spawn into a non-existent / non-directory / dangling
-        # symlink cwd (defense-in-depth alongside the bridge's policy).
+        # symlink cwd (defense-in-depth alongside the bridge's policy). Run
+        # this check BEFORE build_command so callers exercising the invalid-
+        # cwd path don't have to also provide a real ``gemini`` binary on
+        # PATH — important for CI environments where ``gemini`` is absent.
         try:
             cwd_resolved = resolve_cwd(request.cwd)
         except RuntimeError as exc:
@@ -155,6 +157,8 @@ class GeminiCliBackend(BaseAdapter):
                 stderr_tail=self.safety.redact(str(exc)),
                 log_path=None, artifacts=[],
             )
+
+        argv = self.build_command(request, log_path=log_path)
 
         ctx = _RunContext(
             stdout_buf=[],

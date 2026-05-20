@@ -272,11 +272,13 @@ class AgyPrintBackend(BaseAdapter):
         cancel_event: threading.Event | None = None,
     ) -> AdapterRunResult:
         cap = self.detect()
-        argv = self.build_command(request, log_path=log_path)
 
         # Refuse to spawn into a non-existent / non-directory / dangling
         # symlink cwd; this is defense-in-depth in addition to the bridge's
-        # workspace-allowlist policy (Phase 3+).
+        # workspace-allowlist policy (Phase 3+). Run the cwd check BEFORE
+        # build_command so callers exercising the invalid-cwd path don't have
+        # to also provide a real ``agy`` binary on PATH — important for CI
+        # environments where ``agy`` is not installed.
         try:
             cwd_resolved = resolve_cwd(request.cwd)
         except RuntimeError as exc:
@@ -298,6 +300,8 @@ class AgyPrintBackend(BaseAdapter):
                 log_path=str(log_path) if log_path else None,
                 artifacts=[],
             )
+
+        argv = self.build_command(request, log_path=log_path)
 
         ctx = _RunContext(
             stdout_buf=[],

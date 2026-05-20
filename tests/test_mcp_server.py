@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +25,26 @@ from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
 from agy_mcp.supervisor import Supervisor
 from agy_mcp.utils import is_windows
+
+# Path to the fake ``agy`` CLI used to keep MCP tests hermetic on CI runners
+# where no real ``agy`` binary is installed.
+FAKE_AGY_PRINT = Path(__file__).parent / "fixtures" / "fake_agy_print.py"
+
+
+def _make_fake_agy_wrapper(tmp_path: Path, *, name: str = "fake_agy") -> Path:
+    """Drop a POSIX shell wrapper that forwards to fake_agy_print.py.
+
+    Used by dry-run / probe tests so AGY_BIN resolves to an executable on
+    runners that don't have the real ``agy`` binary on PATH.
+    """
+
+    wrapper = tmp_path / name
+    wrapper.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_AGY_PRINT}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
 
 
 def _run_async(coro):
@@ -178,6 +199,11 @@ def test_tool_descriptions_present():
 
 
 def test_agy_dry_run_returns_command_preview(reset_state, tmp_path: Path):
+    # CI runners do not have ``agy`` on PATH; point AGY_BIN at the fake CLI
+    # used by the adapter unit tests so the dry-run path actually resolves
+    # a binary instead of short-circuiting with ``backend=agy unavailable``.
+    fake_agy = _make_fake_agy_wrapper(tmp_path)
+    reset_state.config.backend.agy_bin = str(fake_agy)
     out = _run_async(
         server.agy_tool(
             PROMPT="hello",

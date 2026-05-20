@@ -1,6 +1,6 @@
 [project]
 name = "agy-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "Skill-first, MCP-second bridge from Claude Code / OpenAI Codex to Google Antigravity CLI (agy)."
 readme = "README.md"
 license = { text = "MIT" }
