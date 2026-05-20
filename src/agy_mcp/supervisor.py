@@ -316,7 +316,7 @@ class Supervisor:
                 job_id=resolved_job_id,
                 session_id=effective_request.session_id,
                 cwd=effective_request.cwd,
-                request=_serialise_request(effective_request),
+                request=_serialise_request(effective_request, self.safety),
                 backend=backend_name,
             )
         except (FileExistsError, TypeError, ValueError) as exc:
@@ -780,14 +780,32 @@ def _cleanup_unstarted_worktree(handle: WorktreeHandle | None) -> None:
         return
 
 
-def _serialise_request(request: BridgeRequest) -> dict:
+def _serialise_request(request: BridgeRequest, safety: SafetyPolicy) -> dict:
     """Return a JSON-safe snapshot of the request for the JobRecord.
 
     Dumps via pydantic so any future field changes are reflected
-    automatically; ``exclude_none=False`` keeps the snapshot stable.
+    automatically; ``exclude_none=False`` keeps the snapshot stable. String
+    values are redacted and ``extra_env`` values are never persisted raw.
     """
 
-    return request.model_dump(exclude_none=False)
+    data = _redact_value(request.model_dump(exclude_none=False), safety)
+    extra_env = data.get("extra_env")
+    if isinstance(extra_env, dict):
+        data["extra_env"] = {str(key): "***" for key in extra_env}
+    return data
+
+
+def _redact_value(value, safety: SafetyPolicy):
+    if isinstance(value, str):
+        return safety.redact(value)
+    if isinstance(value, list):
+        return [_redact_value(item, safety) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_value(item, safety)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _pick_error_from_events(events: list[CanonicalEvent]) -> str | None:

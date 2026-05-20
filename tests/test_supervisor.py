@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -261,6 +262,28 @@ def test_start_returns_running_envelope_and_completes(tmp_path: Path):
 
     persisted = supervisor.read_events(response.job_id)
     assert [e.type for e in persisted] == ["system", "assistant", "result"]
+
+
+def test_start_redacts_request_snapshot(tmp_path: Path):
+    events = [
+        CanonicalEvent(type="assistant", text="ok"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter = _ScriptedAdapter(capability=_capability(), events=events)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    raw_bearer = "abcdef123456abcdef123456abcdef"
+    request = BridgeRequest(
+        prompt=f"Authorization: Bearer {raw_bearer}",
+        cwd=str(tmp_path),
+        extra_env={"MY_TOKEN": "plain-extra-env-secret"},
+    )
+    response = supervisor.start(request)
+    assert response.success is True
+    record = supervisor.status(response.job_id)
+    snapshot = json.dumps(record.request, sort_keys=True)
+    assert raw_bearer not in snapshot
+    assert "plain-extra-env-secret" not in snapshot
+    assert record.request["extra_env"] == {"MY_TOKEN": "***"}
 
 
 def test_start_short_circuits_when_backend_unavailable(tmp_path: Path):
