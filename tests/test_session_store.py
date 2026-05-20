@@ -190,6 +190,42 @@ def test_meta_file_is_restrictive(tmp_session_root: Path):
         assert mode == 0o600
 
 
+def test_create_job_refuses_duplicate_id(tmp_session_root: Path):
+    """Phase 4 R1 P1.2 (sec): explicit duplicate id must not silently
+    overwrite the existing meta.json."""
+
+    import pytest as _pytest  # local alias to keep top imports tidy
+
+    store = SessionStore(tmp_session_root)
+    first = store.create_job(job_id="job_dup_test")
+    assert first.job_id == "job_dup_test"
+    with _pytest.raises(FileExistsError):
+        store.create_job(job_id="job_dup_test")
+
+
+def test_append_event_refuses_symlinked_log(tmp_session_root: Path):
+    """Phase 4 R1 P2.2 (sec): a planted symlink at events.jsonl must
+    not redirect appends to an arbitrary file."""
+
+    if _is_windows():
+        return  # pragma: no cover - Windows lacks O_NOFOLLOW semantics
+    store = SessionStore(tmp_session_root)
+    record = store.create_job()
+    paths = JobPaths.for_job(tmp_session_root, record.job_id)
+    secret = tmp_session_root / "secret.txt"
+    secret.write_text("DO_NOT_OVERWRITE", encoding="utf-8")
+    # Replace the auto-touched events.jsonl with a symlink at the same path.
+    paths.events.unlink()
+    paths.events.symlink_to(secret)
+    from agy_mcp.models import CanonicalEvent
+
+    import pytest as _pytest
+
+    with _pytest.raises(OSError):
+        store.append_event(record.job_id, CanonicalEvent(type="assistant", text="x"))
+    assert secret.read_text(encoding="utf-8") == "DO_NOT_OVERWRITE"
+
+
 def _is_windows() -> bool:
     import os
 

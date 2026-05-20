@@ -7,6 +7,9 @@ import errno
 import os
 import re
 import shutil
+import signal
+import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -353,6 +356,160 @@ def shutil_which_or_none(name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Process-group helpers — shared by every adapter that spawns a child whose
+# subtree must die together (agy spawns a grpc sidecar; gemini-cli spawns a
+# tool runner). Lifted out of agy.py so a third adapter (codex, copilot…)
+# doesn't need a sibling import (Phase 4 R1 P2#8).
+# ---------------------------------------------------------------------------
+
+
+def _process_group_kwargs() -> dict:
+    """Return the Popen kwarg that puts the child into its own group.
+
+    On POSIX, ``start_new_session=True`` calls ``setsid`` in the child so
+    the entire subtree (agy + grpc sidecar + language server) shares one
+    process group. On Windows, ``CREATE_NEW_PROCESS_GROUP`` plays the same
+    role for ``CTRL_BREAK_EVENT`` delivery. Passing both is harmless on
+    POSIX but errors on Windows, so we branch.
+    """
+
+    if sys.platform == "win32":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": flags}
+    return {"start_new_session": True}
+
+
+def _terminate_group(proc: "subprocess.Popen") -> None:
+    """Send the polite shutdown signal to the entire process group.
+
+    Falls back to ``proc.terminate()`` if we can't reach the group (e.g.
+    the child already exited and the pgid lookup raises). Never raises.
+
+    The ``proc.pid is None or proc.poll() is not None`` guard avoids PID
+    recycling: once the kernel has reaped the original child, the same PID
+    may belong to an unrelated process and we refuse to signal it.
+    """
+
+    if proc.pid is None or proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            return
+        except OSError:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            return
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+
+
+def _kill_group(proc: "subprocess.Popen") -> None:
+    """Hard-kill the whole group; final stage of the terminate cascade."""
+
+    if proc.pid is None or proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        # No SIGKILL on Windows — TerminateProcess via proc.kill() will
+        # only target the leader, but at this point any sidecar that
+        # survived CTRL_BREAK_EVENT is probably stuck holding our pipes.
+        # See docs/review-followups.md "windows-process-tree-cleanup".
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def wait_with_cancel_poll(
+    proc: "subprocess.Popen",
+    *,
+    total_timeout: float,
+    cancel_event: "threading.Event | None" = None,
+    poll_interval: float = 0.5,
+) -> int | None:
+    """Wait up to ``total_timeout`` seconds for ``proc`` to exit.
+
+    Polls in ``poll_interval`` steps so that a second cancel (or a wrapper
+    deadline expiry) fired during the terminate grace window is honoured
+    promptly rather than after the entire grace elapses. Returns the
+    process exit code, or ``None`` if it never exited. Never raises.
+    """
+
+    if total_timeout <= 0:
+        try:
+            return proc.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            return None
+    deadline = _monotonic() + total_timeout
+    while True:
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return None
+        step = min(poll_interval, max(0.05, remaining))
+        try:
+            return proc.wait(timeout=step)
+        except subprocess.TimeoutExpired:
+            if cancel_event is not None and cancel_event.is_set():
+                # Caller can now escalate (e.g. SIGKILL) without paying the
+                # rest of the polite grace.
+                return None
+
+
+def _shutdown_cascade(
+    proc: "subprocess.Popen",
+    *,
+    cancel_event: "threading.Event | None" = None,
+    terminate_grace: float = 10.0,
+    kill_grace: float = 5.0,
+) -> int | None:
+    """Run terminate -> wait -> kill on the child's whole process group.
+
+    Each ``wait`` is broken into short polling steps via
+    :func:`wait_with_cancel_poll`, so a second cancel arriving during the
+    polite grace can shorten the wait rather than blocking the whole loop.
+    Returns the child's exit code, or ``None`` if it survived both phases.
+
+    Replaces the inline ``terminate -> wait(10) -> kill -> wait(5)`` blocks
+    that previously lived in the adapter wait loops (Phase 4 R1 P1#7).
+    """
+
+    _terminate_group(proc)
+    exit_code = wait_with_cancel_poll(
+        proc, total_timeout=terminate_grace, cancel_event=cancel_event,
+    )
+    if exit_code is not None:
+        return exit_code
+    _kill_group(proc)
+    return wait_with_cancel_poll(
+        proc, total_timeout=kill_grace, cancel_event=cancel_event,
+    )
+
+
+def _monotonic() -> float:
+    # Indirection so tests can monkeypatch without touching the stdlib.
+    import time as _time
+
+    return _time.monotonic()
+
+
+
+# ---------------------------------------------------------------------------
 # EventSink — pluggable hook used by Supervisor to forward live events to the
 # session store / MCP progress notifications without coupling adapters to
 # either.
@@ -384,11 +541,16 @@ __all__ = [
     "_MAX_LINE_BYTES",
     "_RunContext",
     "_drain_stream",
+    "_kill_group",
     "_open_spool",
+    "_process_group_kwargs",
     "_scrub_event_in_place",
     "_scrub_mapping",
+    "_shutdown_cascade",
+    "_terminate_group",
     "detect_flags",
     "has_flag",
     "resolve_cwd",
     "shutil_which_or_none",
+    "wait_with_cancel_poll",
 ]

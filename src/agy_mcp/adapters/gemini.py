@@ -23,17 +23,16 @@ from agy_mcp.adapters.base import (
     _MAX_LINE_BYTES,
     _RunContext,
     _drain_stream,
+    _kill_group,
+    _process_group_kwargs,
+    _shutdown_cascade,
+    _terminate_group,
     has_flag,
     resolve_cwd,
 )
-# Process-group helpers live in the agy adapter today (same cross-platform
-# implementation). Importing from a sibling keeps duplication out without
-# pulling them up to base.py before we know a third adapter needs them.
-from agy_mcp.adapters.agy import (  # noqa: PLC0415 - sibling reuse, not a cycle
-    _kill_group,
-    _process_group_kwargs,
-    _terminate_group,
-)
+# Process-group helpers moved to adapters/base in Phase 4 R1 P2#8 so
+# every adapter that spawns a subtree can share the cancel cascade
+# without sibling-private imports.
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
 from agy_mcp.utils import (
     is_windows,
@@ -237,15 +236,7 @@ class GeminiCliBackend(BaseAdapter):
                             text="job cancelled by supervisor",
                         ),
                     )
-                    _terminate_group(proc)
-                    try:
-                        exit_code = proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        _kill_group(proc)
-                        try:
-                            exit_code = proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            exit_code = None
+                    exit_code = _shutdown_cascade(proc, cancel_event=None)
                     break
                 if time.time() >= deadline:
                     timed_out = True
@@ -257,15 +248,7 @@ class GeminiCliBackend(BaseAdapter):
                             text=f"gemini did not finish within {request.timeout}s",
                         ),
                     )
-                    _terminate_group(proc)
-                    try:
-                        exit_code = proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        _kill_group(proc)
-                        try:
-                            exit_code = proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            exit_code = None
+                    exit_code = _shutdown_cascade(proc, cancel_event=None)
                     break
                 time.sleep(0.05)
         finally:
@@ -276,15 +259,7 @@ class GeminiCliBackend(BaseAdapter):
             # exit so we don't orphan a subagent the child might have spawned.
             if proc is not None and proc.poll() is None:
                 try:
-                    _terminate_group(proc)
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        _kill_group(proc)
-                        try:
-                            proc.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            pass
+                    _shutdown_cascade(proc, cancel_event=None, terminate_grace=5, kill_grace=2)
                 except OSError:
                     pass
             if proc is not None:

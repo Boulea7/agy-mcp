@@ -17,6 +17,7 @@ filesystems that lack flock semantics (NFS, certain CI containers).
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -39,9 +40,17 @@ _JOB_ID_RE = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
 
 
 def generate_job_id() -> str:
-    """Return a sortable, URL-safe job id (timestamp + 6 random hex)."""
+    """Return a sortable, URL-safe job id (timestamp + 12 random hex).
 
-    return f"{JOB_ID_PREFIX}{int(time.time())}_{secrets.token_hex(3)}"
+    Entropy is 48 bits of randomness on top of a 1s-resolution timestamp.
+    Birthday-paradox collision probability at 10 simultaneous bridge
+    processes opening 1 job per second sits well below 1e-9; the previous
+    24-bit suffix (token_hex(3)) hit ~50% at ~4800 jobs/sec, which the
+    Phase 4 single-process supervisor never approaches but a future Phase
+    4+ multi-process layout might. (Phase 4 R1 P2#12.)
+    """
+
+    return f"{JOB_ID_PREFIX}{int(time.time())}_{secrets.token_hex(6)}"
 
 
 def _validate_job_id(job_id: str) -> str:
@@ -104,6 +113,18 @@ class SessionStore:
     ) -> JobRecord:
         job_id = _validate_job_id(job_id) if job_id is not None else generate_job_id()
         paths = JobPaths.for_job(self.root, job_id)
+        # Phase 4 R1 P1.2: refuse to overwrite an existing job. Without
+        # this check a caller supplying an explicit job_id could silently
+        # replace another job's meta.json (and worse: overwrite the
+        # in-memory _JobHandle inside Supervisor._jobs, orphaning the
+        # original worker's cancel_event). Auto-generated ids encode a
+        # second-resolution timestamp + 48 bits of entropy, so collisions
+        # there indicate either a clock glitch or a duplicate retry —
+        # both deserve a hard error rather than silent overwrite.
+        if paths.meta.exists():
+            raise FileExistsError(
+                f"job_id {job_id!r} already exists at {paths.meta}",
+            )
         ensure_directory(paths.root, mode=0o700)
         ensure_directory(paths.artifacts, mode=0o700)
         record = JobRecord(
@@ -178,11 +199,17 @@ class SessionStore:
         # PIPE_BUF on POSIX; on networked filesystems writers must be serial
         # per job (supervisor guarantees one writer per job_id).
         line = event.model_dump_json(exclude_none=False) + "\n"
-        with paths.events.open("a", encoding="utf-8") as fp:
+        fp = _open_append_no_follow(paths.events)
+        try:
             fp.write(line)
             fp.flush()
             try:
                 os.fsync(fp.fileno())
+            except OSError:
+                pass
+        finally:
+            try:
+                fp.close()
             except OSError:
                 pass
 
@@ -312,6 +339,42 @@ def _path_is_relative_to(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _open_append_no_follow(path: Path):
+    """Open ``path`` for append with O_NOFOLLOW when the OS supports it.
+
+    Mirrors :func:`agy_mcp.adapters.base._open_spool`. Phase 4 R1 P2.2
+    promotes this from the latent followups list to a Phase 4 invariant
+    because :class:`StoreEventSink.emit` now writes to ``events.jsonl``
+    on every adapter event; an attacker who can plant a symlink under
+    a job dir (e.g. via a custom ``AGY_MCP_SESSION_ROOT``) could
+    otherwise redirect those appends to an arbitrary file.
+
+    On a filesystem that rejects ``O_NOFOLLOW`` (rare; some NFS/FUSE
+    mounts), we fall back to a plain append after one more
+    ``is_symlink`` check so we still refuse the symlinked target.
+    """
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    nofollow_supported = hasattr(os, "O_NOFOLLOW")
+    if nofollow_supported:
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise
+        if not nofollow_supported or exc.errno in (
+            errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL,
+        ):
+            if path.is_symlink():
+                raise OSError(
+                    errno.ELOOP, f"refusing to follow symlink: {path}",
+                ) from exc
+            return path.open("a", encoding="utf-8")
+        raise
+    return os.fdopen(fd, "a", encoding="utf-8")
 
 
 def collect_artifact_paths(records: Iterable[JobRecord]) -> list[str]:

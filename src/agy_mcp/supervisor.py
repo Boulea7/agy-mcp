@@ -5,9 +5,9 @@ Responsibilities:
 1. ``start`` a job: spawn ``adapter.run`` on a worker thread; persist
    the :class:`JobRecord` immediately so the caller can poll while the
    adapter is still running.
-2. ``status`` / ``read`` / ``cancel`` / ``list_sessions``: read-only or
-   process-controlling operations against the on-disk
-   :class:`SessionStore` and the in-memory job registry.
+2. ``status`` / ``read_events`` / ``read_translated`` / ``cancel`` /
+   ``list_sessions``: read-only or process-controlling operations against
+   the on-disk :class:`SessionStore` and the in-memory job registry.
 3. Tee every :class:`CanonicalEvent` the adapter emits into the
    session store via :class:`StoreEventSink` so the live event log on
    disk stays in sync with what the supervisor reports.
@@ -28,14 +28,15 @@ Phase 4 review invariants from R3 hand-off:
 * The supervisor MUST consume the adapter's event sink output, not raw
   ``stdout_buf`` / ``stderr_buf``, so the per-event redact chokepoint
   in ``BaseAdapter.emit_event`` is preserved.
-* The supervisor MUST be the single writer per ``job_id`` — slug
-  collisions between processes are not yet serialised; that's tracked
-  for Phase 4+ work.
+* The supervisor MUST be the single writer per ``job_id``. Cross-process
+  serialisation is deferred to Phase 4+ work (see
+  ``docs/review-followups.md`` "cross-process slug collision").
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -92,9 +93,14 @@ class StoreEventSink(EventSink):
             try:
                 self.store.append_event(self.job_id, event)
             except OSError:
-                # Disk full / permission revoked / unmounted — surface as a
-                # second-level error inside the event log but never raise:
-                # an exception from the sink would poison the adapter run.
+                # Disk full / permission revoked / unmounted / refused
+                # symlink — eat the failure silently so a poisoned sink
+                # cannot crash the adapter run. We deliberately do NOT
+                # synthesise a "sink_write_failed" event here: the only
+                # path that would persist it is the same sink that just
+                # failed (Phase 4 R1 P1#6). Operators see the broken
+                # store via the job dir on disk; programmatic visibility
+                # is tracked as a Phase 4+ followup.
                 return
             self._last_event_ts = event.ts
 
@@ -124,6 +130,11 @@ AdapterFactory = Callable[
     [BridgeRequest, Config, SafetyPolicy],
     tuple[BaseAdapter, list[str]],
 ]
+
+
+# Constant string used by the crash-reconcile path. Pulled out so tests
+# can assert on it without hard-coding the literal across the codebase.
+_RECONCILE_ERROR = "worker thread exited without finalize"
 
 
 class Supervisor:
@@ -176,8 +187,9 @@ class Supervisor:
         """Spawn a background job; return a BridgeResponse with status=running.
 
         Failures BEFORE the adapter spawns (adapter selection, missing
-        binary) produce ``success=False`` synchronously. Failures DURING
-        the adapter run are visible only via ``status`` / ``read``.
+        binary, duplicate job_id) produce ``success=False`` synchronously.
+        Failures DURING the adapter run are visible only via ``status``
+        / ``read_events``.
         """
 
         adapter, route_warnings = self._adapter_factory(
@@ -186,22 +198,41 @@ class Supervisor:
         cap = adapter.detect()
         backend_name = cap.backend
 
+        # Redact every string that can reach the BridgeResponse — the
+        # bridge contract requires this and the sync path at
+        # ``bridge._run_unsafe`` already does it. Phase 4 R1 P1.1.
+        cap_warnings = [self.safety.redact(w) for w in cap.warnings]
+        route_warnings_redacted = [self.safety.redact(w) for w in route_warnings]
+
         if not cap.bin_path:
+            error_text = (
+                " | ".join(route_warnings_redacted)
+                or self.safety.redact(f"backend={backend_name!r} unavailable")
+            )
             return BridgeResponse(
                 success=False,
-                error=" | ".join(route_warnings) or f"backend={backend_name!r} unavailable",
-                warnings=list(cap.warnings),
+                error=error_text,
+                warnings=cap_warnings,
                 cwd=request.cwd,
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
-        record = self.store.create_job(
-            job_id=job_id,
-            session_id=request.session_id,
-            cwd=request.cwd,
-            request=_serialise_request(request),
-            backend=backend_name,
-        )
+        try:
+            record = self.store.create_job(
+                job_id=job_id,
+                session_id=request.session_id,
+                cwd=request.cwd,
+                request=_serialise_request(request),
+                backend=backend_name,
+            )
+        except (FileExistsError, ValueError) as exc:
+            return BridgeResponse(
+                success=False,
+                error=self.safety.redact(str(exc)),
+                warnings=[*route_warnings_redacted, *cap_warnings],
+                cwd=request.cwd,
+                adapter=AdapterMetadata(backend=backend_name),
+            ).touch()
 
         cancel_event = threading.Event()
         thread = threading.Thread(
@@ -234,53 +265,82 @@ class Supervisor:
                 supports_streaming=cap.supports_streaming,
                 supports_tool_events=cap.supports_tool_events,
             ),
-            warnings=[*route_warnings, *cap.warnings],
+            warnings=[*route_warnings_redacted, *cap_warnings],
         ).touch()
 
     def status(self, job_id: str) -> JobRecord | None:
         """Return the current :class:`JobRecord` for ``job_id`` or None.
 
-        The record reflects whatever the worker thread has persisted so
-        far; transient ``running`` -> ``completed`` transitions are
-        observed eventually but never overlap.
+        If the in-memory worker has already exited and dropped its handle
+        but the on-disk record still says ``running`` (e.g. the worker
+        process was SIGKILL'd before it reached ``_finalize``), we rewrite
+        the record to ``failed``. The reconciliation is done under
+        ``self._lock`` with a re-read of the meta file so a worker that
+        races between persisting ``status=completed`` and popping its
+        handle is NOT silently flipped back to failed (Phase 4 R1 P0#1).
         """
 
         record = self.store.get_job(job_id)
         if record is None:
             return None
+        if record.status != "running":
+            return record
         with self._lock:
             handle = self._jobs.get(job_id)
-        # If the in-memory thread is gone but the on-disk record still
-        # says ``running``, the worker must have crashed before finalising
-        # — surface that as ``failed`` so callers don't poll forever.
-        if record.status == "running" and (handle is None or not handle.thread.is_alive()):
-            record = self.store.finalize_job(
-                job_id, status="failed", error="worker thread exited without finalize",
-            ) or record
-        return record
+            handle_alive = handle is not None and handle.thread.is_alive()
+            if handle_alive:
+                # Still under management — no reconciliation needed.
+                return record
+            # Re-read inside the lock so a worker that just persisted
+            # ``status=completed`` and is about to pop its handle wins
+            # the race instead of being reclassified as failed.
+            fresh = self.store.get_job(job_id)
+            if fresh is None:
+                return record
+            if fresh.status != "running":
+                return fresh
+            finalised = self.store.finalize_job(
+                job_id,
+                status="failed",
+                error=self.safety.redact(_RECONCILE_ERROR),
+            )
+            return finalised or fresh
 
-    def read(
-        self, job_id: str, *, since: int = 0, translate: str | None = None,
-    ) -> list[CanonicalEvent] | list[dict]:
-        """Return events from ``since`` onwards; optionally translate them."""
+    def read_events(self, job_id: str, *, since: int = 0) -> list[CanonicalEvent]:
+        """Return canonical events from offset ``since`` onwards."""
+
+        return self.store.read_events(job_id, since=since)
+
+    def read_translated(
+        self, job_id: str, *, since: int = 0, protocol: str = "claude",
+    ) -> list[dict]:
+        """Return events translated to the requested wire protocol.
+
+        ``protocol`` matches ``ProtocolTranslator``'s ``protocol`` arg —
+        ``raw`` / ``claude`` / ``codex``.
+        """
 
         events = self.store.read_events(job_id, since=since)
-        if translate is None:
-            return events
-        translator = ProtocolTranslator(translate, safety=self.safety, include_raw=False)
+        translator = ProtocolTranslator(protocol, safety=self.safety, include_raw=False)
         return translator.translate_many(events)
 
     def cancel(self, job_id: str) -> bool:
-        """Signal a running job to stop; return True if a job was signalled."""
+        """Signal a running job to stop; return True if a job was signalled.
+
+        The read-check-set sequence is performed entirely under
+        ``self._lock`` so a worker that exits between ``get`` and
+        ``is_alive`` cannot have its slot reused by a fresh ``start()``
+        before we set the wrong cancel_event (Phase 4 R1 P2.1).
+        """
 
         with self._lock:
             handle = self._jobs.get(job_id)
-        if handle is None:
-            return False
-        if not handle.thread.is_alive():
-            return False
-        handle.cancel_event.set()
-        return True
+            if handle is None:
+                return False
+            if not handle.thread.is_alive():
+                return False
+            handle.cancel_event.set()
+            return True
 
     def list_sessions(self, *, limit: int | None = 50) -> list[JobRecord]:
         return self.store.list_jobs(limit=limit)
@@ -301,7 +361,6 @@ class Supervisor:
         sink = StoreEventSink(self.store, job_id)
         result: AdapterRunResult | None = None
         run_error: str | None = None
-        spool_dir: Path | None = None
         try:
             cap = adapter.detect()
             # Spool dir lives for the lifetime of the run. We pre-allocate
@@ -309,40 +368,50 @@ class Supervisor:
             # is removed in the ``finally`` once finalise has updated
             # JobRecord.{stdout,stderr,log}_path to point at the kept
             # copies in the session store.
-            with tempfile.TemporaryDirectory(prefix="agy-mcp-sup-") as spool_root:
-                spool_dir = Path(spool_root)
-                spool_log = spool_dir / "agy.log" if cap.supports_log_file else None
-                spool_stdout = spool_dir / "stdout.spool"
-                spool_stderr = spool_dir / "stderr.spool"
-                with self._lock:
-                    handle = self._jobs.get(job_id)
-                    if handle is not None:
-                        handle.spool_dir = spool_dir
-                try:
-                    result = adapter.run(
-                        request,
-                        log_path=spool_log,
-                        stdout_path=spool_stdout,
-                        stderr_path=spool_stderr,
-                        event_sink=sink,
-                        cancel_event=cancel_event,
-                    )
-                except Exception as exc:  # noqa: BLE001 - keep finalize reachable
-                    # Mirror bridge._run_unsafe: redact + cap the traceback
-                    # so the job envelope never leaks a frame from the
-                    # adapter's internals.
-                    tb = self.safety.redact("".join(traceback.format_exception(exc)))[:4000]
-                    run_error = self.safety.redact(str(exc)) + (
-                        " | tb=" + tb if request.debug else ""
-                    )
-                else:
-                    # Copy the spool stdout / stderr into the kept location
-                    # before TemporaryDirectory deletes them. agy.log is
-                    # also salvaged so post-mortem klog inspection works.
-                    _migrate_if_present(spool_stdout, paths.stdout)
-                    _migrate_if_present(spool_stderr, paths.stderr)
-                    if spool_log is not None:
-                        _migrate_if_present(spool_log, paths.agy_log)
+            try:
+                spool_ctx = tempfile.TemporaryDirectory(prefix="agy-mcp-sup-")
+            except OSError as exc:
+                # /tmp full / read-only — record the diagnostic so
+                # status() doesn't show a bare ``failed`` (Phase 4 R1 P3.1).
+                run_error = self.safety.redact(f"spool dir creation failed: {exc}")
+            else:
+                with spool_ctx as spool_root:
+                    spool_dir = Path(spool_root)
+                    spool_log = spool_dir / "agy.log" if cap.supports_log_file else None
+                    spool_stdout = spool_dir / "stdout.spool"
+                    spool_stderr = spool_dir / "stderr.spool"
+                    with self._lock:
+                        handle = self._jobs.get(job_id)
+                        if handle is not None:
+                            handle.spool_dir = spool_dir
+                    try:
+                        result = adapter.run(
+                            request,
+                            log_path=spool_log,
+                            stdout_path=spool_stdout,
+                            stderr_path=spool_stderr,
+                            event_sink=sink,
+                            cancel_event=cancel_event,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - keep finalize reachable
+                        # Mirror bridge._run_unsafe: redact + cap the
+                        # traceback so the job envelope never leaks a
+                        # frame from the adapter's internals.
+                        tb = self.safety.redact(
+                            "".join(traceback.format_exception(exc)),
+                        )[:4000]
+                        run_error = self.safety.redact(str(exc)) + (
+                            " | tb=" + tb if request.debug else ""
+                        )
+                    else:
+                        # Copy the spool stdout / stderr into the kept
+                        # location before TemporaryDirectory deletes
+                        # them. agy.log is also salvaged so post-mortem
+                        # klog inspection works.
+                        _migrate_if_present(spool_stdout, paths.stdout)
+                        _migrate_if_present(spool_stderr, paths.stderr)
+                        if spool_log is not None:
+                            _migrate_if_present(spool_log, paths.agy_log)
         finally:
             self._finalize(
                 job_id=job_id,
@@ -372,39 +441,48 @@ class Supervisor:
         exit_code: int | None = None
         error: str | None = run_error
         session_id_resolved: str | None = request.session_id
+        # Snapshot the cancel flag once so a *late* cancel firing after
+        # the adapter cleanly returned does NOT silently downgrade a
+        # successful run to ``cancelled`` (Phase 4 R1 P1#3).
+        was_cancelled = cancel_event.is_set()
 
         if result is None:
-            status = "cancelled" if cancel_event.is_set() else "failed"
+            status = "cancelled" if was_cancelled else "failed"
         else:
             session_id_resolved = result.session_id or request.session_id
             exit_code = result.exit_code
-            if cancel_event.is_set():
-                status = "cancelled"
-            elif result.exit_code == 0:
+            if result.exit_code == 0:
+                # A clean exit always wins over a late cancel. Cancel that
+                # arrived while the adapter was still inside its wait
+                # loop will already have set exit_code != 0 via the
+                # terminate cascade, so this branch keeps that flow.
                 status = "completed"
+            elif was_cancelled:
+                status = "cancelled"
             else:
                 status = "failed"
                 if not error:
                     error = _pick_error_from_events(result.events) or "non-zero exit"
 
-        finalised = self.store.finalize_job(
-            job_id,
-            status=status,
-            exit_code=exit_code,
-            session_id=session_id_resolved,
-            error=error,
-        )
-        if finalised is None:
+        # Atomic single-write finalize: mutate the record in memory and
+        # call ``update_job`` exactly once so a reader cannot observe a
+        # ``status=completed`` record without its artifacts / route
+        # warnings (Phase 4 R1 P1#5).
+        record = self.store.get_job(job_id)
+        if record is None:
             return
+        record.status = status
+        record.exit_code = exit_code
+        record.finished_at = _utc_now()
+        if session_id_resolved and not record.session_id:
+            record.session_id = session_id_resolved
+        if error is not None:
+            record.error = error
         if result is not None and result.artifacts:
-            finalised.artifacts = list(result.artifacts)
-            self.store.update_job(finalised)
-        # Stash the warnings list so MCP tools can surface it even after
-        # the adapter has gone away. Store under ``extra`` so the
-        # JobRecord schema stays stable.
+            record.artifacts = list(result.artifacts)
         if route_warnings:
-            finalised.extra.setdefault("route_warnings", list(route_warnings))
-            self.store.update_job(finalised)
+            record.extra.setdefault("route_warnings", list(route_warnings))
+        self.store.update_job(record)
 
 
 # ---------------------------------------------------------------------------
@@ -412,29 +490,90 @@ class Supervisor:
 # ---------------------------------------------------------------------------
 
 
+def _utc_now() -> str:
+    # Indirection so finalize uses the same clock helper as the rest of
+    # the codebase (utils.utc_now_iso). Imported lazily to keep the
+    # supervisor's module-level import surface narrow.
+    from agy_mcp.utils import utc_now_iso
+
+    return utc_now_iso()
+
+
 def _migrate_if_present(src: Path, dst: Path) -> None:
     """Move ``src`` to ``dst`` if ``src`` exists; never raises.
 
-    Called as the spool TemporaryDirectory is about to be removed —
-    losing the file is acceptable (best-effort post-mortem), so we
-    swallow OSError. The dst parent already exists because SessionStore
-    created the job dir.
+    Streams the body via :func:`shutil.copyfile` on cross-FS fallback so
+    a multi-hundred-MB spool stdout does not balloon worker RAM (Phase 4
+    R1 P1#4). The destination is opened with ``O_WRONLY|O_NOFOLLOW``
+    when available so a symlink planted in the job dir cannot redirect
+    the migrate target (Phase 4 R1 P2.3).
     """
 
     if not src.is_file():
         return
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        # os.replace is atomic on POSIX and behaves correctly across the
-        # same filesystem (spool dir is under /tmp; job dir typically
-        # under ~/.agy-mcp/sessions). Cross-FS falls back to copy+unlink.
-        os.replace(src, dst)
     except OSError:
+        return
+    # If the destination already exists as a symlink, refuse to migrate
+    # — the attacker could have planted ``stdout.log -> ~/.ssh/authorized_keys``
+    # between create_job and the migrate call.
+    try:
+        if dst.is_symlink():
+            return
+    except OSError:
+        return
+    try:
+        os.replace(src, dst)
+        _try_chmod(dst, 0o600)
+        return
+    except OSError:
+        # os.replace fails across filesystems; fall back to streaming
+        # copy. ``shutil.copyfile`` opens dst with ``O_WRONLY|O_CREAT|
+        # O_TRUNC``; we re-check the symlink invariant first to keep the
+        # window between the dst.is_symlink check above and the open
+        # call as tight as we can without dropping to ctypes.
+        pass
+    try:
+        _safe_copyfile(src, dst)
+        _try_chmod(dst, 0o600)
         try:
-            data = src.read_bytes()
-            dst.write_bytes(data)
+            src.unlink()
         except OSError:
             pass
+    except OSError:
+        return
+
+
+def _safe_copyfile(src: Path, dst: Path) -> None:
+    """Copy ``src`` to ``dst`` with O_NOFOLLOW on the destination.
+
+    Uses a manual chunked read/write loop on top of ``os.open`` rather
+    than ``shutil.copyfile`` so the destination flags include
+    ``O_NOFOLLOW`` (when supported) — copyfile internally calls
+    ``open(dst, 'wb')`` which lacks that protection.
+    """
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(dst, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as dst_fp, src.open("rb") as src_fp:
+            shutil.copyfileobj(src_fp, dst_fp, length=64 * 1024)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def _try_chmod(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
 
 
 def _serialise_request(request: BridgeRequest) -> dict:

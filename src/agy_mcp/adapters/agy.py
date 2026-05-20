@@ -38,9 +38,14 @@ from agy_mcp.adapters.base import (
     _MAX_LINE_BYTES,
     _RunContext,
     _drain_stream,
+    _kill_group,
+    _process_group_kwargs,
     _scrub_mapping,
+    _shutdown_cascade,
+    _terminate_group,
     has_flag,
     resolve_cwd,
+    wait_with_cancel_poll,
 )
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
 from agy_mcp.safety import DEFAULT_SCRUB_ENV_NAMES, SafetyPolicy
@@ -410,15 +415,7 @@ class AgyPrintBackend(BaseAdapter):
                             text="job cancelled by supervisor",
                         ),
                     )
-                    _terminate_group(proc)
-                    try:
-                        exit_code = proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        _kill_group(proc)
-                        try:
-                            exit_code = proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            exit_code = None
+                    exit_code = _shutdown_cascade(proc, cancel_event=None)
                     break
                 if time.time() >= deadline:
                     timed_out = True
@@ -430,17 +427,9 @@ class AgyPrintBackend(BaseAdapter):
                             text=f"agy did not finish within {request.timeout}s",
                         ),
                     )
-                    _terminate_group(proc)
-                    try:
-                        exit_code = proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        _kill_group(proc)
-                        try:
-                            exit_code = proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            exit_code = None
+                    exit_code = _shutdown_cascade(proc, cancel_event=None)
                     break
-                time.sleep(0.05)
+                time.sleep(_TAIL_POLL_INTERVAL_S)
         finally:
             ctx.stop_event.set()
             for t in threads:
@@ -451,15 +440,7 @@ class AgyPrintBackend(BaseAdapter):
             # process group so the grpc language server gets cleaned up.
             if proc is not None and proc.poll() is None:
                 try:
-                    _terminate_group(proc)
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        _kill_group(proc)
-                        try:
-                            proc.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            pass
+                    _shutdown_cascade(proc, cancel_event=None, terminate_grace=5, kill_grace=2)
                 except OSError:
                     pass
             if proc is not None:
@@ -576,81 +557,11 @@ class AgyPrintBackend(BaseAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Free functions used by adapter threads. ``_RunContext``, ``_drain_stream``,
-# ``_scrub_event_in_place``, and ``_scrub_mapping`` live in ``base`` so the
-# gemini adapter can reuse them without cross-module private imports.
+# Process-group helpers live in ``adapters/base`` since Phase 4 R1 P2#8 so
+# every adapter that spawns a subtree can reuse the same terminate cascade
+# without sibling imports. (``signal`` import retained: agy still uses it
+# directly in the wait loop for klog SIGUSR1 dispatch.)
 # ---------------------------------------------------------------------------
-
-
-def _process_group_kwargs() -> dict:
-    """Return the Popen kwarg that puts the child into its own group.
-
-    On POSIX, ``start_new_session=True`` calls ``setsid`` in the child so
-    the entire subtree (agy + grpc sidecar + language server) shares one
-    process group. On Windows, ``CREATE_NEW_PROCESS_GROUP`` plays the same
-    role for ``CTRL_BREAK_EVENT`` delivery. Passing both is harmless on
-    POSIX but errors on Windows, so we branch.
-    """
-
-    if sys.platform == "win32":
-        # CREATE_NEW_PROCESS_GROUP is the only way SIGBREAK delivery to the
-        # subtree works; subprocess exposes it as a constant on Windows
-        # only, so the attribute access happens under the guard.
-        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        return {"creationflags": flags}
-    return {"start_new_session": True}
-
-
-def _terminate_group(proc: subprocess.Popen) -> None:
-    """Send the polite shutdown signal to the entire process group.
-
-    Falls back to ``proc.terminate()`` if we can't reach the group (e.g.
-    the child already exited and the pgid lookup raises). Never raises.
-    """
-
-    if proc.pid is None or proc.poll() is not None:
-        return
-    if sys.platform == "win32":
-        try:
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-            return
-        except OSError:
-            pass
-    else:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            return
-        except (OSError, ProcessLookupError):
-            pass
-    try:
-        proc.terminate()
-    except OSError:
-        pass
-
-
-def _kill_group(proc: subprocess.Popen) -> None:
-    """Hard-kill the whole group; final stage of the terminate cascade."""
-
-    if proc.pid is None or proc.poll() is not None:
-        return
-    if sys.platform == "win32":
-        # No SIGKILL on Windows — TerminateProcess via proc.kill() will
-        # only target the leader, but at this point any sidecar that
-        # survived CTRL_BREAK_EVENT is probably stuck holding our pipes.
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        return
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
 
 
 def _tail_klog(log_path: Path, ctx: _RunContext, adapter: AgyPrintBackend) -> None:

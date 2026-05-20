@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -19,7 +20,7 @@ from agy_mcp.models import (
 )
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
-from agy_mcp.supervisor import StoreEventSink, Supervisor
+from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +237,7 @@ def test_start_returns_running_envelope_and_completes(tmp_path: Path):
     assert record.exit_code == 0
     assert record.session_id == "sess-scripted"
 
-    persisted = supervisor.read(response.job_id)
+    persisted = supervisor.read_events(response.job_id)
     assert [e.type for e in persisted] == ["system", "assistant", "result"]
 
 
@@ -301,7 +302,7 @@ def test_cancel_signals_running_job(tmp_path: Path):
     )
     record = supervisor.status(response.job_id)
     assert record.status == "cancelled"
-    events_persisted = supervisor.read(response.job_id)
+    events_persisted = supervisor.read_events(response.job_id)
     assert any(e.subtype == "cancelled" for e in events_persisted)
 
 
@@ -346,11 +347,11 @@ def test_read_since_offset_returns_only_new_events(tmp_path: Path):
     assert _wait_for(
         lambda: supervisor.status(response.job_id).status == "completed",
     )
-    tail = supervisor.read(response.job_id, since=2)
+    tail = supervisor.read_events(response.job_id, since=2)
     assert [e.type for e in tail] == ["assistant", "result"]
 
 
-def test_read_translates_when_requested(tmp_path: Path):
+def test_read_translated_emits_dicts(tmp_path: Path):
     events = [
         CanonicalEvent(type="assistant", text="translated"),
         CanonicalEvent(type="result", subtype="success"),
@@ -362,7 +363,7 @@ def test_read_translates_when_requested(tmp_path: Path):
     assert _wait_for(
         lambda: supervisor.status(response.job_id).status == "completed",
     )
-    translated = supervisor.read(response.job_id, translate="raw")
+    translated = supervisor.read_translated(response.job_id, protocol="raw")
     assert isinstance(translated, list)
     assert all(isinstance(e, dict) for e in translated)
 
@@ -437,3 +438,104 @@ def test_adapter_exception_captured_as_failure(tmp_path: Path):
     record = supervisor.status(response.job_id)
     assert "upstream blew up" in (record.error or "")
     assert record.exit_code is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 R1 regressions
+# ---------------------------------------------------------------------------
+
+
+def test_start_unavailable_envelope_redacts_path_warning(tmp_path: Path):
+    """P1.1 (sec): synchronous unavailable envelope must redact $HOME paths."""
+
+    cap = _capability(bin_path="")
+    cap.warnings = [f"OAuth credentials missing at {Path.home() / '.gemini' / 'oauth_creds.json'}"]
+    adapter = _ScriptedAdapter(capability=cap, events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path))
+    response = supervisor.start(request)
+    assert response.success is False
+    # The /Users/<u>/ → ~/ anonymisation strips the operator's username.
+    assert "/Users/" not in " ".join(response.warnings)
+    assert "/home/" not in " ".join(response.warnings)
+
+
+def test_start_rejects_duplicate_job_id(tmp_path: Path):
+    """P1.2 (sec): explicit duplicate job_id surfaces a structured failure."""
+
+    events = [
+        CanonicalEvent(type="assistant", text="hi"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter = _ScriptedAdapter(capability=_capability(), events=events)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path))
+    first = supervisor.start(request, job_id="job_pinned_for_test")
+    assert first.success is True
+    assert _wait_for(
+        lambda: supervisor.status(first.job_id).status == "completed",
+    )
+    # Second start with the same job_id must NOT overwrite — must error.
+    second = supervisor.start(request, job_id="job_pinned_for_test")
+    assert second.success is False
+    assert "already exists" in (second.error or "")
+
+
+def test_status_does_not_downgrade_completed_record(tmp_path: Path):
+    """P0#1 (arch): a completed record must never be flipped to failed."""
+
+    events = [
+        CanonicalEvent(type="assistant", text="quick"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter = _ScriptedAdapter(capability=_capability(), events=events)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path))
+    response = supervisor.start(request)
+    assert _wait_for(
+        lambda: supervisor.status(response.job_id).status == "completed",
+    )
+    # status() called after the worker has popped its handle must still
+    # return ``completed`` (not ``failed: worker thread exited without
+    # finalize``). The lock-internal re-read protects against this race.
+    record = supervisor.status(response.job_id)
+    assert record.status == "completed"
+    assert record.error is None
+
+
+def test_migrate_refuses_symlink_destination(tmp_path: Path):
+    """P2.3 (sec): a planted symlink at the destination must not be followed."""
+
+    src = tmp_path / "src.txt"
+    src.write_text("payload", encoding="utf-8")
+    secret_target = tmp_path / "secret.txt"
+    secret_target.write_text("DO NOT OVERWRITE", encoding="utf-8")
+    dst = tmp_path / "dst.txt"
+    dst.symlink_to(secret_target)
+
+    _migrate_if_present(src, dst)
+
+    # The symlink itself is still present; the secret target was not written
+    # through the symlink. The migrate is a no-op on the symlink case.
+    assert dst.is_symlink()
+    assert secret_target.read_text(encoding="utf-8") == "DO NOT OVERWRITE"
+
+
+def test_route_warnings_redacted_in_running_envelope(tmp_path: Path):
+    """P1.1 (sec): warnings on the success path also go through redact."""
+
+    events = [
+        CanonicalEvent(type="assistant", text="ok"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter = _ScriptedAdapter(capability=_capability(), events=events)
+    home = str(Path.home())
+    supervisor = _supervisor_with(
+        adapter, tmp_path=tmp_path,
+        route_warnings=[f"resolved binary at {home}/.local/bin/agy"],
+    )
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path))
+    response = supervisor.start(request)
+    assert response.success is True
+    # /Users/<u>/ collapses to ~/ in the warnings list.
+    assert all(home not in w for w in response.warnings)
