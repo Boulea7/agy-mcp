@@ -20,6 +20,7 @@ import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath
 
 DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
 
@@ -63,6 +64,19 @@ REQUIRED_SDIST_FILES: set[str] = {
     "src/agy_mcp/_skill_bodies/antigravity/SKILL.md",
 }
 
+ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
+    "src/agy_mcp/py.typed",
+    "src/agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
+    "src/agy_mcp/_skill_bodies/claude/references/prompt-patterns.md",
+    "src/agy_mcp/_skill_bodies/claude/references/security.md",
+    "src/agy_mcp/_skill_bodies/claude/references/usage.md",
+    "src/agy_mcp/_skill_bodies/claude/scripts/agy_bridge.py",
+    "src/agy_mcp/_skill_bodies/codex/references/prompt-patterns.md",
+    "src/agy_mcp/_skill_bodies/codex/references/security.md",
+    "src/agy_mcp/_skill_bodies/codex/references/usage.md",
+    "src/agy_mcp/_skill_bodies/codex/scripts/agy_bridge.py",
+}
+
 # Files / patterns that MUST NOT appear in any artefact. A match here aborts
 # the release. Patterns use simple substring + path-component checks so we
 # don't have to drag in a glob library — keep the patterns simple and obvious.
@@ -80,6 +94,12 @@ FORBIDDEN_SUBSTRINGS: tuple[str, ...] = (
     ".DS_Store",
     "Thumbs.db",
 )
+FORBIDDEN_COMPONENTS: frozenset[str] = frozenset({
+    ".refs",
+    ".agy-mcp",
+    ".claude",
+    "__pycache__",
+})
 
 # Files allowed to ship even though their name flirts with a forbidden
 # pattern — for example ``prompts/CLAUDE.md`` is a documented public snippet
@@ -113,22 +133,48 @@ def _list_wheel(wheel: Path) -> list[str]:
         return [info.filename for info in zf.infolist() if not info.is_dir()]
 
 
-def _check_files(label: str, files: list[str], required: set[str] | None) -> list[str]:
+def _check_files(
+    label: str,
+    files: list[str],
+    required: set[str] | None,
+    allowed: set[str] | None = None,
+) -> list[str]:
     """Return list of human-readable problems found in ``files``."""
 
     problems: list[str] = []
+    file_set = set(files)
     if required is not None:
-        missing = sorted(required - set(files))
+        missing = sorted(required - file_set)
         for path in missing:
             problems.append(f"[{label}] missing required file: {path}")
+    if allowed is not None:
+        unexpected = sorted(file_set - allowed)
+        for path in unexpected:
+            problems.append(f"[{label}] unexpected file shipped: {path}")
 
     for path in files:
         if path in ALLOWED_DESPITE_FORBIDDEN:
             continue
-        for needle in FORBIDDEN_SUBSTRINGS:
-            if needle in path:
-                problems.append(f"[{label}] forbidden file shipped: {path} (matched {needle!r})")
+        components = PurePosixPath(path).parts
+        for component in FORBIDDEN_COMPONENTS:
+            if component in components:
+                problems.append(
+                    f"[{label}] forbidden file shipped: {path} "
+                    f"(matched component {component!r})"
+                )
                 break
+        else:
+            component_matched = False
+            for needle in FORBIDDEN_SUBSTRINGS:
+                if needle in path:
+                    problems.append(
+                        f"[{label}] forbidden file shipped: {path} "
+                        f"(matched {needle!r})"
+                    )
+                    component_matched = True
+                    break
+            if component_matched:
+                continue
     return problems
 
 
@@ -149,7 +195,14 @@ def main() -> int:
     problems: list[str] = []
     for sdist in sdists:
         files = _list_sdist(sdist)
-        problems.extend(_check_files(sdist.name, files, REQUIRED_SDIST_FILES))
+        problems.extend(
+            _check_files(
+                sdist.name,
+                files,
+                REQUIRED_SDIST_FILES,
+                allowed=ALLOWED_SDIST_FILES,
+            )
+        )
     for wheel in wheels:
         files = _list_wheel(wheel)
         # Wheels do not ship docs/, so we cannot enforce a required-set there

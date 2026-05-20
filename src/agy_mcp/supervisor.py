@@ -557,11 +557,11 @@ class Supervisor:
                         run_error = self.safety.redact(str(exc)) + (
                             " | tb=" + tb if request.debug else ""
                         )
-                    else:
+                    finally:
                         # Copy the spool stdout / stderr into the kept
-                        # location before TemporaryDirectory deletes
-                        # them. agy.log is also salvaged so post-mortem
-                        # klog inspection works.
+                        # location before TemporaryDirectory deletes them.
+                        # This runs on both clean adapter returns and
+                        # adapter exceptions so failed jobs keep evidence.
                         _migrate_if_present(spool_stdout, paths.stdout)
                         _migrate_if_present(spool_stderr, paths.stderr)
                         if spool_log is not None:

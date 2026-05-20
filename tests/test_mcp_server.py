@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -257,6 +258,16 @@ def test_agy_read_unknown_returns_structured_failure(reset_state):
     assert "not found" in (out["error"] or "")
 
 
+def test_agy_read_rejects_invalid_job_id_without_echo(reset_state):
+    raw = "job\twith\nctrlbytes"
+    out = server.agy_read_tool(raw)
+    payload = json.dumps(out.model_dump(mode="json"))
+    assert out["success"] is False
+    assert out["job_id"] is None
+    assert raw not in payload
+    assert "ctrlbytes" not in payload
+
+
 def test_agy_read_rejects_negative_since(reset_state):
     out = server.agy_read_tool("job_does_not_exist_12345", since=-1)
     assert out["success"] is False
@@ -267,6 +278,16 @@ def test_agy_cancel_unknown_job_signalled_false(reset_state):
     out = server.agy_cancel_tool("job_does_not_exist_67890")
     assert out["success"] is True
     assert out["signalled"] is False
+
+
+def test_agy_cancel_rejects_invalid_job_id_without_echo(reset_state):
+    raw = "job\twith\nctrlbytes"
+    out = server.agy_cancel_tool(raw)
+    payload = json.dumps(out.model_dump(mode="json"))
+    assert out["success"] is False
+    assert out["job_id"] is None
+    assert raw not in payload
+    assert "ctrlbytes" not in payload
 
 
 def test_agy_sessions_lists_recent_jobs(reset_state, tmp_path: Path):

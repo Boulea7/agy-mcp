@@ -575,7 +575,7 @@ def agy_read_tool(
     err = _validate_job_id(safety, job_id)
     if err is not None:
         return _wrapper_failure(
-            safety, ValueError(err), ReadToolResponse, job_id=job_id,
+            safety, ValueError(err), ReadToolResponse,
         )
     if since < 0:
         return _wrapper_failure(
@@ -638,7 +638,7 @@ def agy_cancel_tool(job_id: str) -> CancelToolResponse:
     err = _validate_job_id(safety, job_id)
     if err is not None:
         return _wrapper_failure(
-            safety, ValueError(err), CancelToolResponse, job_id=job_id,
+            safety, ValueError(err), CancelToolResponse,
         )
     try:
         signalled = supervisor.cancel(job_id)

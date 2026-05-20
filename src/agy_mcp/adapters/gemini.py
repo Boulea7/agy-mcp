@@ -45,6 +45,7 @@ from agy_mcp.utils import (
 GEMINI_BINARY_NAME = "gemini"
 GEMINI_HELP_TIMEOUT_S = 10
 _TURN_COMPLETED_GRACE_S = 0.3
+_MAX_STREAM_JSON_RECORD_BYTES = 1024 * 1024
 
 
 class GeminiCliBackend(BaseAdapter):
@@ -387,33 +388,78 @@ def _stream_json_reader(
 ) -> None:
     if stream is None:
         return
+    pending: list[str] = []
+    pending_len = 0
+    discarding_oversized = False
     while not ctx.stop_event.is_set():
-        line = stream.readline(_MAX_LINE_BYTES)
-        if not line:
+        chunk = stream.readline(_MAX_LINE_BYTES)
+        if not chunk:
+            if pending and not discarding_oversized:
+                _parse_stream_json_record(
+                    "".join(pending).strip(),
+                    ctx,
+                    adapter,
+                    turn_completed,
+                )
             break
-        stripped = line.strip()
-        if not stripped:
+        if discarding_oversized:
+            if chunk.endswith("\n"):
+                discarding_oversized = False
             continue
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
+        pending.append(chunk)
+        pending_len += len(chunk)
+        if pending_len > _MAX_STREAM_JSON_RECORD_BYTES:
             adapter._emit(
                 ctx,
                 CanonicalEvent(
                     type="error",
-                    subtype="stream_decode_failure",
-                    text=stripped[:500],
+                    subtype="stream_record_too_large",
+                    text=(
+                        "gemini stream-json record exceeded "
+                        f"{_MAX_STREAM_JSON_RECORD_BYTES} bytes"
+                    ),
                 ),
             )
+            pending.clear()
+            pending_len = 0
+            discarding_oversized = not chunk.endswith("\n")
             continue
-        if not isinstance(payload, dict):
+        if not chunk.endswith("\n"):
             continue
-        event = _translate_gemini_event(payload, ctx)
-        if event is not None:
-            adapter._emit(ctx, event)
-            if event.type == "result" and event.subtype == "turn_completed":
-                if turn_completed is not None:
-                    turn_completed.set()
+        stripped = "".join(pending).strip()
+        pending.clear()
+        pending_len = 0
+        _parse_stream_json_record(stripped, ctx, adapter, turn_completed)
+
+
+def _parse_stream_json_record(
+    stripped: str,
+    ctx: _RunContext,
+    adapter: GeminiCliBackend,
+    turn_completed: threading.Event | None,
+) -> None:
+    if not stripped:
+        return
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        adapter._emit(
+            ctx,
+            CanonicalEvent(
+                type="error",
+                subtype="stream_decode_failure",
+                text=stripped[:500],
+            ),
+        )
+        return
+    if not isinstance(payload, dict):
+        return
+    event = _translate_gemini_event(payload, ctx)
+    if event is not None:
+        adapter._emit(ctx, event)
+        if event.type == "result" and event.subtype == "turn_completed":
+            if turn_completed is not None:
+                turn_completed.set()
 
 
 def _translate_gemini_event(payload: dict, ctx: _RunContext) -> CanonicalEvent | None:

@@ -595,6 +595,44 @@ def test_adapter_exception_captured_as_failure(tmp_path: Path):
     assert record.exit_code is None
 
 
+def test_adapter_exception_salvages_spool_files(tmp_path: Path):
+    class _SpoolCrashAdapter(_ScriptedAdapter):
+        def run(
+            self,
+            request: BridgeRequest,
+            *,
+            log_path: Path | None = None,
+            stdout_path: Path | None = None,
+            stderr_path: Path | None = None,
+            event_sink: EventSink | None = None,
+            cancel_event: threading.Event | None = None,
+        ) -> AdapterRunResult:
+            self.run_requests.append(request)
+            assert stdout_path is not None
+            assert stderr_path is not None
+            assert log_path is not None
+            stdout_path.write_text("stdout evidence", encoding="utf-8")
+            stderr_path.write_text("stderr evidence", encoding="utf-8")
+            log_path.write_text("klog evidence", encoding="utf-8")
+            raise RuntimeError("adapter crashed after writing spool")
+
+    adapter = _SpoolCrashAdapter(
+        capability=_capability(supports_log_file=True),
+        events=[],
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="hi", cwd=str(tmp_path)))
+
+    assert _wait_for(
+        lambda: supervisor.status(response.job_id).status == "failed",
+    )
+    record = supervisor.status(response.job_id)
+    assert "adapter crashed" in (record.error or "")
+    assert Path(record.stdout_path).read_text(encoding="utf-8") == "stdout evidence"
+    assert Path(record.stderr_path).read_text(encoding="utf-8") == "stderr evidence"
+    assert Path(record.log_path).read_text(encoding="utf-8") == "klog evidence"
+
+
 # ---------------------------------------------------------------------------
 # Phase 4 R1 regressions
 # ---------------------------------------------------------------------------

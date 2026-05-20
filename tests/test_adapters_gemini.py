@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -16,6 +17,7 @@ from agy_mcp.adapters.base import ListEventSink
 from agy_mcp.adapters.gemini import (
     GeminiCliBackend,
     _first_field,
+    _stream_json_reader,
     _translate_gemini_event,
 )
 from agy_mcp.models import BridgeRequest
@@ -178,6 +180,29 @@ def test_translate_unknown_event_is_preserved_as_subagent_event():
     assert evt.type == "subagent_event"
     assert evt.subtype == "tool_invocation"
     assert evt.raw == {"type": "tool_invocation", "session_id": "s", "data": [1, 2, 3]}
+
+
+def test_stream_json_reader_keeps_large_single_line_record():
+    ctx = _ctx()
+    backend = GeminiCliBackend(bin_override="/fake/gemini")
+    payload = {
+        "type": "message",
+        "role": "assistant",
+        "session_id": "large-line",
+        "text": "hello " * (12 * 1024),
+    }
+    stream = io.StringIO(json.dumps(payload) + "\n")
+
+    _stream_json_reader(stream, ctx, backend)
+
+    assistant_events = [event for event in ctx.events if event.type == "assistant"]
+    decode_failures = [
+        event for event in ctx.events
+        if event.type == "error" and event.subtype == "stream_decode_failure"
+    ]
+    assert len(assistant_events) == 1
+    assert assistant_events[0].text == payload["text"]
+    assert decode_failures == []
 
 
 # ---------------------------------------------------------------------------

@@ -85,6 +85,27 @@ prefer = "auto"
     assert config.backend.agy_bin == "/opt/agy/agy"
 
 
+def test_invalid_worktree_env_preserves_toml_value(
+    isolated_env,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        """
+[execute]
+worktree_default = false
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGY_MCP_WORKTREE_DEFAULT", "tru")
+
+    config = load_config(path=cfg)
+
+    assert config.execute.worktree_default is False
+    assert "ignored bad AGY_MCP_WORKTREE_DEFAULT" in config.source
+
+
 def test_malformed_toml_falls_back_to_defaults(isolated_env, tmp_path: Path):
     bad = tmp_path / "config.toml"
     bad.write_text("not a valid = toml [[[", encoding="utf-8")

@@ -26,6 +26,8 @@ DEFAULT_ALLOW_WRITE = False
 DEFAULT_BACKEND = "auto"          # auto | agy | gemini
 DEFAULT_OUTPUT_PROTOCOL = "claude"  # raw | claude | codex
 DEFAULT_RETENTION_DAYS = 30
+_BOOL_TRUE = {"1", "true", "yes", "on"}
+_BOOL_FALSE = {"0", "false", "no", "off"}
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +104,16 @@ class Config:
 def _parse_bool_env(value: str | None, default: bool) -> bool:
     if value is None:
         return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    norm = value.strip().lower()
+    if norm in _BOOL_TRUE:
+        return True
+    if norm in _BOOL_FALSE:
+        return False
+    return default
+
+
+def _valid_bool_env(value: str) -> bool:
+    return value.strip().lower() in _BOOL_TRUE | _BOOL_FALSE
 
 
 def _coerce_str(value: Any, default: str) -> str:
@@ -126,6 +137,10 @@ def _coerce_str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return []
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -160,7 +175,10 @@ def _from_toml(data: dict[str, Any]) -> Config:
     store_section = data.get("session_store", {}) if isinstance(data, dict) else {}
 
     execute = ExecuteConfig(
-        worktree_default=bool(execute_section.get("worktree_default", DEFAULT_WORKTREE)),
+        worktree_default=_coerce_bool(
+            execute_section.get("worktree_default"),
+            DEFAULT_WORKTREE,
+        ),
         allow_write_default=DEFAULT_ALLOW_WRITE,
     )
     backend = BackendConfig(
@@ -182,9 +200,17 @@ def _from_toml(data: dict[str, Any]) -> Config:
 
 
 def _apply_env_overrides(config: Config) -> None:
-    config.execute.worktree_default = _parse_bool_env(
-        os.environ.get("AGY_MCP_WORKTREE_DEFAULT"), config.execute.worktree_default
-    )
+    env_worktree = os.environ.get("AGY_MCP_WORKTREE_DEFAULT")
+    if env_worktree is not None:
+        if _valid_bool_env(env_worktree):
+            config.execute.worktree_default = _parse_bool_env(
+                env_worktree, config.execute.worktree_default,
+            )
+        else:
+            config.source = (
+                f"{config.source} "
+                f"(ignored bad AGY_MCP_WORKTREE_DEFAULT={env_worktree!r})"
+            )
     env_backend = os.environ.get("AGY_MCP_BACKEND")
     if env_backend:
         if env_backend in {"auto", "agy", "gemini"}:
