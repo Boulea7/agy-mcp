@@ -32,24 +32,75 @@ For every `agy --print` invocation the adapter spawns:
 
 ### What the klog tail recognises
 
+Each row maps a `agy --log-file` (klog) line to the
+`CanonicalEvent` shape the adapter emits. The source of truth is the
+`_RE_*` table at `src/agy_mcp/adapters/agy.py:75-101`; if you change
+a regex, update this table.
+
 ```
-Created conversation <uuid>                  -> {type: system, subtype: conversation_started, id}
-Streaming conversation <uuid>                -> {type: system, subtype: conversation_streaming}
-Starting new conversation (agent=*)          -> {type: system, subtype: turn_start, is_agent}
-Print mode: starting (...)                   -> {type: system, subtype: print_started, prompt_length, model}
-Print mode: resuming conversation <uuid>     -> {type: system, subtype: print_resumed, id}
-Auto-flush: sending N queued                 -> {type: user, subtype: input, count: N}
-Language server listening ... :NNN           -> {type: system, subtype: sidecar_ready, grpc_port: N}
-Stopping conversation stream                 -> {type: system, subtype: turn_end}
-Language server shutting down                -> {type: system, subtype: shutdown}
-Print mode: SendUserMessage failed: <detail> -> {type: error, source: send, detail}
-Print mode: auth error: <detail>             -> {type: error, source: auth, detail}
-Print mode: auth timed out                   -> {type: error, source: auth, subtype: auth_timeout}
+Language server listening on random port at NNN for HTTPS
+  -> {type:"system", subtype:"sidecar_ready",
+      metadata:{grpc_port:N, raw:<msg>}}
+Language server listening on random port at NNN for HTTP
+  -> {type:"system", subtype:"sidecar_http_ready",
+      metadata:{http_port:N, raw:<msg>}}
+Created conversation <uuid>
+  -> {type:"system", subtype:"conversation_started",
+      session_id:<uuid>, metadata:{raw:<msg>}}
+Print mode: resuming conversation <uuid>
+  -> {type:"system", subtype:"conversation_resumed",
+      session_id:<uuid>, metadata:{raw:<msg>}}
+Print mode: starting (promptLength=N, model=M, conversationID=<uuid>)
+  -> {type:"system", subtype:"print_starting",
+      session_id:<uuid>,
+      metadata:{prompt_length:N, model:M, fields:{...}}}
+Starting new conversation (agent=true|false)
+  -> {type:"system", subtype:"turn_start",
+      metadata:{agent_mode:<bool>}}
+Auto-flush: sending N queued input(s) (combined K chars, M media)
+  -> {type:"user", subtype:"input_flush",
+      metadata:{input_count:N, combined_chars:K, media:M}}
+Print mode: SendUserMessage failed: <detail>
+  -> {type:"error", subtype:"send_user_message_failed",
+      text:<redacted detail>}
+Print mode: auth timed out
+  -> {type:"error", subtype:"auth_timeout",
+      text:"Antigravity OAuth flow timed out; run `agy` once..."}
+Print mode: auth error: <detail>
+  -> {type:"error", subtype:"auth_error",
+      text:<redacted detail>}
+Rewinding conversation <uuid> to step N
+  -> {type:"system", subtype:"rewind",
+      metadata:{step:N}}
+Starting conversation update stream for <uuid>
+  -> {type:"system", subtype:"stream_start",
+      session_id:<uuid>}
+Stopping conversation stream
+  -> {type:"system", subtype:"turn_end",
+      metadata:{raw:<msg>}}
+Language server shutting down
+  -> {type:"system", subtype:"turn_end",
+      metadata:{raw:<msg>}}
 ```
 
-The session ID extracted from `Created conversation <uuid>` is the
-canonical `SESSION_ID` returned to callers; `--continue` and
-`--conversation <id>` both round-trip through it.
+Notes:
+
+- The session ID extracted from `Created conversation <uuid>` is the
+  canonical `SESSION_ID` returned to callers; `--continue` and
+  `--conversation <id>` both round-trip through it. The same field is
+  populated by `conversation_resumed`, `print_starting`, and
+  `stream_start` so any of those is sufficient to anchor downstream
+  events to a conversation.
+- `_RE_TURN_END` collapses both "Stopping conversation stream" and
+  "Language server shutting down" into a single `turn_end` event;
+  there is no separate `shutdown` subtype.
+- The HTTPS / HTTP sidecar lines emit DIFFERENT subtypes
+  (`sidecar_ready` vs `sidecar_http_ready`) so consumers can
+  distinguish the gRPC and HTTP listeners without re-parsing the
+  raw message.
+- Error events use the `text` field for the redacted detail; the
+  `subtype` itself carries the failure class. No `source` field is
+  emitted on klog-derived events.
 
 ### What we deliberately do NOT parse
 
@@ -85,29 +136,40 @@ break parsing.
 
 ```python
 class CanonicalEvent(BaseModel):
-    type: Literal["system", "user", "assistant", "error", "result", "subagent"]
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal[
+        "system", "user", "assistant",
+        "tool_use", "tool_result",
+        "result", "error", "subagent_event",
+    ]
     subtype: str | None = None
     session_id: str | None = None
-    timestamp: str | None = None          # ISO 8601 UTC
-    message: dict | None = None
-    detail: str | None = None
-    source: str | None = None             # for type=error
-    duration_ms: int | None = None
-    exit_code: int | None = None
-    artifacts: list[dict] | None = None
+    role: str | None = None
+    text: str | None = None                       # primary payload text
+    content: list[dict[str, Any]] | None = None   # rich content blocks
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    raw: dict[str, Any] | None = None             # untranslated source
+    ts: str = Field(default_factory=_iso_now)     # ISO 8601 UTC
 ```
+
+`metadata` is the typed escape hatch: structured fields the klog
+parser pulls out (`prompt_length`, `input_count`, `grpc_port`, …)
+land here instead of bloating the top-level schema. `raw` is reserved
+for the verbatim event a non-agy backend (e.g. gemini-cli stream-json)
+emitted so callers can reconstruct the original payload if they want.
 
 A typical successful one-shot `ask` produces:
 
 ```jsonl
-{"type":"system","subtype":"init","backend":"agy","model":"...","capabilities":{...}}
-{"type":"system","subtype":"sidecar_ready","grpc_port":60074}
-{"type":"system","subtype":"conversation_started","id":"<uuid>"}
-{"type":"system","subtype":"print_started","prompt_length":42,"model":"..."}
-{"type":"user","subtype":"input","count":1}
-{"type":"assistant","message":{"content":[{"type":"text","text":"<full reply>"}]}}
-{"type":"system","subtype":"turn_end"}
-{"type":"result","subtype":"success","duration_ms":12345,"exit_code":0,"session_id":"<uuid>"}
+{"type":"system","subtype":"init","session_id":null,"metadata":{"backend":"agy","bin_path":"...","version":"1.0.0","model":"...","cwd":".","mode":"ask","sandbox":false,"capabilities":{"streaming":false,"tool_use":false,"resume":true,"log_file":true,"sandbox":true}}}
+{"type":"system","subtype":"sidecar_ready","metadata":{"grpc_port":60074,"raw":"..."}}
+{"type":"system","subtype":"conversation_started","session_id":"<uuid>","metadata":{"raw":"..."}}
+{"type":"system","subtype":"print_starting","session_id":"<uuid>","metadata":{"prompt_length":42,"model":"...","fields":{...}}}
+{"type":"user","subtype":"input_flush","metadata":{"input_count":1,"combined_chars":42,"media":0}}
+{"type":"assistant","subtype":"text","session_id":"<uuid>","role":"assistant","text":"<full reply>","content":[{"type":"text","text":"<full reply>"}]}
+{"type":"system","subtype":"turn_end","metadata":{"raw":"..."}}
+{"type":"result","subtype":"success","session_id":"<uuid>","metadata":{"duration_ms":12345,"exit_code":0,"conversation_id":"<uuid>"}}
 ```
 
 ## Protocol translator (`protocol.py`)

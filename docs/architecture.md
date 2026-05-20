@@ -161,8 +161,12 @@ class BridgeResponse(BaseModel):
     all_messages: list[dict] = []
     artifacts: list[dict] = []
     error: str | None = None
+    warnings: list[str] = []
     cwd: str = ""
-    adapter: dict = {}                    # backend, bin_path, version, capability matrix
+    # Structured metadata: backend, bin_path, version, capability matrix,
+    # extra fields (extra="allow" so backends can attach their own keys).
+    # See ``src/agy_mcp/models.py::AdapterMetadata``.
+    adapter: AdapterMetadata = AdapterMetadata()
     command_preview: list[str] | None = None  # debug/dry-run only
     log_path: str | None = None
     created_at: str = ""

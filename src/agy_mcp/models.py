@@ -36,6 +36,12 @@ _EXTRA_ENV_MAX_VALUE_LEN = 4096
 # Phase 8 R1: cap the synchronous one-shot dimensions. Long jobs go
 # through ``mode="long"`` + ``agy_start`` and live in the supervisor's
 # session store, not in process memory.
+#
+# The numeric values below are mirrored in ``docs/architecture.md``
+# (BridgeRequest schema example) and ``docs/security.md`` (request
+# validation section). If you change any of them, update both docs in
+# the same commit — `test_models.py::test_bridge_request_rejects_oversized_*`
+# pins the validator behaviour but not the documented numbers.
 _PROMPT_MAX_CHARS = 256_000          # ~256 KiB; well under any platform's argv cap when fused as --print=<value>
 _TIMEOUT_MAX_SECONDS = 24 * 60 * 60  # 24h ceiling for the synchronous call
 _MAX_OUTPUT_CHARS_CEIL = 8 * 1024 * 1024  # 8 MiB buffered transcript ceiling
