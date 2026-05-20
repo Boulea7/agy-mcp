@@ -103,6 +103,70 @@ def test_build_command_raises_without_binary(tmp_path):
         backend.build_command(req, log_path=None)
 
 
+def test_run_wraps_windows_cmd_binary_for_spawn(tmp_path, monkeypatch):
+    from agy_mcp.models import Capability
+
+    import agy_mcp.utils as utils_mod
+
+    captured: dict[str, object] = {}
+    cap = Capability(
+        bin_path=r"C:\Users\dev\AppData\Roaming\npm\gemini.cmd",
+        backend="gemini",
+        supports_print=True,
+        supports_conversation=True,
+        supports_sandbox=True,
+        supports_streaming=True,
+        supports_tool_events=True,
+    )
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, popen_arg, **kwargs):
+            captured["popen_arg"] = popen_arg
+            captured["kwargs"] = kwargs
+            self.stdout = io.StringIO(
+                json.dumps(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "session_id": "sess-win",
+                        "text": "ok",
+                    }
+                )
+                + "\n"
+                + json.dumps({"type": "turn.completed", "session_id": "sess-win"})
+                + "\n"
+            )
+            self.stderr = io.StringIO("")
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr("agy_mcp.adapters.gemini.is_windows", lambda: True)
+    monkeypatch.setattr(utils_mod, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        "agy_mcp.adapters.gemini.subprocess.Popen",
+        FakeProcess,
+    )
+
+    backend = GeminiCliBackend(bin_override=None)
+    monkeypatch.setattr(backend, "detect", lambda refresh=False: cap)
+    req = BridgeRequest(prompt="hello", cwd=str(tmp_path), timeout=5)
+    result = backend.run(req)
+
+    assert result.exit_code == 0
+    popen_arg = captured["popen_arg"]
+    assert isinstance(popen_arg, str)
+    assert popen_arg.startswith('"cmd.exe" /d /s /c "')
+    assert "gemini.cmd" in popen_arg
+    assert "--prompt=hello" in popen_arg
+    assert captured["kwargs"].get("shell", False) is False
+
+
 # ---------------------------------------------------------------------------
 # _first_field — alias resolution
 # ---------------------------------------------------------------------------
