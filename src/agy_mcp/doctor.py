@@ -269,3 +269,37 @@ def _check_session_store(
 
 
 __all__ = ["DoctorCheck", "DoctorReport", "run_doctor"]
+
+
+def main() -> int:
+    """``python -m agy_mcp.doctor`` entry point — print JSON, exit non-zero
+    when ``healthy=False``.
+
+    The output goes to stdout as a single pretty-printed JSON object so
+    operators can pipe it through ``jq``. No secrets land in any field
+    (every ``detail`` string is run through ``SafetyPolicy.redact``).
+    """
+
+    import json as _json
+
+    report = run_doctor()
+    payload = {
+        "healthy": report.healthy,
+        "python_version": report.python_version,
+        "platform": report.platform,
+        "checks": [
+            {
+                "name": c.name,
+                "ok": c.ok,
+                "severity": c.severity,
+                "detail": c.detail,
+            }
+            for c in report.checks
+        ],
+    }
+    print(_json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if report.healthy else 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
