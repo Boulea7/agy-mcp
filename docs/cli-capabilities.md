@@ -2,7 +2,13 @@
 
 > Re-run the probe whenever `agy` is updated; capability detections are cached per adapter instance.
 
-## Confirmed flags — `agy --help` (v1.0.0, probed via `$(command -v agy)`, 2026-05-20)
+## Confirmed flags — local `agy --help` (v1.0.0, probed via `$(command -v agy)`, 2026-05-20)
+
+This table is the wrapper's local compatibility baseline, not a claim
+about the newest Google release channel. Google's public Antigravity
+changelog advertised an AGY 2.0 update on 2026-05-19; this machine still
+probed `agy --version` as `1.0.0`, so refresh this file and the adapter
+fixtures after upgrading the local CLI.
 
 | Flag | Purpose |
 |---|---|
