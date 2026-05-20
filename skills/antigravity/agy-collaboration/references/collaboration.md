@@ -87,7 +87,8 @@ agent reads. Make it actionable.
 - Don't re-emit your previous output verbatim.
 - Don't ask "what happened?" — read the `error` string.
 - If the error mentions `oauth_creds.json missing`, the driving agent
-  needs to run `agy login`; you can't fix that yourself.
+  needs to run `agy` once and complete the interactive login flow; you
+  can't fix that yourself.
 - If the error mentions `request rejected by safety policy`, re-read
   your output for destructive patterns (`rm -rf`, writes to
   `~/.ssh`, etc.) and reduce scope.

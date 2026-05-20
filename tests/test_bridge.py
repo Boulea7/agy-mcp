@@ -203,6 +203,13 @@ def test_parser_round_trip_defaults():
     assert args.allow_write is False
 
 
+def test_parser_help_matches_cli_limitations():
+    help_text = _build_parser().format_help()
+    assert "Unsupported in CLI mode" in help_text
+    assert "agy_start" in help_text
+    assert "currently gemini" in help_text
+
+
 def test_request_from_args_honours_overrides():
     parser = _build_parser()
     args = parser.parse_args(

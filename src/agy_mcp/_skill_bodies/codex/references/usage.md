@@ -129,8 +129,9 @@ sentence. Common categories:
 - **`agy/gemini not found on PATH`** — install per
   `https://docs.astral.sh/uv/getting-started/installation/` (uv) then
   `uv tool install --from git+https://github.com/Boulea7/agy-mcp.git`.
-- **`Google OAuth credentials missing`** — run `agy login` in the
-  user's shell once. The bridge cannot do this for you.
+- **`Google OAuth credentials missing`** — run `agy` in the user's
+  shell once and complete the interactive login flow. The bridge cannot
+  do this for you.
 - **`request rejected by safety policy`** — the prompt or argv matched
   a destructive pattern. Re-read the prompt; do not just retry.
 - **`supervisor busy`** — the concurrent-job cap is reached. Wait for

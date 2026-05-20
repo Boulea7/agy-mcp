@@ -1,6 +1,6 @@
 # agy CLI capabilities (live ground truth)
 
-> Re-run the probe whenever `agy` is updated; the Adapter caches detections per binary hash.
+> Re-run the probe whenever `agy` is updated; capability detections are cached per adapter instance.
 
 ## Confirmed flags — `agy --help` (v1.0.0, probed via `$(command -v agy)`, 2026-05-20)
 

@@ -110,23 +110,26 @@ Notes:
 - **gRPC sidecar interception.** `agy` spawns a Language Server on a
   random high port (TLS-wrapped, unpublished proto). Experimental; flagged
   for a future "Lab" mode.
-- **`agy login` / interactive auth.** Out of scope: the user runs it once
-  in a shell; we only detect whether `~/.gemini/oauth_creds.json` exists.
+- **Interactive `agy` auth.** Out of scope: the user runs `agy` once in a
+  shell and completes the browser/login flow; we only detect whether
+  `~/.gemini/oauth_creds.json` exists.
 
 ## Backend routing
 
 ```python
 backend = caller.backend          # auto | agy | gemini
 if backend == "auto":
-    if needs_sandbox or wants_agentic_execution: agy
-    elif needs_structured_streaming and gemini_available: gemini
-    else: agy with degraded events
+    if agy_available_and_authenticated: agy
+    elif gemini_available: gemini
+    else: agy with explicit capability warnings
 ```
 
 `gemini` is a true compatibility backend — `gemini-cli` v0.42+ still
 ships `--output-format stream-json` and shares Google OAuth with `agy`,
 so callers who need real token-level streaming can opt in even when the
-project is otherwise agy-first.
+project is otherwise agy-first. Auto routing does not choose Gemini just
+because streaming would be nicer; pass `backend="gemini"` when real
+stream-json output is required.
 
 ## Canonical event schema
 
@@ -214,9 +217,12 @@ target protocol.
 `max_output_chars` (default `60000`) caps the buffered
 `agent_messages` field returned in the synchronous envelope. Truncation
 uses the same `...[truncated]...` middle marker as stdout/stderr tails
-and adds a warning to the response. The full stream is always preserved
-in the session store's `events.jsonl` so `agy_read(job_id,
-translate="raw")` returns the canonical record.
+and adds a warning to the response. Full event persistence applies to
+detached `agy_start` jobs, where the supervisor writes `events.jsonl`
+and `agy_read(job_id, translate="raw")` returns the canonical record.
+Synchronous `agy` calls use an ephemeral spool and return no `job_id`;
+raise `max_output_chars` or request `return_all_messages` when the sync
+caller needs more context.
 
 ## Fail-fast on missing OAuth
 
@@ -230,7 +236,7 @@ path is a symlink or a non-regular file.
 
 ## Future work
 
-Logged in `docs/review-followups.md`:
+Tracked internally outside the release documentation:
 
 - True token-level streaming via the gRPC sidecar (Lab mode).
 - `transcript.jsonl` NDJSON watcher promoted from "optional" to default

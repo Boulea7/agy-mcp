@@ -1,6 +1,6 @@
 # Installation
 
-`agy-mcp` ships as a Python package with three console scripts. It targets
+`agy-mcp` ships as a Python package with four console scripts. It targets
 **Python 3.11+** and runs on macOS, Linux, and Windows.
 
 ## 1. Install the `agy` CLI (one-time, user-managed)
@@ -10,8 +10,9 @@ need a working `agy` on `PATH` before any non-dry-run call:
 
 - Download from Google's distribution channel for your platform.
 - Confirm with `agy --version` (the bridge probes this).
-- Authenticate once with `agy login`; the bridge refuses to run while
-  `~/.gemini/oauth_creds.json` is missing (`agy_doctor` will tell you).
+- Run `agy` once and complete its interactive login flow; the bridge
+  refuses to run while `~/.gemini/oauth_creds.json` is missing
+  (`agy_doctor` will tell you).
 
 Optional fallback: `gemini` CLI v0.42+. If both binaries are on `PATH`, the
 adapter prefers `agy`; pass `backend="gemini"` (or set
@@ -135,7 +136,7 @@ agy-doctor
 
 You should see a JSON envelope with `success=true`, a `command_preview`
 field showing the would-be argv (in dry-run mode), no secrets in any
-field, and `auth.ok=true` once `agy login` has run.
+field, and `auth.ok=true` once the interactive `agy` login flow has run.
 
 ## 6. Project snippets
 

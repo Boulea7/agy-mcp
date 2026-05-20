@@ -75,7 +75,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--SESSION_ID", default=None,
                    help="Conversation id to resume. Empty means start fresh.")
     p.add_argument("--model", default=None,
-                   help="Optional model override (forwarded to the CLI).")
+                   help=(
+                       "Optional model override for backends that support "
+                       "model flags (currently gemini)."
+                   ))
     p.add_argument("--sandbox", action="store_true",
                    help="Pass --sandbox to the underlying CLI when supported.")
     p.add_argument("--allow-write", action="store_true",
@@ -97,7 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Embed every translated event in the response body.")
     p.add_argument(
         "--detach", action="store_true",
-        help="Spawn the job in the background via the supervisor; return a job_id.",
+        help="Unsupported in CLI mode; use the MCP agy_start tool for long jobs.",
     )
     p.add_argument("--debug", action="store_true")
     p.add_argument("--dry-run", action="store_true",

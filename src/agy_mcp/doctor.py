@@ -196,8 +196,8 @@ def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
             ok=False,
             severity="error",
             detail=safety.redact(
-                "Google OAuth credentials missing; run `agy login` before "
-                "any non-dry-run invocation."
+                "Google OAuth credentials missing; run `agy` once and complete "
+                "the interactive login flow before any non-dry-run invocation."
             ),
         )
     except OSError as exc:

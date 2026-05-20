@@ -109,24 +109,23 @@ to defeat parent-symlink swaps.
 ### `worktree.py` — git isolation
 
 When `mode=execute` and `allow_write=True`, the bridge creates a git
-worktree at `<repo>/.agy-mcp/worktrees/<session_id>/` and runs `agy`
-with `--add-dir <worktree>`. The worktree remains after the run so the
-caller can inspect, merge, or discard the branch. Falls back to running
-directly in the repo only when the user has `worktree=False` set;
-otherwise refuses.
+worktree at `<repo>/.agy-mcp/worktrees/<session_id>/` and runs the child
+process with `cwd` set to that worktree. The worktree remains after the
+run so the caller can inspect, merge, or discard the branch. Falls back
+to running directly in the repo only when the user has `worktree=False`
+set; otherwise refuses.
 
 ### `utils.py` — `safe_write_text`
 
 The single write primitive used by `session_store`, `install`, and
-`worktree`. Walks every parent component from `verify_under` down to
-`path.parent` with `is_symlink()` (lstat semantics), `O_NOFOLLOW`s the
-tempfile, atomic `os.replace`, re-walks the parents after rename, then
-does a final `relative_to(verify_under)` on the resolved path. The
-post-walk is a detect-after-the-fact audit signal (an attacker who wins
-the race between `mkstemp` and rename has already published the
-attacker-controlled leaf; the raise surfaces the breach but cannot undo
-it). The `openat`-based airtight fix is logged in
-`docs/review-followups.md`.
+`worktree`. With `verify_under` on POSIX platforms that expose the
+required `openat` APIs, it pins the resolved root with
+`O_DIRECTORY|O_NOFOLLOW`, walks intermediate directories via `dir_fd`
+with `O_NOFOLLOW`, creates a random tempfile under the pinned parent
+fd, and renames it with `src_dir_fd` / `dst_dir_fd`. Windows and
+openat-unavailable filesystems use the older pre-write and post-rename
+parent walk with `relative_to(verify_under)` checks; that fallback
+surfaces a successful parent-swap race but cannot undo a published leaf.
 
 ## Request / response shape
 

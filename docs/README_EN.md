@@ -29,8 +29,10 @@ A wrapper that turns Google's new Antigravity CLI (`agy`) into an
   isolated in a disposable git worktree; argv injection, path
   traversal, and parent-symlink swaps have targeted defences.
 
-The bridge does NOT touch `agy`'s real API beyond capability probes
-(`--help` / `--version`). It is a hardened gateway, not a re-host.
+Outside `agy-doctor` and `--dry-run` verification paths, normal `agy`
+/ `agy_start` calls spawn `agy --print` and may consume real
+Antigravity requests. The project wraps, routes, isolates, and audits
+the CLI; it does not reimplement the `agy` API.
 
 ## 5-minute quickstart
 
@@ -91,8 +93,8 @@ Full installation and Codex setup in
 - Every error / log / response is run through
   `SafetyPolicy.redact`: `/Users/<u>/` → `~/`; PEM / JWT / AKID /
   Bearer / Authz are all scrubbed.
-- `allow_write=True` is the hard gate for any mutation; destructive
-  prompts are refused even with the flag set.
+- `mode=execute` mutations require explicit `allow_write=True`;
+  destructive prompts are refused even with the flag set.
 - `execute` mode refuses prompts that read or mention `~/.ssh`,
   `~/.aws/credentials`, browser cookie stores, OS keychain.
 - `mode=execute --allow-write` defaults to `worktree=True`
@@ -126,14 +128,12 @@ that repo knows when to call `agy`:
 | [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix (refresh when CLI is upgraded) |
 | [`examples.md`](examples.md) | 6 scenarios: review, prototype, long, continue, doctor, install |
 | [`comparison-with-upstream-reference.md`](comparison-with-upstream-reference.md) | What we inherited / extended / changed |
-| [`reference-review.md`](reference-review.md) | Design notes from the two `upstream` reference repos |
-| [`review-followups.md`](review-followups.md) | Per-phase review P3 follow-ups |
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest        # 400 tests
+uv run pytest        # 462 tests
 uv run agymcp        # FastMCP stdio server (manual testing)
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 uv run agy-doctor    # environment and auth probe

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-400%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-462%20passed-brightgreen.svg)](#)
 [![English](https://img.shields.io/badge/English-README-blue.svg)](docs/README_EN.md)
 
 > **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
@@ -27,7 +27,9 @@
 - **安全为底**：所有错误、日志、响应字段都过一遍 `SafetyPolicy.redact`；写入操作默认走临时 git
   worktree；命令注入 / 路径穿越 / 父级 symlink 替换都有针对性防护。
 
-不直接调用 `agy` 真实 API 的能力，只做包装、路由、隔离、审计。
+除 `agy-doctor` 与 `--dry-run` 验证路径外，正常 `agy` / `agy_start`
+调用会启动 `agy --print`，可能消耗真实 Antigravity 请求。本项目不重新实现
+`agy` API，只做包装、路由、隔离、审计。
 
 ## 5 分钟上手
 
@@ -84,7 +86,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 
 - 每条错误、日志、响应字段都先走 `SafetyPolicy.redact`：`/Users/<u>/` → `~/`，PEM / JWT /
   AKID / Bearer 全部脱敏；
-- `allow_write=True` 是任何写入的硬门槛；即便置位，destructive prompt 仍会被拒；
+- `mode=execute` 的写入必须显式 `allow_write=True`；即便置位，destructive prompt 仍会被拒；
 - `execute` 模式下读 / 提及 `~/.ssh`、`~/.aws/credentials`、浏览器 cookie store、OS keychain
   都会被拒；
 - `mode=execute --allow-write` 默认强制 worktree=true（可在 `~/.config/agy-mcp/config.toml`
@@ -114,8 +116,6 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 | [`docs/cli-capabilities.md`](docs/cli-capabilities.md) | `agy --help` 实测 + capability 矩阵（CLI 升级时刷新） |
 | [`docs/examples.md`](docs/examples.md) | 6 个典型场景：review、prototype、long、continue、doctor、install |
 | [`docs/comparison-with-upstream-reference.md`](docs/comparison-with-upstream-reference.md) | 继承自 `upstream-reference` 的部分 + 扩展的部分 + 主动改的部分 |
-| [`docs/reference-review.md`](docs/reference-review.md) | 两个 `upstream` 参考仓库的设计笔记 |
-| [`docs/review-followups.md`](docs/review-followups.md) | 每个 phase 评审的 P3 跟进事项归档 |
 
 英文版 README：[`docs/README_EN.md`](docs/README_EN.md)。
 
@@ -124,7 +124,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 ```bash
 # clone 后
 uv sync
-uv run pytest        # 全量 400 个测试
+uv run pytest        # 全量 462 个测试
 uv run agymcp        # 启动 MCP stdio server（人工测试用）
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 uv run agy-doctor    # 环境与鉴权探测

@@ -9,11 +9,9 @@ Selection order:
   1. ``AGY_BRIDGE_CMD`` env var (full shell command, advanced override —
      **trust boundary**, see references/security.md).
   2. ``python -m agy_mcp.bridge`` if importable from the current env.
-  3. ``uvx --from git+https://github.com/Boulea7/agy-mcp.git@main
-     agy-bridge`` as the last-resort install-on-demand fallback. The
-     ``@main`` pin guards against the URL being silently re-pointed by
-     a force-push; bump it to a tag (e.g. ``@v0.1.0``) when a release
-     ships.
+  3. ``uvx --from agy-mcp==0.1.0 agy-bridge`` as the last-resort
+     install-on-demand fallback. Use a fixed package version here;
+     branch refs are mutable and not acceptable for the skill launcher.
 
 All argv is forwarded verbatim. We do NOT parse the bridge response —
 the caller (the Claude agent) reads the JSON line and decides what to do.
@@ -27,6 +25,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+
+BRIDGE_PACKAGE_SPEC = "agy-mcp==0.1.0"
 
 
 def _has_module(name: str) -> bool:
@@ -50,12 +50,12 @@ def _select_command(argv: list[str]) -> list[str]:
     if _has_module("agy_mcp"):
         return [sys.executable, "-m", "agy_mcp.bridge", *argv]
 
-    # Fall back to uvx if available — installs agy-mcp on demand.
+    # Fall back to uvx if available — installs a fixed agy-mcp release on demand.
     if shutil.which("uvx"):
         return [
             "uvx",
             "--from",
-            "git+https://github.com/Boulea7/agy-mcp.git@main",
+            BRIDGE_PACKAGE_SPEC,
             "agy-bridge",
             *argv,
         ]
@@ -66,8 +66,7 @@ def _select_command(argv: list[str]) -> list[str]:
         "error": (
             "agy-bridge not found. Install `uv` first "
             "(https://docs.astral.sh/uv/getting-started/installation/), "
-            "then `uv tool install --from "
-            "git+https://github.com/Boulea7/agy-mcp.git@main agy-mcp`, "
+            f"then `uv tool install {BRIDGE_PACKAGE_SPEC}`, "
             "or set AGY_BRIDGE_CMD to a full shell command."
         ),
     }

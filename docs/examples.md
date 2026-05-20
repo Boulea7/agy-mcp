@@ -30,7 +30,9 @@ if the hypothesis holds or what I'm missing.
 ```
 
 Returns synchronously with `agent_messages` containing the review.
-`mode="review"` means read-only — no writes, no worktree.
+`mode="review"` is a caller convention for review-only delegation; the
+bridge does not pass a downstream CLI flag that can enforce read-only
+behavior inside `agy`.
 
 ---
 
@@ -68,8 +70,8 @@ all and keep tests green. Don't merge until tests pass.
 """,
     cd="/Users/me/work/api",
     mode="long",
-    # `allow_write=True` is required for any mutation. Bridge default
-    # `worktree=True` means the run lands under
+    # `allow_write=True` is required for execute-mode mutation. Bridge
+    # default `worktree=True` means the run lands under
     # `.agy-mcp/worktrees/<session_id>/` rather than the live checkout —
     # that's the safety net. Override with config or
     # `AGY_MCP_WORKTREE_DEFAULT=0` if you intentionally want writes in

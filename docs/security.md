@@ -46,8 +46,8 @@ Pydantic v2 with `extra="forbid"`. Notable validators:
 - `timeout`: 1 ≤ value ≤ 86400 (24h ceiling; longer runs should use
   `mode="long"` + `agy_start`).
 - `max_output_chars`: 1 ≤ value ≤ 8 MiB (caps the in-process buffered
-  transcript; the full stream is always persisted in
-  `events.jsonl`).
+  transcript; detached `agy_start` jobs also persist the full event
+  stream in `events.jsonl`).
 - `SESSION_ID` / `session_id`: max 96 chars before it can seed a
   conversation resume or worktree name.
 
@@ -93,22 +93,24 @@ being parsed as a new flag. The fused form is what we pass to
 
 ### 5. File-write primitive (`utils.py::safe_write_text`)
 
-Used by `session_store`, `install`, and `worktree`. Defends against
-parent-symlink swaps:
+Used by `session_store`, `install`, and `worktree`. When
+`verify_under` is provided on POSIX platforms with `openat` support, it
+defends against parent-symlink swaps by:
 
-- Pre-write walk: every component from `verify_under` down to
-  `path.parent` is checked with `is_symlink()` (lstat semantics — does
-  NOT collapse in-root symlinks the way `resolve()` would).
-- Tempfile opened with `O_NOFOLLOW` where supported.
-- Atomic `os.replace`.
-- Post-replace walk: re-walks parents and re-checks
-  `relative_to(verify_under)` on the resolved path. This is a
-  **detect-after-the-fact** signal — an attacker who wins the race
-  has already published their leaf, but the raise surfaces the breach
-  to the caller via a structured `OSError`.
+- Opening the resolved `verify_under` root once with
+  `O_DIRECTORY|O_NOFOLLOW`.
+- Creating or opening each intermediate directory via `dir_fd` with
+  `O_NOFOLLOW`.
+- Creating a random tempfile with `O_CREAT|O_EXCL|O_NOFOLLOW` against
+  the pinned parent directory fd.
+- Renaming the tempfile to the final leaf with `src_dir_fd` and
+  `dst_dir_fd`, so the final publish does not re-resolve the parent path.
 
-The airtight `openat`-based variant is logged in
-`docs/review-followups.md` for a future phase.
+On Windows or filesystems that do not expose the required `openat`
+family, the fallback path still does a pre-write and post-rename
+symlink walk with `relative_to(verify_under)` checks. That fallback is
+detect-after-the-fact for a successful parent swap; the POSIX openat
+path is the airtight path.
 
 ### 6. Worktree isolation (`worktree.py`)
 
@@ -116,8 +118,8 @@ When `mode=execute` and `allow_write=True`, the bridge:
 
 - Creates `<repo>/.agy-mcp/worktrees/<session_id>/` with
   `git worktree add` on a fresh branch.
-- Passes `--add-dir <worktree>` to `agy` so the agent's edits land
-  there.
+- Runs the child process with `cwd` set to the worktree so the agent's
+  edits land there.
 - Leaves the worktree in place after the run so the caller can inspect,
   merge, or discard the branch. Remove it manually with
   `git worktree remove <path>` when finished.
@@ -197,14 +199,17 @@ assuming protection that isn't there.
   makes `_skill_bodies/` read from the working tree at install time,
   so a hostile working tree feeds hostile install content. By design
   — the developer is trusted on their own machine.
-- **TOCTOU residue after a successful race.** `safe_write_text`'s
-  post-walk surfaces the breach to the caller (via a raised
-  `OSError`) but does NOT undo the published-leaf state. The
-  `openat`-based airtight fix is earmarked for a future phase.
-- **The `@main` pin in `scripts/agy_bridge.py`'s `uvx` fallback.** A
-  force-push to `main` flips behaviour silently for users on the
-  fallback path. The docstring calls this out; bump to a tag at
-  release.
+- **TOCTOU residue on the non-openat fallback path.** On Windows or
+  filesystems that do not support the required `openat` APIs,
+  `safe_write_text`'s post-walk surfaces the breach to the caller (via
+  a raised `OSError`) but does NOT undo a published leaf if an attacker
+  wins the race. POSIX platforms with openat support use the anchored
+  dir-fd path described in § 5.
+- **Versioned `uvx` fallback availability.** The skill forwarder uses a
+  fixed package version (`agy-mcp==0.1.0`) rather than a mutable branch
+  ref. If that version is not published in the user's configured Python
+  index, the fallback fails closed and the user must install the bridge
+  locally or set `AGY_BRIDGE_CMD`.
 - **System-level symlinks on macOS / Linux.** `/tmp/...` →
   `/private/tmp/...` and `/var/...` → `/private/var/...` are honest
   symlinks but they exist on every macOS install. `_validate_project_root`
