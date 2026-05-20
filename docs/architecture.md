@@ -109,12 +109,12 @@ to defeat parent-symlink swaps.
 
 ### `worktree.py` — git isolation
 
-When `mode=execute` and `allow_write=True`, the bridge creates a
-disposable git worktree at `<repo>/.agy-mcp/worktrees/<session_id>/` and
-runs `agy` with `--add-dir <worktree>`. The worktree is removed on
-session finalise (success, failure, or cancel). Falls back to running
-directly in the repo when the working tree is dirty AND the user has
-`worktree=False` set; otherwise refuses.
+When `mode=execute` and `allow_write=True`, the bridge creates a git
+worktree at `<repo>/.agy-mcp/worktrees/<session_id>/` and runs `agy`
+with `--add-dir <worktree>`. The worktree remains after the run so the
+caller can inspect, merge, or discard the branch. Falls back to running
+directly in the repo only when the user has `worktree=False` set;
+otherwise refuses.
 
 ### `utils.py` — `safe_write_text`
 

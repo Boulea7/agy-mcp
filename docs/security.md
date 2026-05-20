@@ -113,8 +113,9 @@ When `mode=execute` and `allow_write=True`, the bridge:
   `git worktree add` on a fresh branch.
 - Passes `--add-dir <worktree>` to `agy` so the agent's edits land
   there.
-- Removes the worktree on session finalise (success, failure, or
-  cancel), even if the agent crashed mid-run.
+- Leaves the worktree in place after the run so the caller can inspect,
+  merge, or discard the branch. Remove it manually with
+  `git worktree remove <path>` when finished.
 
 Configurable via `~/.config/agy-mcp/config.toml`:
 
@@ -124,8 +125,7 @@ worktree_default = true     # opt-out via false
 allow_write_default = false # opt-in via true (still requires per-call allow_write=True)
 ```
 
-Env var overrides: `AGY_MCP_WORKTREE_DEFAULT=0/1`,
-`AGY_MCP_ALLOW_WRITE_DEFAULT=0/1`.
+Env var override: `AGY_MCP_WORKTREE_DEFAULT=0/1`.
 
 ### 7. Output redaction (`safety.py::SafetyPolicy.redact`)
 

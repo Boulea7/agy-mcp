@@ -70,13 +70,13 @@ these paths in `execute` is refused.
 ## Worktree behaviour
 
 When the policy decides a write is allowed (`execute` + `--allow-write`
-in a git workspace), the bridge creates a temporary git worktree under
+in a git workspace), the bridge creates a git worktree under
 `<repo>/.agy-mcp/worktrees/<session-id>/` and runs the child there.
-Cleanup happens on exit; if the child crashes, the worktree survives
-and you can re-attach with `git worktree list`.
+The worktree remains after exit so you can inspect and merge the branch;
+remove it with `git worktree remove <path>` when finished.
 
 Disable via:
-- `--no-worktree` per call
+- `--worktree false` per call
 - `AGY_MCP_WORKTREE_DEFAULT=0` env var
 - `execute.worktree_default = false` in `~/.config/agy-mcp/config.toml`
 

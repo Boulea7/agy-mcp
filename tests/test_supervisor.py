@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ from agy_mcp.models import (
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
 from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present
+from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +57,7 @@ class _ScriptedAdapter(BaseAdapter):
         self._delay = delay_per_event
         self._block_until_cancel = block_until_cancel
         self._spawn_raises = spawn_raises
+        self.run_requests: list[BridgeRequest] = []
 
     def _probe(self) -> Capability:
         return self._cap
@@ -72,6 +75,7 @@ class _ScriptedAdapter(BaseAdapter):
         event_sink: EventSink | None = None,
         cancel_event: threading.Event | None = None,
     ) -> AdapterRunResult:
+        self.run_requests.append(request)
         if self._spawn_raises is not None:
             raise self._spawn_raises
         forwarded: list[CanonicalEvent] = []
@@ -177,6 +181,23 @@ def _wait_for(predicate, *, timeout: float = 3.0, interval: float = 0.02) -> boo
     return False
 
 
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit", "-m", "init",
+        ],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
 # ---------------------------------------------------------------------------
 # StoreEventSink
 # ---------------------------------------------------------------------------
@@ -252,6 +273,78 @@ def test_start_short_circuits_when_backend_unavailable(tmp_path: Path):
     assert "agy" in (response.error or "")
     # No job dir should have been created.
     assert not any(tmp_path.iterdir())
+
+
+def test_start_applies_safety_gate_before_adapter_selection(tmp_path: Path):
+    config = _default_config(tmp_path / "sessions")
+    safety = SafetyPolicy.from_config(config)
+    store = SessionStore(tmp_path / "sessions")
+    called = False
+
+    def _factory(request, cfg, sft):
+        nonlocal called
+        called = True
+        raise AssertionError("adapter selection should not run")
+
+    supervisor = Supervisor(
+        store=store, config=config, safety=safety, adapter_factory=_factory,
+    )
+    request = BridgeRequest(prompt="please rm -rf /", cwd=str(tmp_path))
+    response = supervisor.start(request)
+    assert response.success is False
+    assert "destructive" in (response.error or "")
+    assert called is False
+    assert not any((tmp_path / "sessions").iterdir())
+
+
+def test_start_execute_runs_inside_retained_worktree(tmp_path: Path):
+    repo = _init_git_repo(tmp_path / "repo")
+    events = [
+        CanonicalEvent(type="assistant", text="ok"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter = _ScriptedAdapter(capability=_capability(), events=events)
+    config = _default_config(tmp_path / "sessions")
+    config.execute = ExecuteConfig(worktree_default=True)
+    safety = SafetyPolicy.from_config(config)
+    store = SessionStore(tmp_path / "sessions")
+
+    def _factory(request, cfg, sft):
+        return adapter, []
+
+    supervisor = Supervisor(
+        store=store, config=config, safety=safety, adapter_factory=_factory,
+    )
+    request = BridgeRequest(
+        prompt="update README",
+        cwd=str(repo),
+        mode="execute",
+        allow_write=True,
+        session_id="sess-iso",
+    )
+    response = supervisor.start(request)
+    assert response.success is True
+    assert response.cwd != str(repo)
+    assert ".agy-mcp/worktrees/sess-iso" in response.cwd
+    assert _wait_for(
+        lambda: supervisor.status(response.job_id).status == "completed",
+    )
+    assert adapter.run_requests
+    run_cwd = Path(adapter.run_requests[0].cwd)
+    assert run_cwd == Path(response.cwd)
+    assert run_cwd.exists()
+    record = supervisor.status(response.job_id)
+    assert record.cwd == str(run_cwd)
+
+    cleanup_worktree(
+        WorktreeHandle(
+            path=run_cwd,
+            branch="agy-mcp/sess-iso",
+            base_repo=repo,
+            base_ref="HEAD",
+        ),
+        force=True,
+    )
 
 
 def test_status_marks_crashed_worker_as_failed(tmp_path: Path):

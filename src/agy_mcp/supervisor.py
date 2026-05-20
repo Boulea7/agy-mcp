@@ -61,11 +61,17 @@ from agy_mcp.models import (
     JobRecord,
     JobStatus,
 )
-from agy_mcp.safety import SafetyPolicy
+from agy_mcp.safety import SafetyPolicy, is_git_workspace
 from agy_mcp.session_store import (
     JobPaths,
     SessionStore,
     generate_job_id,
+)
+from agy_mcp.worktree import (
+    WorktreeError,
+    WorktreeHandle,
+    cleanup_worktree,
+    create_worktree,
 )
 
 
@@ -200,6 +206,25 @@ class Supervisor:
         / ``read_events``.
         """
 
+        cwd_path = Path(request.cwd).expanduser().resolve()
+        gate = self.safety.gate_request(
+            request,
+            worktree_default=self.config.execute.worktree_default,
+            is_git_workspace=is_git_workspace(cwd_path),
+            cwd=cwd_path,
+        )
+        gate_warnings = [self.safety.redact(w) for w in gate.warnings]
+        if not gate.allowed:
+            return BridgeResponse(
+                success=False,
+                error=self.safety.redact(
+                    gate.reason or "request rejected by safety policy",
+                ),
+                warnings=gate_warnings,
+                cwd=str(cwd_path),
+                adapter=AdapterMetadata(),
+            ).touch()
+
         adapter, route_warnings = self._adapter_factory(
             request, self.config, self.safety,
         )
@@ -211,6 +236,11 @@ class Supervisor:
         # ``bridge._run_unsafe`` already does it. Phase 4 R1 P1.1.
         cap_warnings = [self.safety.redact(w) for w in cap.warnings]
         route_warnings_redacted = [self.safety.redact(w) for w in route_warnings]
+        preflight_warnings = [
+            *gate_warnings,
+            *route_warnings_redacted,
+            *cap_warnings,
+        ]
 
         if not cap.bin_path:
             error_text = (
@@ -220,8 +250,8 @@ class Supervisor:
             return BridgeResponse(
                 success=False,
                 error=error_text,
-                warnings=cap_warnings,
-                cwd=request.cwd,
+                warnings=preflight_warnings,
+                cwd=str(cwd_path),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
@@ -237,26 +267,56 @@ class Supervisor:
                     f"supervisor busy: {self._max_concurrent_jobs} concurrent "
                     "jobs already running; retry after one finishes",
                 ),
-                warnings=[*route_warnings_redacted, *cap_warnings],
-                cwd=request.cwd,
+                warnings=preflight_warnings,
+                cwd=str(cwd_path),
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
+        resolved_job_id = job_id or generate_job_id()
+        effective_request = request
+        worktree_handle: WorktreeHandle | None = None
+        if _wants_worktree(request, self.config):
+            try:
+                worktree_handle = create_worktree(
+                    cwd_path,
+                    _worktree_slug(request, resolved_job_id),
+                )
+                effective_request = request.model_copy(
+                    update={"cwd": str(worktree_handle.path)},
+                )
+                preflight_warnings.append(
+                    self.safety.redact(
+                        "execute worktree retained for review at "
+                        f"{worktree_handle.path}; remove it with git worktree "
+                        "remove after merging or discarding.",
+                    )
+                )
+            except WorktreeError as exc:
+                self._job_slots.release()
+                return BridgeResponse(
+                    success=False,
+                    error=self.safety.redact(f"worktree creation failed: {exc}"),
+                    warnings=preflight_warnings,
+                    cwd=str(cwd_path),
+                    adapter=AdapterMetadata(backend=backend_name),
+                ).touch()
+
         try:
             record = self.store.create_job(
-                job_id=job_id,
-                session_id=request.session_id,
-                cwd=request.cwd,
-                request=_serialise_request(request),
+                job_id=resolved_job_id,
+                session_id=effective_request.session_id,
+                cwd=effective_request.cwd,
+                request=_serialise_request(effective_request),
                 backend=backend_name,
             )
         except (FileExistsError, TypeError, ValueError) as exc:
             self._job_slots.release()  # release the slot we just took
+            _cleanup_unstarted_worktree(worktree_handle)
             return BridgeResponse(
                 success=False,
                 error=self.safety.redact(str(exc)),
-                warnings=[*route_warnings_redacted, *cap_warnings],
-                cwd=request.cwd,
+                warnings=preflight_warnings,
+                cwd=effective_request.cwd,
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
         except OSError as exc:
@@ -266,18 +326,19 @@ class Supervisor:
             # permanently, slowly draining the concurrency cap.
             # (Phase 5 R3 arch P1-1.)
             self._job_slots.release()
+            _cleanup_unstarted_worktree(worktree_handle)
             return BridgeResponse(
                 success=False,
                 error=self.safety.redact(f"failed to create job record: {exc}"),
-                warnings=[*route_warnings_redacted, *cap_warnings],
-                cwd=request.cwd,
+                warnings=preflight_warnings,
+                cwd=effective_request.cwd,
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
         cancel_event = threading.Event()
         thread = threading.Thread(
             target=self._run_job,
-            args=(record.job_id, request, adapter, route_warnings, cancel_event),
+            args=(record.job_id, effective_request, adapter, preflight_warnings, cancel_event),
             name=f"supervisor-{record.job_id}",
             daemon=True,
         )
@@ -296,6 +357,7 @@ class Supervisor:
             # never release the slot. Release here so the cap doesn't
             # drift permanently downwards. (Phase 5 R3 sec P2.)
             self._job_slots.release()
+            _cleanup_unstarted_worktree(worktree_handle)
             with self._lock:
                 self._jobs.pop(record.job_id, None)
             try:
@@ -314,27 +376,27 @@ class Supervisor:
                 error=self.safety.redact(
                     f"failed to spawn worker thread for {record.job_id}: {exc}",
                 ),
-                warnings=[*route_warnings_redacted, *cap_warnings],
-                cwd=request.cwd,
+                warnings=preflight_warnings,
+                cwd=effective_request.cwd,
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
         return BridgeResponse(
             success=True,
-            SESSION_ID=request.session_id or "",
+            SESSION_ID=effective_request.session_id or "",
             job_id=record.job_id,
             status="running",
-            cwd=request.cwd,
+            cwd=effective_request.cwd,
             adapter=AdapterMetadata(
                 backend=backend_name,
                 bin_path=cap.bin_path or None,
                 version=cap.version,
-                model=request.model or cap.model,
-                output_protocol=request.output_protocol,
+                model=effective_request.model or cap.model,
+                output_protocol=effective_request.output_protocol,
                 supports_streaming=cap.supports_streaming,
                 supports_tool_events=cap.supports_tool_events,
             ),
-            warnings=[*route_warnings_redacted, *cap_warnings],
+            warnings=preflight_warnings,
         ).touch()
 
     def status(self, job_id: str) -> JobRecord | None:
@@ -681,6 +743,31 @@ def _try_chmod(path: Path, mode: int) -> None:
         os.chmod(path, mode)
     except OSError:
         pass
+
+
+def _wants_worktree(request: BridgeRequest, config: Config) -> bool:
+    if request.mode != "execute" or not request.allow_write:
+        return False
+    if request.worktree is not None:
+        return request.worktree
+    return config.execute.worktree_default
+
+
+def _worktree_slug(request: BridgeRequest, job_id: str) -> str:
+    # Reuse the bridge sanitiser so sync and detached execute requests
+    # produce the same branch/path shape.
+    from agy_mcp.bridge import _make_session_slug
+
+    return _make_session_slug(request.session_id or job_id)
+
+
+def _cleanup_unstarted_worktree(handle: WorktreeHandle | None) -> None:
+    if handle is None:
+        return
+    try:
+        cleanup_worktree(handle, force=True)
+    except WorktreeError:
+        return
 
 
 def _serialise_request(request: BridgeRequest) -> dict:

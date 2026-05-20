@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -47,6 +48,7 @@ from agy_mcp.models import (
     Capability,
 )
 from agy_mcp.safety import SafetyPolicy
+from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +159,23 @@ def _default_config(*, worktree_default: bool = True) -> Config:
 
 def _safety() -> SafetyPolicy:
     return SafetyPolicy(config=SafetyConfig())
+
+
+def _init_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit", "-m", "init",
+        ],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +839,47 @@ def test_run_unsafe_default_worktree_fails_closed_when_no_git(
     assert resp.success is False
     assert "worktree creation failed" in (resp.error or "")
     assert fake.run_calls == []
+
+
+def test_run_unsafe_execute_retains_worktree_after_success(monkeypatch, tmp_path: Path):
+    repo = _init_git_repo(tmp_path / "repo")
+    cap = _capability("agy")
+    fake = _FakeAdapter(
+        capability=cap,
+        run_result=_result(
+            events=[
+                CanonicalEvent(type="assistant", text="done"),
+                CanonicalEvent(type="result", subtype="success"),
+            ],
+            session_id="sess-bridge",
+        ),
+    )
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+    request = BridgeRequest(
+        prompt="update README",
+        cwd=str(repo),
+        mode="execute",
+        allow_write=True,
+        session_id="sess-bridge",
+    )
+    resp = _run(request, _default_config(worktree_default=True), _safety())
+    assert resp.success is True
+    assert fake.run_calls
+    run_cwd = Path(fake.run_calls[0].cwd)
+    assert run_cwd.exists()
+    assert run_cwd == Path(resp.cwd)
+    assert ".agy-mcp/worktrees/sess-bridge" in resp.cwd
+    assert any("retained for review" in warning for warning in resp.warnings)
+
+    cleanup_worktree(
+        WorktreeHandle(
+            path=run_cwd,
+            branch="agy-mcp/sess-bridge",
+            base_repo=repo,
+            base_ref="HEAD",
+        ),
+        force=True,
+    )
 
 
 # ---------------------------------------------------------------------------

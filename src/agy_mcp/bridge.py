@@ -10,7 +10,8 @@ Responsibilities:
 4. Route to ``AgyPrintBackend`` or ``GeminiCliBackend`` (auto chooses
    first available; explicit backend errors fast if unavailable).
 5. Optionally create a git worktree (execute + allow_write +
-   worktree_default OR --worktree explicit). Cleanup on exit.
+   worktree_default OR --worktree explicit). Successful write runs leave
+   the worktree in place for review and merge.
 6. Run the adapter, translate events via :class:`ProtocolTranslator`,
    and emit a :class:`BridgeResponse` JSON envelope on stdout.
 
@@ -49,8 +50,6 @@ from agy_mcp.safety import SafetyPolicy, is_git_workspace
 from agy_mcp.session_store import SessionStore
 from agy_mcp.worktree import (
     WorktreeError,
-    WorktreeHandle,
-    cleanup_worktree,
     create_worktree,
 )
 
@@ -378,6 +377,8 @@ def _run_unsafe(
             adapter=AdapterMetadata(),
         ).touch()
 
+    gate_warnings = [safety.redact(w) for w in gate.warnings]
+
     adapter, route_warnings = _select_backend(request, config, safety)
     cap = adapter.detect()
     backend_name = cap.backend
@@ -394,14 +395,23 @@ def _run_unsafe(
             adapter=_adapter_meta(adapter, request),
         ).touch()
 
-    worktree_handle: WorktreeHandle | None = None
     effective_cwd = cwd_path
     worktree_warnings: list[str] = []
-    if _wants_worktree(request, config):
+    if _wants_worktree(request, config) and request.dry_run:
+        worktree_warnings.append(
+            "dry_run skipped execute worktree creation; no filesystem writes were made."
+        )
+    elif _wants_worktree(request, config):
         try:
             slug = _make_session_slug(request.session_id)
-            worktree_handle = create_worktree(cwd_path, slug)
-            effective_cwd = worktree_handle.path
+            handle = create_worktree(cwd_path, slug)
+            effective_cwd = handle.path
+            worktree_warnings.append(
+                safety.redact(
+                    f"execute worktree retained for review at {effective_cwd}; "
+                    "remove it with git worktree remove after merging or discarding."
+                )
+            )
         except WorktreeError as exc:
             # Fail-closed: any execute+allow_write run that *asked for* worktree
             # isolation (either explicitly or via config default) must NOT
@@ -413,7 +423,7 @@ def _run_unsafe(
             return BridgeResponse(
                 success=False,
                 error=safety.redact(f"worktree creation failed: {exc}"),
-                warnings=route_warnings,
+                warnings=[*gate_warnings, *route_warnings],
                 cwd=str(cwd_path),
                 adapter=_adapter_meta(adapter, request),
             ).touch()
@@ -421,7 +431,7 @@ def _run_unsafe(
     if request.dry_run:
         return _dry_run_response(
             request, adapter, effective_cwd, safety,
-            route_warnings + worktree_warnings,
+            gate_warnings + route_warnings + worktree_warnings,
         )
 
     sink = ListEventSink()
@@ -442,25 +452,14 @@ def _run_unsafe(
                 stderr_path=stderr_path,
                 event_sink=sink,
             )
-        except Exception as exc:  # noqa: BLE001 - keep worktree cleanup reachable
+        except Exception as exc:  # noqa: BLE001 - keep structured response reachable
             # An exception escaping adapter.run() would otherwise skip the
             # BridgeResponse path entirely (Phase 3 review P1.1). We translate
             # it into a structured failure that still carries the warnings
             # already gathered, so the caller doesn't lose context.
             run_error = safety.redact(str(exc))
-        finally:
-            if worktree_handle is not None:
-                try:
-                    cleanup_worktree(worktree_handle, force=True)
-                except WorktreeError as exc:
-                    # Symmetry with the run_error branch above — git stderr
-                    # is unlikely to contain secrets but we redact for the
-                    # same defense-in-depth reason (Phase 3 R2 P3c).
-                    worktree_warnings.append(
-                        f"worktree cleanup failed: {safety.redact(str(exc))}"
-                    )
 
-    all_warnings = [*route_warnings, *worktree_warnings, *cap.warnings]
+    all_warnings = [*gate_warnings, *route_warnings, *worktree_warnings, *cap.warnings]
 
     if result is None:
         return BridgeResponse(

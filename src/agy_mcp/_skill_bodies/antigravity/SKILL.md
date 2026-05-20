@@ -61,8 +61,8 @@ useful.
 ## When the driving agent is in `execute` mode
 
 - You are running inside a **git worktree** (the bridge auto-creates
-  one for `--allow-write` runs). Treat the worktree as ephemeral; the
-  driving agent will diff it against main.
+  one for `--allow-write` runs). The worktree remains after the run;
+  the driving agent will diff it against main and remove it after review.
 - If a test fails after you apply a change, **revert and report**.
   Do not "fix and continue" without permission.
 - Touch only the files the prompt names.

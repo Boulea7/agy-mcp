@@ -36,10 +36,10 @@ findings are unactionable.
 `plan` mode wants strategy. Save the diff for `prototype` mode, which
 the driving agent will explicitly switch to.
 
-### Treating the worktree as permanent
-`execute` mode runs you inside a temp worktree. Any "I'll come back to
-this later" assumption breaks when the worktree is removed at the end
-of the turn.
+### Assuming the main checkout changed
+`execute` mode runs you inside a retained review worktree. Report the
+worktree path and touched files so the driving agent can inspect, merge,
+or remove it.
 
 ### Reading secrets to "verify"
 The safety policy denies reads of `~/.ssh`, `~/.aws`, `~/.gemini/oauth_creds.json`,
