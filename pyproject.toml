@@ -68,32 +68,74 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agy_mcp"]
-# Phase 7 R1 sec P3-4: belt-and-braces exclude so a stray __pycache__,
-# editor scratch file, or platform turd cannot land inside the shipped
-# wheel — especially under ``src/agy_mcp/_skill_bodies/`` which carries
-# verbatim skill bodies.
+# Phase 7 R1 sec P3-4 + Phase 8 sdist audit: belt-and-braces exclude so a
+# stray __pycache__, editor scratch file, internal review doc, or platform
+# turd cannot land inside the shipped wheel — especially under
+# ``src/agy_mcp/_skill_bodies/`` which carries verbatim skill bodies.
 exclude = [
     "**/__pycache__",
     "**/*.pyc",
     "**/*.pyo",
     "**/.DS_Store",
     "**/Thumbs.db",
+    # Internal-only docs that must never appear in a release artefact.
+    "docs/review-followups.md",
+    "docs/reference-review.md",
+    "docs/local-test-checklist.md",
+    # User-private agent prompts that ship via .gitignore in the repo.
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    # Test fixtures and ref clones — never shipped.
+    "tests",
+    ".refs",
+    ".agy-mcp",
+    ".claude",
 ]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 
 [tool.hatch.build.targets.sdist]
+# Whitelist the exact set of paths that ship in a public release. Hatch
+# would otherwise pull in dotfiles (``.gitignore``) and every doc under
+# ``docs/`` — including review-followups.md which is a 1300-line internal
+# audit trail. Phase 8 R2: this list IS the release contract.
 include = [
     "src/agy_mcp",
-    "docs",
+    "docs/architecture.md",
+    "docs/cli-capabilities.md",
+    "docs/comparison-with-upstream-reference.md",
+    "docs/examples.md",
+    "docs/installation.md",
+    "docs/output-strategy.md",
+    "docs/README_EN.md",
+    "docs/security.md",
     "README.md",
     "LICENSE",
     "pyproject.toml",
 ]
-# skills/, prompts/, tests/ are added to sdist includes as they are
-# populated in Phases 1, 6, and 7; an empty include glob errors on some
-# hatch versions.
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/.DS_Store",
+    "**/Thumbs.db",
+    # Defence-in-depth: even if a glob above expanded too widely, hatch
+    # walks excludes last so anything matching here is dropped.
+    ".gitignore",
+    ".python-version",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    "docs/review-followups.md",
+    "docs/reference-review.md",
+    "docs/local-test-checklist.md",
+    ".refs",
+    ".agy-mcp",
+    ".claude",
+    "tests",
+]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
