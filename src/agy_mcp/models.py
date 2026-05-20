@@ -27,7 +27,30 @@ _EXTRA_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 # POSIX reserves bare ``_`` as "last argument of previous command"; shells
 # rewrite it on every command so setting it is harmless but pointless and
 # could confuse downstream tooling. (Phase 5 R3 sec P3.)
-_EXTRA_ENV_NAME_DENY: frozenset[str] = frozenset({"_"})
+_EXTRA_ENV_NAME_DENY: frozenset[str] = frozenset({
+    "_",
+    "AGY_CLI_DISABLE_AUTO_UPDATE",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "BASH_ENV",
+    "COMSPEC",
+    "ENV",
+    "GEMINI_BIN",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM",
+    "HOME",
+    "NODE_OPTIONS",
+    "PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+})
+_EXTRA_ENV_NAME_DENY_PREFIXES: tuple[str, ...] = (
+    "DYLD_",
+    "GIT_CONFIG_",
+    "LD_",
+    "PYTHON",
+)
 _EXTRA_ENV_VALUE_BANNED = re.compile(r"[\x00\r\n]")
 # Defence-in-depth caps so a hostile MCP caller can't force us to iterate
 # millions of entries or hold megabytes per value.
@@ -199,7 +222,11 @@ class BridgeRequest(BaseModel):
                 )
             if k in _EXTRA_ENV_NAME_DENY:
                 raise ValueError(
-                    f"extra_env name {k!r} is POSIX-reserved; refuse",
+                    f"extra_env name {k!r} controls wrapper runtime; refuse",
+                )
+            if k.startswith(_EXTRA_ENV_NAME_DENY_PREFIXES):
+                raise ValueError(
+                    f"extra_env name {k!r} controls wrapper runtime; refuse",
                 )
             if _EXTRA_ENV_VALUE_BANNED.search(v):
                 raise ValueError(

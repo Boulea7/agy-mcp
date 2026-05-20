@@ -289,6 +289,22 @@ def test_parse_extra_env_rejects_unsafe_keys():
     assert set(rejected) == set(inputs)
 
 
+def test_parse_extra_env_rejects_runtime_control_keys():
+    inputs = [
+        "NODE_OPTIONS=--require=/tmp/hook.js",
+        "PYTHONPATH=/tmp/inject",
+        "DYLD_INSERT_LIBRARIES=/tmp/lib.dylib",
+        "GIT_CONFIG_GLOBAL=/tmp/gitconfig",
+        "AGY_CLI_DISABLE_AUTO_UPDATE=0",
+        "ANTIGRAVITY_CONVERSATION_ID=other",
+        "PATH=/tmp/bin",
+        "HOME=/tmp/home",
+    ]
+    out, rejected = _parse_extra_env(inputs)
+    assert out == {}
+    assert set(rejected) == set(inputs)
+
+
 def test_parse_extra_env_keeps_value_verbatim_for_valid_keys():
     """Values are NOT scrubbed by _parse_extra_env itself — env-scrub happens later."""
 

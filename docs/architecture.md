@@ -150,6 +150,7 @@ class BridgeRequest(BaseModel):
     output_protocol: Literal["raw", "claude", "codex"] = "claude"
     extra_env: dict[str, str] = {}        # validated: ^[A-Z_][A-Z0-9_]*$,
                                           # value cannot contain \n / \r / NUL,
+                                          # no runtime-control names,
                                           # max 64 entries, max 4096 chars each
     debug: bool = False
 

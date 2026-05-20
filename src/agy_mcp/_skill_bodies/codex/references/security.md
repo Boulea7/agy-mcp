@@ -86,6 +86,9 @@ The MCP layer enforces the same rules as the CLI:
 
 - Names must match `^[A-Z_][A-Z0-9_]*$`.
 - Values must not contain `\0` / `\r` / `\n`.
+- Runtime-control names such as `NODE_OPTIONS`, `PYTHON*`, `LD_*`,
+  `DYLD_*`, `GIT_CONFIG*`, `PATH`, `HOME`, and wrapper-owned agy
+  variables are refused.
 - At most 64 entries; each value at most 4096 chars.
 
 This stops a hostile MCP caller from smuggling a fake second variable

@@ -38,7 +38,10 @@ Pydantic v2 with `extra="forbid"`. Notable validators:
 - `extra_env` (passed through to `agy` subprocess): keys must match
   `^[A-Z_][A-Z0-9_]*$`, values cannot contain `\n` / `\r` / NUL, max
   64 entries, max 4096 chars per value. Rejects the POSIX-special `_`
-  key. (Phase 5 R2 sec P0-1.)
+  key and runtime-control names such as `NODE_OPTIONS`, `PYTHON*`,
+  `LD_*`, `DYLD_*`, `GIT_CONFIG*`, `PATH`, `HOME`,
+  `BASH_ENV`, `ENV`, `AGY_CLI_DISABLE_AUTO_UPDATE`, and
+  `ANTIGRAVITY_CONVERSATION_ID`. (Phase 5 R2 sec P0-1.)
 - `mode`, `backend`, `output_protocol`: closed enums.
 - `timeout`: 1 ≤ value ≤ 86400 (24h ceiling; longer runs should use
   `mode="long"` + `agy_start`).

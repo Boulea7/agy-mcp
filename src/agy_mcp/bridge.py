@@ -112,6 +112,30 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 _EXTRA_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_EXTRA_ENV_NAME_DENY: frozenset[str] = frozenset({
+    "_",
+    "AGY_CLI_DISABLE_AUTO_UPDATE",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "BASH_ENV",
+    "COMSPEC",
+    "ENV",
+    "GEMINI_BIN",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM",
+    "HOME",
+    "NODE_OPTIONS",
+    "PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+})
+_EXTRA_ENV_NAME_DENY_PREFIXES: tuple[str, ...] = (
+    "DYLD_",
+    "GIT_CONFIG_",
+    "LD_",
+    "PYTHON",
+)
 # Control chars that must never appear in env values — a smuggled \n splits
 # the value into a fake second variable when echoed via printenv / eval
 # (Phase 3 review M5). NUL is rejected by the kernel anyway; we add CR/LF.
@@ -143,6 +167,9 @@ def _parse_extra_env(items: list[str]) -> tuple[dict[str, str], list[str]]:
         k, _, v = raw.partition("=")
         k = k.strip()
         if not k or not _EXTRA_ENV_NAME_RE.match(k):
+            rejected.append(raw)
+            continue
+        if k in _EXTRA_ENV_NAME_DENY or k.startswith(_EXTRA_ENV_NAME_DENY_PREFIXES):
             rejected.append(raw)
             continue
         if _EXTRA_ENV_VALUE_BANNED.search(v):

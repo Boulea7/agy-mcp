@@ -481,6 +481,24 @@ def test_subprocess_env_scrubs_extra_env_too(tmp_path, monkeypatch, isolated_agy
     assert env["OPENAI_API_KEY"] == "***"
 
 
+def test_subprocess_env_keeps_wrapper_controls_immutable(
+    tmp_path, monkeypatch, isolated_agy,
+):
+    backend = AgyPrintBackend(bin_override=None)
+    req = BridgeRequest.model_construct(
+        prompt="x",
+        cwd=str(tmp_path),
+        session_id="real-session",
+        extra_env={
+            "AGY_CLI_DISABLE_AUTO_UPDATE": "0",
+            "ANTIGRAVITY_CONVERSATION_ID": "fake-session",
+        },
+    )
+    env = backend._build_subprocess_env(req)
+    assert env["AGY_CLI_DISABLE_AUTO_UPDATE"] == "1"
+    assert env["ANTIGRAVITY_CONVERSATION_ID"] == "real-session"
+
+
 # ---------------------------------------------------------------------------
 # Event redaction at emit time (review P0 #2)
 # ---------------------------------------------------------------------------

@@ -98,6 +98,23 @@ def test_bridge_request_rejects_oversized_max_output_chars():
     assert "max_output_chars exceeds" in str(excinfo.value)
 
 
+def test_bridge_request_rejects_runtime_control_extra_env():
+    denied = [
+        "NODE_OPTIONS",
+        "PYTHONPATH",
+        "DYLD_INSERT_LIBRARIES",
+        "GIT_CONFIG_GLOBAL",
+        "AGY_CLI_DISABLE_AUTO_UPDATE",
+        "ANTIGRAVITY_CONVERSATION_ID",
+        "PATH",
+        "HOME",
+    ]
+    for name in denied:
+        with pytest.raises(ValidationError) as excinfo:
+            BridgeRequest(prompt="x", extra_env={name: "x"})
+        assert "controls wrapper runtime" in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # BridgeResponse
 # ---------------------------------------------------------------------------

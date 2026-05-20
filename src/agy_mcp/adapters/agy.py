@@ -544,14 +544,14 @@ class AgyPrintBackend(BaseAdapter):
         """
 
         env = self.safety.scrub_environment(dict(os.environ))
-        if request.session_id:
-            env["ANTIGRAVITY_CONVERSATION_ID"] = request.session_id
-        env.setdefault("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
-        # Caller-provided extras land last so explicit overrides win, but we
-        # redact-by-key as well so the caller cannot smuggle a fresh secret
-        # into the child by naming it ``OPENAI_API_KEY`` in extra_env.
+        # Caller-provided extras are still scrubbed by key. Wrapper-owned
+        # controls are written after this block so even a constructed
+        # BridgeRequest cannot re-enable auto-update or alter the session id.
         if request.extra_env:
             env.update(self.safety.scrub_environment(dict(request.extra_env)))
+        if request.session_id:
+            env["ANTIGRAVITY_CONVERSATION_ID"] = request.session_id
+        env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "1"
         return env
 
 
