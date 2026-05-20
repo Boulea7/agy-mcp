@@ -144,7 +144,12 @@ def install_skills(
                 continue
         try:
             overwrote = skill_file.exists()
-            safe_write_text(skill_file, _PLACEHOLDER_BODY, mode=0o644)
+            safe_write_text(
+                skill_file,
+                _PLACEHOLDER_BODY,
+                mode=0o644,
+                verify_under=validated_root if scope == "project" else None,
+            )
         except OSError as exc:
             result.warnings.append(sft.redact(f"install to {skill_file} failed: {exc}"))
             continue

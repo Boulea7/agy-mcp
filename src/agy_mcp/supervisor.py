@@ -151,6 +151,7 @@ class Supervisor:
         config: Config | None = None,
         safety: SafetyPolicy | None = None,
         adapter_factory: AdapterFactory | None = None,
+        max_concurrent_jobs: int = 8,
     ) -> None:
         self.store = store
         self.config = config or get_config()
@@ -160,6 +161,13 @@ class Supervisor:
         self._adapter_factory = adapter_factory or self._default_adapter_factory
         self._jobs: dict[str, _JobHandle] = {}
         self._lock = threading.RLock()
+        # Cap concurrent worker threads so a flood of ``agy_start`` calls
+        # can't spin up an unbounded number of subprocesses + reader
+        # threads. (Phase 5 R2 security P1-3.)
+        if max_concurrent_jobs <= 0:
+            raise ValueError("max_concurrent_jobs must be positive")
+        self._job_slots = threading.Semaphore(max_concurrent_jobs)
+        self._max_concurrent_jobs = max_concurrent_jobs
 
     # ------------------------------------------------------------------
     # Default adapter factory (delegates to bridge._select_backend)
@@ -217,6 +225,23 @@ class Supervisor:
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
+        # Reserve a concurrency slot before we even touch the session
+        # store, so a slot rejection doesn't leak a half-populated record.
+        # ``acquire(blocking=False)`` gives the caller a clean
+        # ``success=False, error="server busy"`` envelope rather than
+        # blocking the MCP tool call. (Phase 5 R2 security P1-3.)
+        if not self._job_slots.acquire(blocking=False):
+            return BridgeResponse(
+                success=False,
+                error=self.safety.redact(
+                    f"supervisor busy: {self._max_concurrent_jobs} concurrent "
+                    "jobs already running; retry after one finishes",
+                ),
+                warnings=[*route_warnings_redacted, *cap_warnings],
+                cwd=request.cwd,
+                adapter=AdapterMetadata(backend=backend_name),
+            ).touch()
+
         try:
             record = self.store.create_job(
                 job_id=job_id,
@@ -226,6 +251,7 @@ class Supervisor:
                 backend=backend_name,
             )
         except (FileExistsError, ValueError) as exc:
+            self._job_slots.release()  # release the slot we just took
             return BridgeResponse(
                 success=False,
                 error=self.safety.redact(str(exc)),
@@ -426,6 +452,9 @@ class Supervisor:
                 # returns False and the next start() with the same id
                 # can re-register cleanly.
                 self._jobs.pop(job_id, None)
+            # Release the concurrency slot the start() path acquired so
+            # the next queued job can begin. (Phase 5 R2 security P1-3.)
+            self._job_slots.release()
 
     def _finalize(
         self,

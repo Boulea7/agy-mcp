@@ -27,6 +27,7 @@ a ``/Users/<user>/`` path.
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -70,8 +71,27 @@ _agy_adapter: AgyPrintBackend | None = None
 _gemini_adapter: GeminiCliBackend | None = None
 
 # Defence-in-depth cap so a malicious or buggy caller can't burn unbounded
-# memory by passing a multi-megabyte string in place of a job_id slug.
-_MAX_JOB_ID_LEN = 256
+# memory by passing a multi-megabyte string in place of a job_id slug. We
+# also pin a charset so structured failures don't echo control bytes back
+# to the caller (Phase 5 R2 security P2-2).
+_MAX_JOB_ID_LEN = 96
+_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,96}$")
+_MAX_SESSION_ID_LEN = 96
+# Concurrency limiter for the async bridge tools. anyio's default thread
+# limiter is global to the process (40); ``_bridge_run`` itself spawns
+# additional reader threads + a subprocess per call, so we add a finer cap
+# to keep a flood of concurrent MCP calls from exhausting local resources
+# (Phase 5 R2 security P1-3).
+_BRIDGE_CONCURRENCY = 8
+_bridge_limiter: anyio.CapacityLimiter | None = None
+_bridge_limiter_lock = threading.Lock()
+
+# Defence-in-depth cap on the install-skill argument surface
+# (Phase 5 R2 security P1-1). 16 is well above the four documented
+# targets (claude, codex, antigravity, all) — large enough for forward
+# extensions, small enough to refuse pathological payloads.
+_MAX_INSTALL_TARGETS = 16
+_ALLOWED_TARGETS: frozenset[str] = frozenset({"claude", "codex", "antigravity", "all"})
 
 
 def _ensure_state() -> tuple[Config, SafetyPolicy, SessionStore, Supervisor]:
@@ -90,7 +110,7 @@ def _ensure_state() -> tuple[Config, SafetyPolicy, SessionStore, Supervisor]:
         return _config, _safety, _store, _supervisor
 
 
-def _ensure_adapters() -> tuple[AgyPrintBackend, GeminiCliBackend]:
+def _ensure_adapters(*, force_refresh: bool = False) -> tuple[AgyPrintBackend, GeminiCliBackend]:
     """Lazily build doctor adapter singletons.
 
     Each adapter probes its CLI exactly once (caching the result), so the
@@ -99,11 +119,18 @@ def _ensure_adapters() -> tuple[AgyPrintBackend, GeminiCliBackend]:
     ``gemini --version`` every invocation. The MCP server is the only
     caller; tests bypass this by passing fresh adapters directly to
     ``run_doctor``.
+
+    ``force_refresh=True`` drops the cached singletons so an operator who
+    just upgraded an underlying binary can re-probe without restarting
+    the MCP server. (Phase 5 R2 security P2-1.)
     """
 
     global _agy_adapter, _gemini_adapter
     _, safety, _store_, _supervisor_ = _ensure_state()
     with _state_lock:
+        if force_refresh:
+            _agy_adapter = None
+            _gemini_adapter = None
         if _agy_adapter is None:
             _agy_adapter = AgyPrintBackend(safety=safety)
         if _gemini_adapter is None:
@@ -111,10 +138,21 @@ def _ensure_adapters() -> tuple[AgyPrintBackend, GeminiCliBackend]:
         return _agy_adapter, _gemini_adapter
 
 
+def _get_bridge_limiter() -> anyio.CapacityLimiter:
+    """Return (and lazily build) the per-process bridge concurrency cap."""
+
+    global _bridge_limiter
+    with _bridge_limiter_lock:
+        if _bridge_limiter is None:
+            _bridge_limiter = anyio.CapacityLimiter(_BRIDGE_CONCURRENCY)
+        return _bridge_limiter
+
+
 def _reset_state_for_tests() -> None:
     """Drop the cached singletons so tests can swap in fresh stores."""
 
     global _config, _safety, _store, _supervisor, _agy_adapter, _gemini_adapter
+    global _bridge_limiter
     with _state_lock:
         _config = None
         _safety = None
@@ -122,6 +160,8 @@ def _reset_state_for_tests() -> None:
         _supervisor = None
         _agy_adapter = None
         _gemini_adapter = None
+    with _bridge_limiter_lock:
+        _bridge_limiter = None
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +218,26 @@ def _validate_job_id(safety: SafetyPolicy, job_id: str) -> str | None:
         return safety.redact(
             f"job_id exceeds {_MAX_JOB_ID_LEN} chars; refusing to look up",
         )
+    if not _JOB_ID_PATTERN.match(job_id):
+        # Don't echo the raw value back — it might contain control bytes.
+        return safety.redact(
+            "job_id must match [A-Za-z0-9_-]{1,96}",
+        )
+    return None
+
+
+def _validate_session_id(safety: SafetyPolicy, session_id: str) -> str | None:
+    """Length-cap SESSION_ID before it reaches the bridge.
+
+    The bridge layer treats SESSION_ID as a worktree slug seed and a
+    conversation id; a multi-megabyte value would survive validation
+    there. (Phase 5 R2 arch P2 #3.)
+    """
+
+    if len(session_id) > _MAX_SESSION_ID_LEN:
+        return safety.redact(
+            f"SESSION_ID exceeds {_MAX_SESSION_ID_LEN} chars",
+        )
     return None
 
 
@@ -214,6 +274,10 @@ async def agy_tool(
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     config, safety, _store_, _supervisor_ = _ensure_state()
+    if SESSION_ID is not None:
+        err = _validate_session_id(safety, SESSION_ID)
+        if err is not None:
+            return _structured_failure(safety, ValueError(err), cwd=cd)
     try:
         request = _build_request(
             {
@@ -238,9 +302,13 @@ async def agy_tool(
         return _structured_failure(safety, exc, cwd=cd)
     # ``_bridge_run`` launches the agy subprocess and blocks until it
     # finishes — offload to a worker thread so the FastMCP asyncio loop
-    # stays free to dispatch other tool calls. (Phase 5 R1 arch P1.1)
+    # stays free to dispatch other tool calls. (Phase 5 R1 arch P1.1.)
+    # The CapacityLimiter caps concurrent bridge calls per process so a
+    # flood of MCP requests can't exhaust local resources. (Phase 5 R2
+    # security P1-3.)
+    limiter = _get_bridge_limiter()
     response = await anyio.to_thread.run_sync(
-        _bridge_run, request, config, safety,
+        _bridge_run, request, config, safety, limiter=limiter,
     )
     return _response_to_dict(response)
 
@@ -280,6 +348,9 @@ async def agy_continue_tool(
         return _structured_failure(
             safety, ValueError("SESSION_ID is required for agy_continue"), cwd=cd,
         )
+    err = _validate_session_id(safety, SESSION_ID)
+    if err is not None:
+        return _structured_failure(safety, ValueError(err), cwd=cd)
     try:
         request = _build_request(
             {
@@ -302,8 +373,9 @@ async def agy_continue_tool(
         )
     except Exception as exc:  # noqa: BLE001
         return _structured_failure(safety, exc, cwd=cd)
+    limiter = _get_bridge_limiter()
     response = await anyio.to_thread.run_sync(
-        _bridge_run, request, config, safety,
+        _bridge_run, request, config, safety, limiter=limiter,
     )
     return _response_to_dict(response)
 
@@ -338,6 +410,10 @@ def agy_start_tool(
     job_id: str | None = None,
 ) -> dict[str, Any]:
     config, safety, _store_, supervisor = _ensure_state()
+    if SESSION_ID is not None:
+        err = _validate_session_id(safety, SESSION_ID)
+        if err is not None:
+            return _structured_failure(safety, ValueError(err), cwd=cd)
     try:
         request = _build_request(
             {
@@ -415,7 +491,7 @@ def agy_status_tool(job_id: str) -> dict[str, Any]:
 def agy_read_tool(
     job_id: str,
     since: int = 0,
-    translate: str | None = None,
+    translate: OutputProtocol | None = None,
 ) -> dict[str, Any]:
     config, safety, _store_, supervisor = _ensure_state()
     err = _validate_job_id(safety, job_id)
@@ -503,13 +579,16 @@ def agy_sessions_tool(limit: int = 50) -> dict[str, Any]:
     name="agy_doctor",
     description=(
         "Run capability + auth + session-store probes. Returns a structured "
-        "report (no secrets) suitable for surfacing to a user via MCP."
+        "report (no secrets) suitable for surfacing to a user via MCP. "
+        "Pass ``force_refresh=true`` to drop the cached binary probe (use "
+        "after upgrading the underlying agy / gemini CLI without restarting "
+        "the MCP server)."
     ),
 )
-def agy_doctor_tool() -> dict[str, Any]:
+def agy_doctor_tool(force_refresh: bool = False) -> dict[str, Any]:
     config, safety, store, _supervisor_ = _ensure_state()
     try:
-        agy_adapter, gemini_adapter = _ensure_adapters()
+        agy_adapter, gemini_adapter = _ensure_adapters(force_refresh=force_refresh)
     except Exception as exc:  # noqa: BLE001 - never let init crash the tool
         return _structured_failure(safety, exc)
     try:
@@ -552,10 +631,37 @@ def agy_install_skill_tool(
             safety, ValueError(f"scope must be 'user' or 'project', got {scope!r}"),
         )
     chosen_targets = targets if targets else ["all"]
+    # P1-1 hardening: bound the list, reject non-str entries, and refuse
+    # any value outside the documented allow-list before the installer
+    # walks the dict. Stops a hostile caller from amplifying the
+    # iteration cost or sneaking ``None`` / int / object values into a
+    # path-resolution helper that would crash with a typed exception.
+    if not isinstance(chosen_targets, list):
+        return _structured_failure(
+            safety, ValueError("targets must be a list of strings"),
+        )
+    if len(chosen_targets) > _MAX_INSTALL_TARGETS:
+        return _structured_failure(
+            safety,
+            ValueError(
+                f"targets exceeds {_MAX_INSTALL_TARGETS} entries "
+                f"({len(chosen_targets)} given)",
+            ),
+        )
+    cleaned: list[SkillTarget] = []
+    for t in chosen_targets:
+        if not isinstance(t, str):
+            return _structured_failure(
+                safety, ValueError("targets entries must be strings"),
+            )
+        if t not in _ALLOWED_TARGETS:
+            return _structured_failure(
+                safety, ValueError(f"unknown skill target: {t!r}"),
+            )
+        cleaned.append(t)  # type: ignore[arg-type]
     try:
-        validated_targets: list[SkillTarget] = [t for t in chosen_targets]  # type: ignore[list-item]
         result = install_skills(
-            targets=validated_targets,
+            targets=cleaned,
             scope=scope,
             project_root=Path(project_root) if project_root else None,
             safety=safety,

@@ -261,16 +261,34 @@ def ensure_directory(path: Path, mode: int = 0o755) -> Path:
     return path
 
 
-def safe_write_text(path: Path, content: str, mode: int = 0o644) -> None:
+def safe_write_text(
+    path: Path,
+    content: str,
+    mode: int = 0o644,
+    *,
+    verify_under: Path | None = None,
+) -> None:
     """Write ``content`` to ``path`` atomically with restrictive permissions.
 
     Uses a randomised tempfile in the destination directory so two writers
     racing on the same target do not collide on a predictable ``.tmp`` name,
     and refuses to follow a symlinked tempfile (``O_NOFOLLOW``) so an
     attacker cannot pre-create a symlink to e.g. ``~/.ssh/authorized_keys``.
+
+    ``verify_under`` is a defence-in-depth knob for callers like
+    :mod:`agy_mcp.install` that have already pinned a trusted root: when
+    provided, every intermediate parent of ``path`` from ``verify_under``
+    down to ``path.parent`` is checked with ``is_symlink()`` before the
+    write, and the resolved final path must remain under
+    ``verify_under``. This closes the TOCTOU window where an attacker
+    could swap a parent component (`<root>/.claude` → symlink to
+    `/etc`) between input validation and the actual write.
+    (Phase 5 R2 security P1-2.)
     """
 
     ensure_directory(path.parent)
+    if verify_under is not None:
+        _verify_parents_no_symlink(path, verify_under)
     # NamedTemporaryFile in the destination directory gives us atomic rename
     # semantics + a randomised name. We close immediately and reopen with
     # O_NOFOLLOW (where supported) for symlink-safe writes.
@@ -311,7 +329,29 @@ def safe_write_text(path: Path, content: str, mode: int = 0o644) -> None:
                 tmp.chmod(mode)
             except OSError:
                 pass
+        if verify_under is not None:
+            # Post-write check: even if every parent component was a real
+            # directory pre-write, an attacker could have moved a symlink
+            # in during the mkstemp/open window. Confirm the tempfile's
+            # realpath is still inside verify_under before promoting it.
+            try:
+                resolved_tmp = tmp.resolve(strict=True)
+                resolved_tmp.relative_to(verify_under.resolve(strict=True))
+            except (OSError, ValueError) as exc:
+                raise OSError(
+                    f"refusing to publish {path}: tempfile escaped verify_under",
+                ) from exc
         os.replace(tmp, path)
+        if verify_under is not None:
+            # Final paranoia check: post-rename, ensure the destination is
+            # still inside verify_under (catches a swap during os.replace).
+            try:
+                resolved_path = path.resolve(strict=True)
+                resolved_path.relative_to(verify_under.resolve(strict=True))
+            except (OSError, ValueError) as exc:
+                raise OSError(
+                    f"refusing to leave {path}: final path escaped verify_under",
+                ) from exc
     finally:
         # If replace failed, leave no orphan tmp behind.
         if tmp.exists() and tmp != path:
@@ -319,6 +359,40 @@ def safe_write_text(path: Path, content: str, mode: int = 0o644) -> None:
                 tmp.unlink()
             except OSError:
                 pass
+
+
+def _verify_parents_no_symlink(path: Path, root: Path) -> None:
+    """Walk ``path.parent`` up to ``root`` and refuse on any symlink.
+
+    The :func:`safe_write_text` ``verify_under`` knob calls this once per
+    write to close the parent-directory TOCTOU window.  ``root`` must be
+    a real (already-resolved) directory; we walk down from there, not
+    up from the leaf, so an attacker can't trick us by replacing
+    components above the trusted root.
+    """
+
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise OSError(f"verify_under root does not resolve: {root}") from exc
+    if not resolved_root.is_dir():
+        raise OSError(f"verify_under root is not a directory: {root}")
+    # Build the chain of intermediate components from root down to
+    # path.parent. ``path.parent.relative_to(resolved_root)`` errors if
+    # the parent is not under root at all — exactly what we want.
+    try:
+        rel = path.parent.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(
+            f"refusing to write {path}: parent {path.parent} not under {root}",
+        ) from exc
+    cur = resolved_root
+    for segment in rel.parts:
+        cur = cur / segment
+        if cur.is_symlink():
+            raise OSError(
+                f"refusing to write {path}: parent component {cur} is a symlink",
+            )
 
 
 # ---------------------------------------------------------------------------

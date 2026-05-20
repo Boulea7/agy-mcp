@@ -11,8 +11,10 @@ operator's ``$HOME``-rooted path never lands in the MCP transcript.
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,21 +184,57 @@ def _check_backend(adapter, safety: SafetyPolicy, *, label: str) -> list[DoctorC
 
 
 def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
-    if AGY_OAUTH_CREDS_PATH.is_file():
+    # Use ``os.lstat`` so a symlink-pointing credentials file is detected
+    # rather than silently followed: an attacker who can swap the file
+    # for a symlink to e.g. ``/dev/zero`` would otherwise be reported as
+    # healthy. (Phase 5 R2 security P2-3.)
+    try:
+        st = os.lstat(AGY_OAUTH_CREDS_PATH)
+    except FileNotFoundError:
         return DoctorCheck(
             name="auth",
-            ok=True,
+            ok=False,
+            severity="error",
             detail=safety.redact(
-                f"Google OAuth credentials present at {AGY_OAUTH_CREDS_PATH}",
+                "Google OAuth credentials missing; run `agy login` before "
+                "any non-dry-run invocation."
+            ),
+        )
+    except OSError as exc:
+        return DoctorCheck(
+            name="auth",
+            ok=False,
+            severity="error",
+            detail=safety.redact(
+                f"Google OAuth credentials path unreachable: {exc}",
+            ),
+        )
+    if stat.S_ISLNK(st.st_mode):
+        return DoctorCheck(
+            name="auth",
+            ok=False,
+            severity="warning",
+            detail=safety.redact(
+                f"Google OAuth credentials at {AGY_OAUTH_CREDS_PATH} is a "
+                "symlink; refusing to treat as authenticated until it is a "
+                "regular file.",
+            ),
+        )
+    if not stat.S_ISREG(st.st_mode):
+        return DoctorCheck(
+            name="auth",
+            ok=False,
+            severity="warning",
+            detail=safety.redact(
+                f"Google OAuth credentials at {AGY_OAUTH_CREDS_PATH} is not "
+                "a regular file (st_mode=0o{st.st_mode:o}).",
             ),
         )
     return DoctorCheck(
         name="auth",
-        ok=False,
-        severity="error",
+        ok=True,
         detail=safety.redact(
-            "Google OAuth credentials missing; run `agy login` before "
-            "any non-dry-run invocation."
+            f"Google OAuth credentials present at {AGY_OAUTH_CREDS_PATH}",
         ),
     )
 

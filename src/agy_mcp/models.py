@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -15,6 +16,19 @@ Mode = Literal["ask", "plan", "prototype", "review", "execute", "browser", "long
 BackendName = Literal["auto", "agy", "gemini"]
 OutputProtocol = Literal["raw", "claude", "codex"]
 JobStatus = Literal["completed", "running", "failed", "cancelled", "unknown"]
+
+# ---------------------------------------------------------------------------
+# extra_env safety patterns. The bridge CLI's ``_parse_extra_env`` enforces
+# the same rules on its argv path; this validator catches MCP callers that
+# construct ``BridgeRequest`` directly. (Phase 5 R2 security P0-1)
+# ---------------------------------------------------------------------------
+
+_EXTRA_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_EXTRA_ENV_VALUE_BANNED = re.compile(r"[\x00\r\n]")
+# Defence-in-depth caps so a hostile MCP caller can't force us to iterate
+# millions of entries or hold megabytes per value.
+_EXTRA_ENV_MAX_ENTRIES = 64
+_EXTRA_ENV_MAX_VALUE_LEN = 4096
 
 # ---------------------------------------------------------------------------
 # Capability — runtime detection result
@@ -99,6 +113,41 @@ class BridgeRequest(BaseModel):
         if value <= 0:
             raise ValueError("max_output_chars must be positive")
         return value
+
+    @field_validator("extra_env")
+    @classmethod
+    def _extra_env_safe(cls, value: dict[str, str]) -> dict[str, str]:
+        """Mirror ``bridge._parse_extra_env`` so MCP callers get the same
+        guarantees as CLI callers — drop entries that would smuggle a
+        secondary env var via NUL/CR/LF, refuse names that aren't valid
+        env identifiers, and cap the dict so a hostile caller can't burn
+        unbounded memory. (Phase 5 R2 security P0-1)"""
+
+        if not isinstance(value, dict):
+            raise ValueError("extra_env must be a mapping of str -> str")
+        if len(value) > _EXTRA_ENV_MAX_ENTRIES:
+            raise ValueError(
+                f"extra_env has {len(value)} entries; max {_EXTRA_ENV_MAX_ENTRIES}",
+            )
+        out: dict[str, str] = {}
+        for k, v in value.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise ValueError("extra_env keys and values must be strings")
+            if not _EXTRA_ENV_NAME_RE.match(k):
+                raise ValueError(
+                    f"extra_env name {k!r} must match {_EXTRA_ENV_NAME_RE.pattern}",
+                )
+            if _EXTRA_ENV_VALUE_BANNED.search(v):
+                raise ValueError(
+                    f"extra_env value for {k!r} contains NUL/CR/LF",
+                )
+            if len(v) > _EXTRA_ENV_MAX_VALUE_LEN:
+                raise ValueError(
+                    f"extra_env value for {k!r} exceeds "
+                    f"{_EXTRA_ENV_MAX_VALUE_LEN} chars",
+                )
+            out[k] = v
+        return out
 
 
 class AdapterMetadata(BaseModel):
