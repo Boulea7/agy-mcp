@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -302,9 +303,11 @@ def safe_write_text(
     full-atomic ``openat``-based fix earmarked for Phase 7.
     """
 
-    ensure_directory(path.parent)
     if verify_under is not None:
+        _ensure_directory_under_verified_root(path.parent, verify_under)
         _verify_parents_no_symlink(path, verify_under)
+    else:
+        ensure_directory(path.parent)
     # NamedTemporaryFile in the destination directory gives us atomic rename
     # semantics + a randomised name. We close immediately and reopen with
     # O_NOFOLLOW (where supported) for symlink-safe writes.
@@ -414,6 +417,39 @@ def _verify_parents_no_symlink(path: Path, root: Path) -> None:
         if cur.is_symlink():
             raise OSError(
                 f"refusing to write {path}: parent component {cur} is a symlink",
+            )
+
+
+def _ensure_directory_under_verified_root(parent: Path, root: Path) -> None:
+    """Create ``parent`` under ``root`` without following symlink components."""
+
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise OSError(f"verify_under root does not resolve: {root}") from exc
+    try:
+        rel = parent.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(
+            f"refusing to create {parent}: parent not under {root}",
+        ) from exc
+    cur = resolved_root
+    for segment in rel.parts:
+        cur = cur / segment
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            os.mkdir(cur, mode=0o755)
+            continue
+        except OSError as exc:
+            raise OSError(f"failed to inspect parent component {cur}") from exc
+        if stat.S_ISLNK(st.st_mode):
+            raise OSError(
+                f"refusing to create {parent}: parent component {cur} is a symlink",
+            )
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError(
+                f"refusing to create {parent}: parent component {cur} is not a directory",
             )
 
 

@@ -230,6 +230,20 @@ def test_safe_write_text_does_not_overwrite_symlink_target(tmp_path):
     assert victim.read_text(encoding="utf-8") == "DO NOT TOUCH"
 
 
+@pytest.mark.skipif(is_windows(), reason="symlink parent checks are POSIX-specific")
+def test_safe_write_text_verify_under_refuses_symlink_parent(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    link = root / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    target = link / "nested" / "config.json"
+    with pytest.raises(OSError, match="symlink"):
+        safe_write_text(target, "{}", verify_under=root)
+    assert not (outside / "nested").exists()
+
+
 def test_safe_write_text_leaves_no_tmp_orphans(tmp_path):
     target = tmp_path / "out.txt"
     safe_write_text(target, "ok")
