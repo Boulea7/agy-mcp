@@ -840,7 +840,7 @@ def _drain_transcript(path: Path, ctx: _RunContext, adapter: AgyPrintBackend) ->
     """Pass-through every NDJSON line of a transcript.jsonl as subagent_event."""
 
     try:
-        fp = path.open("r", encoding="utf-8", errors="replace")
+        fp = _open_transcript_no_follow(path)
     except OSError:
         return
     try:
@@ -871,6 +871,24 @@ def _drain_transcript(path: Path, ctx: _RunContext, adapter: AgyPrintBackend) ->
             fp.close()
         except OSError:
             pass
+
+
+def _open_transcript_no_follow(path: Path):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"refusing to read non-regular transcript: {path}")
+        return os.fdopen(fd, "r", encoding="utf-8", errors="replace")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------

@@ -675,3 +675,17 @@ def test_tail_transcripts_skips_symlink_targets(tmp_path, monkeypatch):
     assert not worker.is_alive()
     assert ctx.events == []
     assert link in ctx.transcript_seen
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW unavailable")
+def test_drain_transcript_refuses_symlink_open(tmp_path):
+    from agy_mcp.adapters.agy import _drain_transcript
+
+    secret_outside = tmp_path / "outside_secret.txt"
+    secret_outside.write_text('{"type":"would-not-want-this"}\n', encoding="utf-8")
+    link = tmp_path / "transcript.jsonl"
+    link.symlink_to(secret_outside)
+    backend = AgyPrintBackend(bin_override=None)
+    ctx = _new_ctx()
+    _drain_transcript(link, ctx, backend)
+    assert ctx.events == []
