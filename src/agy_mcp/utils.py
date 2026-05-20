@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -225,7 +226,12 @@ def resolve_executable(name_or_path: str | os.PathLike[str]) -> str | None:
     """Locate an executable across Windows/POSIX semantics.
 
     Honors PATHEXT on Windows; tries ``.exe``, ``.cmd``, ``.bat``, ``.com`` if
-    the bare name does not resolve. Returns the absolute path or ``None``.
+    the bare name does not resolve. On Windows we also probe the well-known
+    npm global directories (``%APPDATA%/npm``, ``%LOCALAPPDATA%/npm``,
+    ``%ProgramFiles%/nodejs``, ``%NPM_CONFIG_PREFIX%``) so that ``gemini``
+    installed via ``npm i -g @google/gemini-cli`` resolves without the user
+    having to fix PATH manually — this matches upstream
+    ``upstream-reference``. Returns the absolute path or ``None``.
     """
 
     import shutil
@@ -242,7 +248,114 @@ def resolve_executable(name_or_path: str | os.PathLike[str]) -> str | None:
         result = shutil.which(str(name_or_path) + ext)
         if result:
             return result
+    # Windows: npm global dirs are routinely missing from PATH on fresh
+    # installs. Probe them last so PATH wins when it has a different version.
+    name_str = str(name_or_path)
+    for base in windows_npm_paths():
+        for ext in (".cmd", ".bat", ".exe", ".com"):
+            probe = base / f"{name_str}{ext}"
+            if probe.is_file():
+                return str(probe)
     return None
+
+
+def windows_npm_paths() -> list[Path]:
+    """Return existing npm-global install directories on Windows.
+
+    Upstream ``upstream-reference`` does the same probe so npm-shipped
+    ``gemini.cmd`` resolves even when the npm prefix isn't on PATH. POSIX
+    returns an empty list (no-op).
+    """
+
+    if not is_windows():
+        return []
+    paths: list[Path] = []
+    env = os.environ
+    prefix = env.get("NPM_CONFIG_PREFIX") or env.get("npm_config_prefix")
+    if prefix:
+        paths.append(Path(prefix))
+    appdata = env.get("APPDATA")
+    if appdata:
+        paths.append(Path(appdata) / "npm")
+    localappdata = env.get("LOCALAPPDATA")
+    if localappdata:
+        paths.append(Path(localappdata) / "npm")
+    programfiles = env.get("ProgramFiles")
+    if programfiles:
+        paths.append(Path(programfiles) / "nodejs")
+    # Filter to existing directories so callers can iterate without re-checking.
+    return [p for p in paths if p.is_dir()]
+
+
+def augment_path_env_for_windows(env: dict[str, str]) -> dict[str, str]:
+    """Prepend npm-global directories to ``env['PATH']`` on Windows in-place.
+
+    Idempotent and case-insensitive (Windows PATH semantics). POSIX is a no-op.
+    Returns the same ``env`` mapping for chaining.
+    """
+
+    if not is_windows():
+        return env
+    path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+    path_entries = [p for p in env.get(path_key, "").split(os.pathsep) if p]
+    seen_lower = {p.lower() for p in path_entries}
+    for candidate in windows_npm_paths():
+        text = str(candidate)
+        if text.lower() in seen_lower:
+            continue
+        path_entries.insert(0, text)
+        seen_lower.add(text.lower())
+    env[path_key] = os.pathsep.join(path_entries)
+    return env
+
+
+def _cmd_quote(arg: str) -> str:
+    """Quote a single argument for cmd.exe consumption (Windows .cmd/.bat).
+
+    Mirrors the helper in upstream ``upstream-reference``. We escape
+    ``%`` (env-var expansion) and ``^`` (cmd escape char) BEFORE quoting,
+    then quote if the value contains a metachar or whitespace. Empty values
+    become explicit empty quotes so cmd.exe sees a positional argument.
+    """
+
+    if not arg:
+        return '""'
+    arg = arg.replace("%", "%%").replace("^", "^^")
+    if any(c in arg for c in '&|<>()^" \t'):
+        escaped = arg.replace('"', '"^""')
+        return f'"{escaped}"'
+    return arg
+
+
+def prepare_subprocess_command(
+    argv: list[str],
+    env: Mapping[str, str],
+) -> tuple[list[str] | str, bool]:
+    """Wrap ``argv`` for Windows ``.cmd/.bat`` invocation when needed.
+
+    ``subprocess.Popen(argv, shell=False)`` cannot reliably execute a
+    ``.cmd``/``.bat`` on Windows because the CreateProcess path expects a
+    real PE binary. Upstream wraps the call as
+    ``"<COMSPEC>" /d /s /c "<quoted cmdline>"`` and lets Popen spawn that
+    string with ``shell=False`` (safe — argv is already fused into the
+    string we control, no shell-injection surface beyond what the caller
+    already had).
+
+    Returns ``(popen_arg, wrapped)``:
+        * POSIX, or Windows targeting ``.exe`` / ``.com`` / bare:
+          returns ``argv`` unchanged and ``False``.
+        * Windows targeting ``.cmd`` / ``.bat``:
+          returns a single string + ``True``.
+    """
+
+    if not argv or not is_windows():
+        return argv, False
+    suffix = Path(argv[0]).suffix.lower()
+    if suffix not in (".cmd", ".bat"):
+        return argv, False
+    cmdline = " ".join(_cmd_quote(a) for a in argv)
+    comspec = env.get("COMSPEC", "cmd.exe") or "cmd.exe"
+    return f'"{comspec}" /d /s /c "{cmdline}"', True
 
 
 # ---------------------------------------------------------------------------
@@ -284,24 +397,31 @@ def safe_write_text(
     attacker cannot pre-create a symlink to e.g. ``~/.ssh/authorized_keys``.
 
     ``verify_under`` is a defence-in-depth knob for callers like
-    :mod:`agy_mcp.install` that have already pinned a trusted root: when
-    provided, every intermediate parent of ``path`` from ``verify_under``
-    down to ``path.parent`` is checked with ``is_symlink()`` before the
-    write, and the resolved final path must remain under
-    ``verify_under``. This closes the TOCTOU window where an attacker
-    could swap a parent component (`<root>/.claude` → symlink to
-    `/etc`) between input validation and the actual write.
-    (Phase 5 R2 security P1-2.)
+    :mod:`agy_mcp.install` that have already pinned a trusted root.
 
-    The walk is **narrow, not airtight**: ``is_symlink`` plus
-    ``resolve`` is two syscalls, and a determined attacker with local
-    write access to a parent directory could still race the mkstemp /
-    rename pair. The post-rename re-walk is a detect-after-the-fact
-    signal — it raises and surfaces the breach to the caller, but the
-    file has already been placed under the swapped parent. See
-    ``docs/review-followups.md`` (Phase 5 R3 sec P2 / arch P2) for the
-    full-atomic ``openat``-based fix earmarked for Phase 7.
+    When ``verify_under`` is set AND the platform supports the ``openat``
+    family (Linux, macOS, BSDs — see :func:`_has_openat_support`) we take an
+    **airtight** path: a single ``O_DIRECTORY|O_NOFOLLOW`` fd is acquired on
+    the resolved root, every intermediate directory is opened via
+    ``openat(dir_fd=...)`` with ``O_NOFOLLOW`` so a swapped parent symlink
+    raises ``ELOOP`` mid-walk, the tempfile is created with
+    ``O_CREAT|O_EXCL|O_NOFOLLOW`` against the pinned parent fd, and the
+    final ``rename`` uses ``src_dir_fd``/``dst_dir_fd`` so no path
+    traversal happens after the root was pinned. This closes the TOCTOU
+    residue documented in ``docs/review-followups.md`` (Phase 4–Phase 7).
+
+    On Windows or filesystems missing ``openat`` support, we fall back to a
+    **narrow** detect-after-the-fact strategy: pre-write walk of every
+    parent component via ``is_symlink`` (lstat semantics), then a post-rename
+    re-walk that raises ``OSError`` if any parent was swapped during the
+    race. The post-walk is an audit signal — by the time it raises, the file
+    has already been published under the swapped parent. The airtight path
+    above is preferred whenever the platform allows it.
     """
+
+    if verify_under is not None and _has_openat_support():
+        _safe_write_text_openat(path, content, mode, verify_under)
+        return
 
     if verify_under is not None:
         _ensure_directory_under_verified_root(path.parent, verify_under)
@@ -384,6 +504,144 @@ def safe_write_text(
                 tmp.unlink()
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Airtight openat() variant — used when verify_under is set on POSIX
+# ---------------------------------------------------------------------------
+
+
+def _has_openat_support() -> bool:
+    """Return True iff the platform exposes the full openat family we need.
+
+    Required syscalls and flags (all POSIX):
+        * ``os.O_DIRECTORY`` and ``os.O_NOFOLLOW`` constants.
+        * ``os.open`` / ``os.mkdir`` / ``os.rename`` / ``os.unlink`` /
+          ``os.fchmod`` honour the ``dir_fd=...`` keyword (advertised via
+          ``os.supports_dir_fd`` for ``open`` / ``mkdir`` / ``rename`` /
+          ``unlink``; ``fchmod`` is always available on POSIX).
+
+    Linux, macOS, *BSD all qualify. Windows does not — Python exposes none
+    of these constants there, and ``CreateFileW`` lacks an at-relative form.
+    """
+
+    if is_windows():
+        return False
+    if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")):
+        return False
+    supports = getattr(os, "supports_dir_fd", set())
+    needed = {os.open, os.mkdir, os.rename, os.unlink}
+    return needed.issubset(supports)
+
+
+def _safe_write_text_openat(
+    path: Path,
+    content: str,
+    mode: int,
+    verify_under: Path,
+) -> None:
+    """Airtight TOCTOU-safe write rooted at ``verify_under`` via ``openat``.
+
+    After opening ``verify_under`` once with ``O_DIRECTORY|O_NOFOLLOW``,
+    every subsequent syscall takes ``dir_fd=`` so no further path
+    resolution happens — the only inode the kernel can land on is the one
+    we pinned. Each intermediate directory is opened with ``O_NOFOLLOW``
+    so a symlink swapped in mid-walk raises ``ELOOP`` instead of letting
+    the write escape the root.
+    """
+
+    try:
+        resolved_root = verify_under.resolve(strict=True)
+    except OSError as exc:
+        raise OSError(f"verify_under root does not resolve: {verify_under}") from exc
+    if not resolved_root.is_dir():
+        raise OSError(f"verify_under root is not a directory: {verify_under}")
+    try:
+        rel = path.parent.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(
+            f"refusing to write {path}: parent {path.parent} not under {verify_under}",
+        ) from exc
+
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    root_flags = os.O_DIRECTORY | os.O_NOFOLLOW | cloexec
+    root_fd = os.open(str(resolved_root), root_flags)
+    parent_fd = root_fd
+    opened_intermediate: list[int] = []
+    try:
+        # Walk relative segments via openat(dir_fd=parent_fd).
+        for segment in rel.parts:
+            try:
+                os.mkdir(segment, mode=0o755, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            try:
+                next_fd = os.open(
+                    segment,
+                    os.O_DIRECTORY | os.O_NOFOLLOW | cloexec,
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                # ELOOP / ENOTDIR — symlink or non-dir at this segment.
+                raise OSError(
+                    f"refusing to write {path}: parent component {segment!r} "
+                    f"is a symlink or non-directory under {verify_under}",
+                ) from exc
+            if parent_fd is not root_fd:
+                opened_intermediate.append(parent_fd)
+            parent_fd = next_fd
+
+        # Create the tempfile leaf with O_CREAT|O_EXCL|O_NOFOLLOW against
+        # the pinned parent fd — no path traversal possible.
+        tmp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
+        create_flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | cloexec
+        )
+        tmp_fd = os.open(tmp_name, create_flags, mode=mode, dir_fd=parent_fd)
+        try:
+            # umask may strip our mode bits; force them with fchmod while we
+            # still own the fd. Best-effort: filesystems that ignore mode are OK.
+            try:
+                os.fchmod(tmp_fd, mode)
+            except OSError:
+                pass
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fp:
+                fp.write(content)
+            tmp_fd = -1  # ownership transferred to fp
+            # Atomic in-directory rename. Both src and dst resolved through
+            # the same dir_fd so no symlink chase is possible.
+            os.rename(
+                tmp_name,
+                path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except BaseException:
+            if tmp_fd >= 0:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        for fd in opened_intermediate:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if parent_fd is not root_fd:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
 
 
 def _verify_parents_no_symlink(path: Path, root: Path) -> None:
@@ -474,10 +732,12 @@ __all__ = [
     "REDACTION_PLACEHOLDER",
     "SECRET_ENV_NAME_PATTERN",
     "anonymise_paths",
+    "augment_path_env_for_windows",
     "configure_utf8_stdio",
     "ensure_directory",
     "expand_user_path",
     "is_windows",
+    "prepare_subprocess_command",
     "redact_command",
     "redact_text",
     "resolve_executable",
@@ -486,4 +746,5 @@ __all__ = [
     "truncate_middle",
     "utc_now_iso",
     "windows_escape",
+    "windows_npm_paths",
 ]

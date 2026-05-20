@@ -33,7 +33,9 @@ from agy_mcp.adapters.base import (
 # without sibling-private imports.
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
 from agy_mcp.utils import (
+    augment_path_env_for_windows,
     is_windows,
+    prepare_subprocess_command,
     scrub_env,
     truncate_middle,
     utc_now_iso,
@@ -164,11 +166,13 @@ class GeminiCliBackend(BaseAdapter):
         self._emit(ctx, _gemini_init_event(request=request, cap=cap))
 
         env = self._build_subprocess_env(request)
+        augment_path_env_for_windows(env)
+        popen_arg, _wrapped = prepare_subprocess_command(argv, env)
         start = time.time()
         proc: subprocess.Popen | None = None
         try:
             proc = subprocess.Popen(  # noqa: S603
-                argv,
+                popen_arg,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

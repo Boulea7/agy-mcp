@@ -10,9 +10,11 @@ import pytest
 from agy_mcp.utils import (
     REDACTION_PLACEHOLDER,
     anonymise_paths,
+    augment_path_env_for_windows,
     ensure_directory,
     expand_user_path,
     is_windows,
+    prepare_subprocess_command,
     redact_command,
     redact_text,
     resolve_executable,
@@ -21,6 +23,7 @@ from agy_mcp.utils import (
     truncate_middle,
     utc_now_iso,
     windows_escape,
+    windows_npm_paths,
 )
 
 
@@ -323,3 +326,223 @@ def test_redact_text_anonymises_home_path_alongside_secret():
     assert "/Users/alice" not in out
     assert "sk-abcdef1234567890abcdef1234567890" not in out
     assert "~/" in out
+
+
+# ---------------------------------------------------------------------------
+# Windows .cmd/.bat launch parity (mirror upstream upstream-reference)
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_subprocess_command_noop_on_posix(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: False)
+    argv = ["/usr/bin/agy", "--print=hello"]
+    cmd, wrapped = prepare_subprocess_command(argv, {})
+    assert cmd is argv
+    assert wrapped is False
+
+
+def test_prepare_subprocess_command_passes_through_exe_on_windows(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: True)
+    argv = [r"C:\bin\agy.exe", "--print=hi"]
+    cmd, wrapped = prepare_subprocess_command(argv, {"COMSPEC": r"C:\Windows\System32\cmd.exe"})
+    assert cmd is argv
+    assert wrapped is False
+
+
+def test_prepare_subprocess_command_wraps_cmd_on_windows(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: True)
+    argv = [r"C:\Users\dev\AppData\Roaming\npm\gemini.cmd", "--prompt=hello"]
+    cmd, wrapped = prepare_subprocess_command(argv, {"COMSPEC": r"C:\Windows\System32\cmd.exe"})
+    assert wrapped is True
+    assert isinstance(cmd, str)
+    assert cmd.startswith('"C:\\Windows\\System32\\cmd.exe" /d /s /c "')
+    assert "gemini.cmd" in cmd
+    assert "--prompt=hello" in cmd
+
+
+def test_prepare_subprocess_command_wraps_bat_on_windows(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: True)
+    argv = [r"C:\tools\agy.bat", "arg with space", "needs&quote"]
+    cmd, _ = prepare_subprocess_command(argv, {})
+    # Empty COMSPEC falls back to bare "cmd.exe".
+    assert cmd.startswith('"cmd.exe" /d /s /c ')
+    # Whitespace + metacharacters trigger quoting + escaping.
+    assert "arg with space" in cmd
+    assert "needs&quote" in cmd or "needs^&quote" in cmd or '"needs&quote"' in cmd
+
+
+def test_prepare_subprocess_command_escapes_percent_and_caret(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: True)
+    argv = [r"C:\bin\foo.bat", "%PATH%", "10^2"]
+    cmd, wrapped = prepare_subprocess_command(argv, {"COMSPEC": "cmd.exe"})
+    assert wrapped is True
+    # Percent expansion must be neutralised so cmd.exe does NOT expand %PATH%.
+    assert "%%PATH%%" in cmd
+    # Caret must be doubled so cmd.exe does not eat the next character.
+    assert "10^^2" in cmd
+
+
+def test_prepare_subprocess_command_handles_empty_argv():
+    cmd, wrapped = prepare_subprocess_command([], {})
+    assert cmd == []
+    assert wrapped is False
+
+
+def test_windows_npm_paths_empty_on_posix(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: False)
+    assert windows_npm_paths() == []
+
+
+def test_windows_npm_paths_filters_to_existing_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: True)
+    real = tmp_path / "npm-real"
+    real.mkdir()
+    fake = tmp_path / "npm-missing"
+    monkeypatch.setenv("APPDATA", str(real.parent))
+    monkeypatch.setenv("LOCALAPPDATA", str(fake))
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(real))
+    # `real / "npm"` does not exist (parent is real but child doesn't), so APPDATA candidate is dropped.
+    # `NPM_CONFIG_PREFIX = real` exists -> kept.
+    paths = windows_npm_paths()
+    assert real in paths
+    # The candidate "<LOCALAPPDATA>/npm" must NOT appear (parent dir does not exist).
+    assert all("npm-missing" not in str(p) for p in paths)
+
+
+def test_augment_path_env_noop_on_posix(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: False)
+    env = {"PATH": "/usr/bin"}
+    out = augment_path_env_for_windows(env)
+    assert out is env
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_augment_path_env_prepends_npm_paths_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: True)
+    npm_dir = tmp_path / "npm-global"
+    npm_dir.mkdir()
+    monkeypatch.setattr(
+        "agy_mcp.utils.windows_npm_paths", lambda: [npm_dir]
+    )
+    env = {"Path": r"C:\Windows\System32"}
+    augment_path_env_for_windows(env)
+    # Case-insensitive lookup: existing 'Path' key reused, not duplicated.
+    assert "PATH" not in env or env.get("PATH") == env.get("Path")
+    final = env.get("Path") or env.get("PATH")
+    assert final.startswith(str(npm_dir))
+    assert r"C:\Windows\System32" in final
+
+
+def test_augment_path_env_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr("agy_mcp.utils.is_windows", lambda: True)
+    npm_dir = tmp_path / "npm-global"
+    npm_dir.mkdir()
+    monkeypatch.setattr(
+        "agy_mcp.utils.windows_npm_paths", lambda: [npm_dir]
+    )
+    env = {"PATH": str(npm_dir) + os.pathsep + r"C:\Windows"}
+    augment_path_env_for_windows(env)
+    # No duplicate prepend.
+    assert env["PATH"].count(str(npm_dir)) == 1
+
+
+# ---------------------------------------------------------------------------
+# openat-based airtight TOCTOU (POSIX only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_openat_support_available_on_posix():
+    """Modern Linux / macOS expose the full openat family we need."""
+
+    from agy_mcp.utils import _has_openat_support
+
+    assert _has_openat_support() is True
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_openat_writes_under_root(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "nested" / "deep" / "config.json"
+    safe_write_text(target, '{"ok":true}', verify_under=root)
+    assert target.read_text(encoding="utf-8") == '{"ok":true}'
+    # mode = 0o644 default
+    mode = target.stat().st_mode & 0o777
+    assert mode == 0o644
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_openat_refuses_symlinked_intermediate(tmp_path):
+    """Airtight path raises immediately on a symlinked parent component."""
+
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    # Pre-plant a symlink at the intermediate dir we are about to traverse.
+    (root / "nested").symlink_to(outside, target_is_directory=True)
+    target = root / "nested" / "config.json"
+    with pytest.raises(OSError, match="symlink|non-directory"):
+        safe_write_text(target, '{}', verify_under=root)
+    # The write must not have leaked into `outside`.
+    assert not (outside / "config.json").exists()
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_openat_refuses_path_outside_root(tmp_path):
+    root = tmp_path / "root"
+    sibling = tmp_path / "sibling"
+    root.mkdir()
+    sibling.mkdir()
+    # ``path.parent`` literally outside the root: relative_to fails.
+    with pytest.raises(OSError, match="not under"):
+        safe_write_text(sibling / "out.txt", "nope", verify_under=root)
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_openat_does_not_leak_tmp_on_success(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "sub" / "f.txt"
+    safe_write_text(target, "ok", verify_under=root)
+    # Only the final file lives in the leaf dir, no .<name>.<hex>.tmp orphans.
+    leaf = list(target.parent.iterdir())
+    assert leaf == [target]
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_openat_overwrites_existing_target(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "data.txt"
+    safe_write_text(target, "v1", verify_under=root)
+    safe_write_text(target, "v2", verify_under=root)
+    assert target.read_text(encoding="utf-8") == "v2"
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_openat_idempotent_on_existing_intermediates(tmp_path):
+    """Mid-walk mkdir of an existing dir must not abort the write."""
+
+    root = tmp_path / "root"
+    (root / "a" / "b").mkdir(parents=True)
+    target = root / "a" / "b" / "c.txt"
+    safe_write_text(target, "hello", verify_under=root)
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
+@pytest.mark.skipif(is_windows(), reason="openat is POSIX-only")
+def test_safe_write_text_falls_back_when_openat_unsupported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """If openat support is masked off, the detect-after-the-fact path still works."""
+
+    monkeypatch.setattr("agy_mcp.utils._has_openat_support", lambda: False)
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "fallback.txt"
+    safe_write_text(target, "fallback-ok", verify_under=root)
+    assert target.read_text(encoding="utf-8") == "fallback-ok"

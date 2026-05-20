@@ -41,7 +41,9 @@ from agy_mcp.adapters.base import (
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.utils import (
+    augment_path_env_for_windows,
     is_windows,
+    prepare_subprocess_command,
     scrub_env,
     truncate_middle,
     utc_now_iso,
@@ -311,11 +313,13 @@ class AgyPrintBackend(BaseAdapter):
         self._emit(ctx, _system_init_event(request=request, cap=cap))
 
         env = self._build_subprocess_env(request)
+        augment_path_env_for_windows(env)
+        popen_arg, _wrapped = prepare_subprocess_command(argv, env)
         start = time.time()
         proc: subprocess.Popen | None = None
         try:
             proc = subprocess.Popen(  # noqa: S603 - argv built from probed cap
-                argv,
+                popen_arg,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
