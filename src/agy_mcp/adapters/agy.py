@@ -213,7 +213,8 @@ class AgyPrintBackend(BaseAdapter):
         cap = self.detect()
         if not cap.bin_path:
             raise RuntimeError(
-                f"agy binary not found; pass --agy-bin or set AGY_BIN. {cap.warnings!r}"
+                "agy binary not found; set AGY_BIN or backend.agy_bin. "
+                f"{cap.warnings!r}"
             )
         if not cap.supports_print:
             raise RuntimeError(

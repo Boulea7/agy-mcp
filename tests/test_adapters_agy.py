@@ -117,7 +117,7 @@ def test_build_command_raises_without_binary(tmp_path, monkeypatch):
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
     backend = AgyPrintBackend(bin_override=str(tmp_path / "missing"))
     req = BridgeRequest(prompt="x", cwd=str(tmp_path))
-    with pytest.raises(RuntimeError, match="agy binary not found"):
+    with pytest.raises(RuntimeError, match="AGY_BIN or backend.agy_bin"):
         backend.build_command(req, log_path=None)
 
 
