@@ -127,7 +127,6 @@ Configurable via `~/.config/agy-mcp/config.toml`:
 ```toml
 [execute]
 worktree_default = true     # opt-out via false
-allow_write_default = false # opt-in via true (still requires per-call allow_write=True)
 ```
 
 Env var override: `AGY_MCP_WORKTREE_DEFAULT=0/1`.

@@ -116,7 +116,6 @@ they get the redacted error string.
 - `AGY_CLI_DISABLE_AUTO_UPDATE=1` — passed through to `agy` to keep
   builds reproducible.
 - `AGY_MCP_WORKTREE_DEFAULT=0/1` — overrides the config-file default.
-- `AGY_MCP_ALLOW_WRITE_DEFAULT=0/1` — overrides the write-default.
 - `AGY_MCP_BACKEND=auto|agy|gemini` — overrides backend selection.
 - `AGY_MCP_OUTPUT_PROTOCOL=raw|claude|codex` — overrides the wire format.
 

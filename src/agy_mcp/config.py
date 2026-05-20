@@ -161,7 +161,7 @@ def _from_toml(data: dict[str, Any]) -> Config:
 
     execute = ExecuteConfig(
         worktree_default=bool(execute_section.get("worktree_default", DEFAULT_WORKTREE)),
-        allow_write_default=bool(execute_section.get("allow_write_default", DEFAULT_ALLOW_WRITE)),
+        allow_write_default=DEFAULT_ALLOW_WRITE,
     )
     backend = BackendConfig(
         prefer=_coerce_str(backend_section.get("prefer"), DEFAULT_BACKEND),
@@ -184,9 +184,6 @@ def _from_toml(data: dict[str, Any]) -> Config:
 def _apply_env_overrides(config: Config) -> None:
     config.execute.worktree_default = _parse_bool_env(
         os.environ.get("AGY_MCP_WORKTREE_DEFAULT"), config.execute.worktree_default
-    )
-    config.execute.allow_write_default = _parse_bool_env(
-        os.environ.get("AGY_MCP_ALLOW_WRITE_DEFAULT"), config.execute.allow_write_default
     )
     env_backend = os.environ.get("AGY_MCP_BACKEND")
     if env_backend:

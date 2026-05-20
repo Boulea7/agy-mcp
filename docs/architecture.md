@@ -78,8 +78,7 @@ Resolution precedence (highest wins):
 
 1. Tool / CLI flag argument.
 2. Environment variable (`AGY_MCP_WORKTREE_DEFAULT`,
-   `AGY_MCP_ALLOW_WRITE_DEFAULT`, `AGY_MCP_BACKEND`,
-   `AGY_MCP_OUTPUT_PROTOCOL`).
+   `AGY_MCP_BACKEND`, `AGY_MCP_OUTPUT_PROTOCOL`).
 3. `~/.config/agy-mcp/config.toml` (or `%APPDATA%/agy-mcp/config.toml`).
 4. Built-in defaults.
 

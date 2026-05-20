@@ -241,7 +241,7 @@ class SafetyPolicy:
                 allowed=False,
                 reason=(
                     f"mode={request.mode!r} requires explicit allow_write=True; "
-                    "pass --allow-write or set AGY_MCP_ALLOW_WRITE_DEFAULT=1."
+                    "pass --allow-write for this call."
                 ),
                 warnings=warnings,
             )

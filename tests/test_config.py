@@ -35,7 +35,6 @@ def test_toml_overrides_defaults(isolated_env, tmp_path: Path):
         """
 [execute]
 worktree_default = false
-allow_write_default = true
 
 [backend]
 prefer = "agy"
@@ -54,7 +53,7 @@ retention_days = 7
     )
     config = load_config(path=cfg)
     assert config.execute.worktree_default is False
-    assert config.execute.allow_write_default is True
+    assert config.execute.allow_write_default is False
     assert config.backend.prefer == "agy"
     assert config.backend.output_protocol == "raw"
     assert config.backend.agy_bin == "/opt/agy/bin/agy"
