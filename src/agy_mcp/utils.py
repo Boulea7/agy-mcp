@@ -228,8 +228,8 @@ _WINDOWS_ESCAPE_TABLE = str.maketrans(
 def windows_escape(value: str) -> str:
     """Escape control characters so a string can survive a cmd.exe round-trip.
 
-    Mirrors the helper used by upstream/reference; only intended for Windows.
-    Callers on POSIX should pass the prompt through ``argv`` unchanged.
+    Windows-only helper. POSIX callers should pass the prompt through ``argv``
+    unchanged.
     """
 
     if not is_windows():
@@ -245,8 +245,7 @@ def resolve_executable(name_or_path: str | os.PathLike[str]) -> str | None:
     npm global directories (``%APPDATA%/npm``, ``%LOCALAPPDATA%/npm``,
     ``%ProgramFiles%/nodejs``, ``%NPM_CONFIG_PREFIX%``) so that ``gemini``
     installed via ``npm i -g @google/gemini-cli`` resolves without the user
-    having to fix PATH manually — this matches upstream
-    ``upstream-reference``. Returns the absolute path or ``None``.
+    having to fix PATH manually. Returns the absolute path or ``None``.
     """
 
     import shutil
@@ -277,9 +276,9 @@ def resolve_executable(name_or_path: str | os.PathLike[str]) -> str | None:
 def windows_npm_paths() -> list[Path]:
     """Return existing npm-global install directories on Windows.
 
-    Upstream ``upstream-reference`` does the same probe so npm-shipped
-    ``gemini.cmd`` resolves even when the npm prefix isn't on PATH. POSIX
-    returns an empty list (no-op).
+    Probes well-known npm prefixes so npm-shipped ``gemini.cmd`` resolves
+    even when the npm prefix isn't on PATH. POSIX returns an empty list
+    (no-op).
     """
 
     if not is_windows():
@@ -327,10 +326,10 @@ def augment_path_env_for_windows(env: dict[str, str]) -> dict[str, str]:
 def _cmd_quote(arg: str) -> str:
     """Quote a single argument for cmd.exe consumption (Windows .cmd/.bat).
 
-    Mirrors the helper in upstream ``upstream-reference``. We escape
-    ``%`` (env-var expansion) and ``^`` (cmd escape char) BEFORE quoting,
-    then quote if the value contains a metachar or whitespace. Empty values
-    become explicit empty quotes so cmd.exe sees a positional argument.
+    We escape ``%`` (env-var expansion) and ``^`` (cmd escape char) BEFORE
+    quoting, then quote if the value contains a metachar or whitespace.
+    Empty values become explicit empty quotes so cmd.exe sees a positional
+    argument.
     """
 
     if not arg:

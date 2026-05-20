@@ -2,7 +2,7 @@
 
 Tools (all return dicts with stable keys; never raise across the wire):
 
-* ``agy`` — synchronous one-shot bridge call (compatible with upstream-reference).
+* ``agy`` — synchronous one-shot bridge call.
 * ``agy_start`` — spawn a background job, return ``status="running"`` envelope.
 * ``agy_continue`` — like ``agy``, but ``SESSION_ID`` is required.
 * ``agy_status`` — poll a running job's :class:`JobRecord`.

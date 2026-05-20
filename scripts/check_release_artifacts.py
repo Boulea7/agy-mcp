@@ -36,7 +36,6 @@ REQUIRED_SDIST_FILES: set[str] = {
     "pyproject.toml",
     "docs/architecture.md",
     "docs/cli-capabilities.md",
-    "docs/comparison-with-upstream-reference.md",
     "docs/examples.md",
     "docs/installation.md",
     "docs/output-strategy.md",

@@ -2,16 +2,62 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-462%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-479%20passed-brightgreen.svg)](#)
 [![English](https://img.shields.io/badge/English-README-blue.svg)](docs/README_EN.md)
 
 > **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
-> to **Google Antigravity CLI** (`agy`).
-> 继承 [`upstream/reference`](https://example.invalid/upstream) 与
-> [`upstream/reference`](https://example.invalid/upstream)
-> 的工程经验，并在其基础上增加 capability detection、长任务异步、双 backend 路由
-> （`agy` + `gemini-cli` 兼容回退）、安全策略、worktree 隔离、Codex / Antigravity skill、
-> 跨平台 doctor、稳定的 stream-json 兼容事件 schema。
+> to **Google Antigravity CLI** (`agy`)。
+> 自带 capability detection、长任务异步、双 backend 路由（`agy` +
+> `gemini-cli` 兼容回退）、安全策略、worktree 隔离、Codex / Antigravity
+> skill、跨平台 doctor、稳定的 stream-json 兼容事件 schema。
+
+---
+
+## 一键安装（推荐：让本地 agent 自己装）
+
+复制下面整段提示词，粘贴进你本地的 **Claude Code** 或 **OpenAI Codex
+CLI**（任选其一即可），它会自己读、自己执行、自己验证。无需你手动跑
+命令。
+
+````text
+请帮我把 agy-mcp 这个开源 MCP 安装好。具体目标：
+
+1. 用 uv tool 装本仓库的 console scripts（agymcp / agy-bridge /
+   agy-doctor / agy-install-skill）。如果本机没有 uv，先用
+   `curl -LsSf https://astral.sh/uv/install.sh | sh` 装好。
+2. 把 agy MCP server 注册到我当前正在使用的 agent 平台：
+   - 如果你是 Claude Code，执行：
+     `claude mcp add agy -s user --transport stdio -- agymcp`
+     并用 `claude mcp list` 确认 `agy: ✓ Connected`。
+   - 如果你是 OpenAI Codex CLI，向 `~/.codex/config.toml` 追加：
+     ```toml
+     [mcp_servers.agy]
+     command = "agymcp"
+     args = []
+     ```
+     并重启 Codex 会话让其生效。
+3. 装协作 SKILL（让本平台知道何时调用 agy）：直接调用刚才暴露的
+   `agy_install_skill` MCP 工具，参数 `targets=["all"], scope="user"`。
+   它会写到 `~/.claude/skills/`、`~/.agents/skills/`、`~/.agy/skills/`
+   三处。装完后告诉我重启窗口让 SKILL 生效。
+4. 验证：调用 `agy_doctor` MCP 工具，把返回的 JSON 完整贴给我看；
+   预期 `healthy=true`，6 项 check 全部 `ok=true`。如果 `auth` 这项
+   显示未登录，告诉我手动跑一次 `agy --version` 触发 OAuth 流程，
+   然后再调一次 `agy_doctor`。
+5. 安装来源：`git+https://github.com/Boulea7/agy-mcp.git`（公网安装）
+   或者本地 `--from <项目本地绝对路径>`（如果我提示你用本地仓库）。
+
+约束：
+- 不要 push 任何东西、不要改我的 .gitconfig。
+- 在没有我确认前不要调真实的 `agy` 模型（只能跑 doctor / dry-run）。
+- 任何写入操作（包括上面这些）做之前先简短说一下要做什么，等我点头
+  再执行；如果你的当前权限模式允许 acceptEdits，就直接执行。
+
+每完成一步给我一行汇报，全部完成后给出一份 4 行总结：装在哪、9 个
+MCP 工具是否齐、SKILL 落地路径、剩余可选项。
+````
+
+> 如果你已经习惯手动安装，下面的 [5 分钟上手](#5-分钟上手) 仍然有效。
 
 ---
 
@@ -57,7 +103,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 
 | 工具 | 用途 |
 |---|---|
-| `agy` | 同步一次性调用（兼容 upstream-reference 参数 + 新增 `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`） |
+| `agy` | 同步一次性调用（标准 PROMPT / cd / sandbox / SESSION_ID 参数集 + 新增 `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`） |
 | `agy_continue` | 续 `SESSION_ID` |
 | `agy_start` | 后台启动长任务，立即返回 `job_id` |
 | `agy_status` | 查 job 状态：running / completed / failed / cancelled |
@@ -115,7 +161,6 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 | [`docs/security.md`](docs/security.md) | 威胁模型、防护清单、明确不防御项 |
 | [`docs/cli-capabilities.md`](docs/cli-capabilities.md) | `agy --help` 实测 + capability 矩阵（CLI 升级时刷新） |
 | [`docs/examples.md`](docs/examples.md) | 6 个典型场景：review、prototype、long、continue、doctor、install |
-| [`docs/comparison-with-upstream-reference.md`](docs/comparison-with-upstream-reference.md) | 继承自 `upstream-reference` 的部分 + 扩展的部分 + 主动改的部分 |
 
 英文版 README：[`docs/README_EN.md`](docs/README_EN.md)。
 
@@ -124,15 +169,11 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 ```bash
 # clone 后
 uv sync
-uv run pytest        # 全量 462 个测试
+uv run pytest        # 全量 479 个测试
 uv run agymcp        # 启动 MCP stdio server（人工测试用）
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 uv run agy-doctor    # 环境与鉴权探测
 ```
-
-参考仓库放在 `.refs/`（gitignored）；运行 `git clone https://example.invalid/upstream
-.refs/upstream-reference && git clone https://example.invalid/upstream
-.refs/upstream-reference` 可拉下来对比。
 
 ## License
 

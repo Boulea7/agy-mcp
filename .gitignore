@@ -78,3 +78,13 @@ secret*
 *.log
 tmp/
 .tmp/
+
+# Internal-only docs that must never be published. Internal audit trails,
+# operator-side notes, and any draft comparison docs stay untracked under
+# docs/ as local working files; never stage them.
+docs/reference-review.md
+docs/review-followups.md
+docs/local-test-checklist.md
+docs/internal-*.md
+docs/private-*.md
+docs/audit-*.md

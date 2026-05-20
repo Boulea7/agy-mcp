@@ -180,7 +180,7 @@ on canonical events so future agy event types survive without a schema bump).
 
 | Tool | Sync | Purpose |
 |---|---|---|
-| `agy` | yes (async-wrapped) | One-shot synchronous call; upstream-reference-compatible arg set + new `mode`/`backend`/`output_protocol`/`worktree`/`allow_write`/`extra_env` |
+| `agy` | yes (async-wrapped) | One-shot synchronous call; standard PROMPT / cd / sandbox / SESSION_ID arg set + new `mode`/`backend`/`output_protocol`/`worktree`/`allow_write`/`extra_env` |
 | `agy_continue` | yes (async-wrapped) | Resume a prior `SESSION_ID` |
 | `agy_start` | no | Spawn a background job; returns `job_id` immediately |
 | `agy_status` | yes | `running` / `completed` / `failed` / `cancelled` + timing |
@@ -210,4 +210,3 @@ land in the caller's transcript.
 - `docs/security.md` — threat model and what is / is not defended.
 - `docs/cli-capabilities.md` — what `agy --help` actually reports (refreshed when the CLI is updated).
 - `docs/examples.md` — six end-to-end usage scenarios.
-- `docs/comparison-with-upstream-reference.md` — what we inherited and what we extended.

@@ -348,7 +348,7 @@ def test_redact_text_anonymises_home_path_alongside_secret():
 
 
 # ---------------------------------------------------------------------------
-# Windows .cmd/.bat launch parity (mirror upstream upstream-reference)
+# Windows .cmd/.bat launch parity
 # ---------------------------------------------------------------------------
 
 

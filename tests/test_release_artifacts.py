@@ -22,7 +22,7 @@ _check_files = release_audit._check_files
 def test_release_check_rejects_root_dotdir_leaks():
     problems = _check_files(
         "agy-mcp.tar.gz",
-        [".refs/upstream-reference/README.md", ".agy-mcp/state.json", ".claude/config.json"],
+        [".refs/upstream/README.md", ".agy-mcp/state.json", ".claude/config.json"],
         required=set(),
         allowed=set(),
     )
