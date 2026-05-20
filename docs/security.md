@@ -135,7 +135,7 @@ Every string that leaves the process (`error`, `warnings`,
 - PEM blocks → `***`
 - JWT tokens → `***`
 - AWS access key IDs (`AKIA...`) → `***`
-- `Bearer <token>` / `Authorization: <scheme> <token>` → `Bearer ***` / `Authorization: <scheme> ***`
+- `Bearer <token>` / `Authorization: <scheme> <token>` → `Bearer ***` / `Authorization: <scheme> ***`. The same redaction is applied to a wider header allow-list driven by `_AUTHZ_HEADER` (`utils.py:62-66`): `Authorization`, `X-Api-Key`, `X-Auth-Token`, `X-Auth-Key`, `Api-Key`, `Apikey`, `Proxy-Authorization`, `X-Goog-Api-Key`, `X-OpenAI-Key`, `X-Anthropic-Key`.
 - Slack tokens (`xoxb-…`, `xoxp-…`) → `***`
 - GitHub fine-grained PATs (`github_pat_…`) → `***`
 - Generic high-entropy key=value secrets → `***`
@@ -163,7 +163,9 @@ deadlock.
   `scope` allow-listed. `project_root` validated (leaf is not a
   symlink) before `install_skills` runs. Deliberate
   defence-in-depth with `_expand_targets` doing the same allow-list
-  check (Phase 7 R1 arch P2-2).
+  check (Phase 7 R1 arch P2-2). The leaf check is only the surface
+  layer; the **ancestor symlink-swap window** is closed at write
+  time by the `safe_write_text` parent walk described in § 5.
 - `agy_status` / `agy_read` / `agy_cancel`: `job_id` must match
   `^job_[A-Za-z0-9_-]{1,80}$`. Oversized values are rejected with a
   structured error.

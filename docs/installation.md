@@ -23,7 +23,19 @@ The recommended path is `uv tool install` — fast, isolated, and easy to
 upgrade.
 
 ```bash
-# Install uv if you don't have it
+# Install uv if you don't have it. The curl-pipe-sh form below is a
+# trust delegation to astral.sh; if you'd rather verify the installer
+# before running it, download to a file and check the SHA-256 first:
+#
+#   curl -fsSL -o /tmp/uv-install.sh https://astral.sh/uv/install.sh
+#   shasum -a 256 /tmp/uv-install.sh   # or `sha256sum` on Linux
+#   # cross-reference against the hash published on https://astral.sh/uv/install.sh
+#   sh /tmp/uv-install.sh
+#
+# Or skip the installer entirely and use Homebrew / pipx if you
+# already trust those:
+#   brew install uv
+#   pipx install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Install agy-mcp directly from the git repo
@@ -141,8 +153,23 @@ SKILL.md (installed in step 4) describes **how**.
 uv tool upgrade agy-mcp
 ```
 
-After upgrading the `agy` CLI in place, call `agy_doctor(force_refresh=True)`
-so the bridge re-probes capabilities instead of returning a cached version.
+After upgrading the `agy` CLI in place, call the doctor with
+`force_refresh=True` so the bridge re-probes capabilities instead of
+returning a cached version:
+
+```python
+# From an MCP-aware caller (Claude Code, Codex):
+agy_doctor(force_refresh=True)
+```
+
+```bash
+# Or from the shell (no MCP client running):
+python -m agy_mcp.doctor
+```
+
+The shell variant always re-probes; the MCP tool caches between
+calls because the probe shells out to `agy --help` / `agy --version`
+and shouldn't repeat per invocation.
 
 ## Uninstall
 

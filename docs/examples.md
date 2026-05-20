@@ -143,9 +143,10 @@ report = out["report"]
 #   {"name": "agy_binary",    "ok": True,
 #    "detail": "agy 1.0.0 at ~/.local/bin/agy"}
 #   {"name": "gemini_binary", "ok": True or False, ...}
-#       # gemini_binary may report ok=False with severity="warning":
-#       # gemini is a fallback backend, not required, so this is fine
-#       # unless you explicitly set backend="gemini".
+#       # gemini is an OPTIONAL fallback backend — `agy-mcp` works
+#       # without it. ok=False with severity="warning" is normal; only
+#       # an explicit `backend="gemini"` call needs the binary, and
+#       # then the doctor warning becomes the prerequisite check.
 #   {"name": "auth",          "ok": True,
 #    "detail": "Google OAuth credentials present at ~/.gemini/oauth_creds.json"}
 #   {"name": "session_store", "ok": True,
