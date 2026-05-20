@@ -82,6 +82,12 @@ def test_bridge_request_rejects_oversized_timeout():
     assert "timeout exceeds" in str(excinfo.value)
 
 
+def test_bridge_request_rejects_oversized_session_id():
+    with pytest.raises(ValidationError) as excinfo:
+        BridgeRequest(prompt="x", session_id="s" * 97)
+    assert "session_id exceeds" in str(excinfo.value)
+
+
 def test_bridge_request_rejects_oversized_max_output_chars():
     """Phase 8 R1 arch P2-1: max_output_chars is capped at 8 MiB so
     a hostile caller cannot ask the bridge to buffer an unbounded

@@ -45,6 +45,7 @@ _EXTRA_ENV_MAX_VALUE_LEN = 4096
 _PROMPT_MAX_CHARS = 256_000          # ~256 KiB; well under any platform's argv cap when fused as --print=<value>
 _TIMEOUT_MAX_SECONDS = 24 * 60 * 60  # 24h ceiling for the synchronous call
 _MAX_OUTPUT_CHARS_CEIL = 8 * 1024 * 1024  # 8 MiB buffered transcript ceiling
+_SESSION_ID_MAX_CHARS = 96
 
 # ---------------------------------------------------------------------------
 # Capability — runtime detection result
@@ -146,6 +147,15 @@ class BridgeRequest(BaseModel):
             raise ValueError(
                 f"timeout exceeds {_TIMEOUT_MAX_SECONDS} seconds "
                 f"({value} given); use mode='long' for jobs that exceed 24h",
+            )
+        return value
+
+    @field_validator("session_id")
+    @classmethod
+    def _session_id_bounded(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > _SESSION_ID_MAX_CHARS:
+            raise ValueError(
+                f"session_id exceeds {_SESSION_ID_MAX_CHARS} characters",
             )
         return value
 

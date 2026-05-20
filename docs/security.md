@@ -45,6 +45,8 @@ Pydantic v2 with `extra="forbid"`. Notable validators:
 - `max_output_chars`: 1 ≤ value ≤ 8 MiB (caps the in-process buffered
   transcript; the full stream is always persisted in
   `events.jsonl`).
+- `SESSION_ID` / `session_id`: max 96 chars before it can seed a
+  conversation resume or worktree name.
 
 ### 2. Deny-list (`safety.py::SafetyPolicy`)
 

@@ -145,6 +145,7 @@ class BridgeRequest(BaseModel):
     allow_write: bool = False
     worktree: bool | None = None          # None -> use config default
     max_output_chars: int = 60000         # 1 ≤ value ≤ 8 MiB
+    session_id: str | None = None         # max 96 chars
     backend: Literal["auto", "agy", "gemini"] = "auto"
     output_protocol: Literal["raw", "claude", "codex"] = "claude"
     extra_env: dict[str, str] = {}        # validated: ^[A-Z_][A-Z0-9_]*$,
