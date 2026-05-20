@@ -1047,9 +1047,81 @@ def test_tool_response_models_support_dict_access(reset_state):
     assert c.signalled is True
     keys = list(c.keys())
     assert {"success", "error", "job_id", "signalled"} <= set(keys)
+    assert list(iter(c)) == keys
+    assert dict(c)["job_id"] == "job_x"
 
     b = BridgeResponse(success=True, cwd="/tmp")
     assert b["cwd"] == "/tmp"
     assert b.success is True
     with pytest.raises(KeyError):
         b["does_not_exist"]
+
+
+def test_all_tool_output_models_round_trip_json(reset_state):
+    """Every MCP tool should advertise an outputSchema whose backing model
+    can survive pydantic -> JSON -> pydantic round-trips. This pins the
+    structuredContent contract independently of FastMCP's text fallback.
+    """
+
+    from agy_mcp.models import (
+        BridgeResponse,
+        CancelToolResponse,
+        DoctorToolResponse,
+        InstallSkillToolResponse,
+        JobRecord,
+        ReadToolResponse,
+        SessionsToolResponse,
+        StatusToolResponse,
+    )
+
+    async def _get_tools() -> list:
+        return await server.mcp.list_tools()
+
+    tools = {tool.name: tool for tool in asyncio.run(_get_tools())}
+    samples = {
+        "agy": BridgeResponse(success=True, SESSION_ID="sess-1"),
+        "agy_continue": BridgeResponse(success=True, SESSION_ID="sess-2"),
+        "agy_start": BridgeResponse(
+            success=True,
+            job_id="job_roundtrip",
+            status="running",
+        ),
+        "agy_status": StatusToolResponse(
+            success=True,
+            record=JobRecord(job_id="job_roundtrip", status="completed"),
+        ),
+        "agy_read": ReadToolResponse(
+            success=True,
+            job_id="job_roundtrip",
+            events=[{"type": "assistant", "text": "ok"}],
+            count=1,
+        ),
+        "agy_cancel": CancelToolResponse(
+            success=True,
+            job_id="job_roundtrip",
+            signalled=False,
+        ),
+        "agy_sessions": SessionsToolResponse(
+            success=True,
+            count=1,
+            records=[JobRecord(job_id="job_roundtrip")],
+        ),
+        "agy_doctor": DoctorToolResponse(
+            success=True,
+            report={"checks": []},
+            version="0.1.0",
+        ),
+        "agy_install_skill": InstallSkillToolResponse(
+            success=True,
+            installed=[{"target": "claude", "path": "/tmp/SKILL.md"}],
+        ),
+    }
+
+    assert set(samples).issubset(tools.keys())
+    for name, sample in samples.items():
+        out_schema = getattr(tools[name], "outputSchema", None)
+        assert out_schema is not None, f"{name} missing outputSchema"
+        assert out_schema.get("type") == "object"
+        json_blob = sample.model_dump_json()
+        restored = sample.__class__.model_validate_json(json_blob)
+        assert restored.model_dump(mode="json") == sample.model_dump(mode="json")
