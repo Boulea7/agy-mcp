@@ -272,6 +272,12 @@ def test_safe_write_text_fallback_path_still_writes(tmp_path, monkeypatch):
         ("nothing to anonymise here", "nothing to anonymise here"),
         ("", ""),
         (r"C:\Users\carol\Documents", r"~/Documents"),
+        # R2 N1: Windows long-path \\?\ prefix.
+        (r"\\?\C:\Users\dave\proj\main.py", r"~/proj\main.py"),
+        # R2 N1: mixed forward-slash form Windows often emits in tracebacks.
+        (r"C:/Users/eve/proj/main.py", r"~/proj/main.py"),
+        # R2 N1: UNC path.
+        (r"\\server\share\Users\frank\file.txt", r"~/file.txt"),
     ],
 )
 def test_anonymise_paths(raw, expected):

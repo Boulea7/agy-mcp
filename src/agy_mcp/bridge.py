@@ -279,17 +279,33 @@ def main(argv: list[str] | None = None) -> int:
     config = get_config()
     safety = SafetyPolicy.from_config(config)
 
+    # Build the BridgeRequest first so pydantic validators (empty prompt,
+    # positive timeout, etc.) run BEFORE the --detach check (Phase 3 R2 N4).
+    # Otherwise --detach lets malformed argv through with raw args.cd echoed
+    # back in the response.
+    try:
+        request = _request_from_args(args, config)
+    except Exception as exc:  # noqa: BLE001 - surface validation as envelope
+        response = BridgeResponse(
+            success=False,
+            error=safety.redact(str(exc)),
+            cwd=args.cd,
+            adapter=AdapterMetadata(),
+        ).touch()
+        json.dump(response.model_dump(exclude_none=False), sys.stdout)
+        sys.stdout.write("\n")
+        return 1
+
     if args.detach:
         # Refuse loudly until Phase 4 wires the supervisor in — silent no-op
         # was the worst of both worlds (Phase 3 review P3.1).
         response = BridgeResponse(
             success=False,
             error="--detach is not implemented yet (reserved for Phase 4 supervisor)",
-            cwd=args.cd,
+            cwd=request.cwd,
             adapter=AdapterMetadata(),
         ).touch()
     else:
-        request = _request_from_args(args, config)
         response = _run(request, config, safety)
     json.dump(response.model_dump(exclude_none=False), sys.stdout)
     sys.stdout.write("\n")
@@ -405,7 +421,12 @@ def _run_unsafe(
                 try:
                     cleanup_worktree(worktree_handle, force=True)
                 except WorktreeError as exc:
-                    worktree_warnings.append(f"worktree cleanup failed: {exc}")
+                    # Symmetry with the run_error branch above — git stderr
+                    # is unlikely to contain secrets but we redact for the
+                    # same defense-in-depth reason (Phase 3 R2 P3c).
+                    worktree_warnings.append(
+                        f"worktree cleanup failed: {safety.redact(str(exc))}"
+                    )
 
     all_warnings = [*route_warnings, *worktree_warnings, *cap.warnings]
 

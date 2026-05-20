@@ -222,3 +222,65 @@ def test_from_config_picks_safety_section():
     cfg.safety.scrub_extra_env = ["BLAH"]
     pol = SafetyPolicy.from_config(cfg)
     assert "BLAH" in pol.config.scrub_extra_env
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 R2 hardening
+# ---------------------------------------------------------------------------
+
+
+def test_redact_skips_malformed_extra_pattern():
+    """R2 P3b: a malformed extra pattern in config must not crash redact()."""
+
+    pol = _policy(redact_extra_patterns=[
+        r"valid-\d+",
+        r"[unterminated",   # broken regex
+        r"INTERNAL-[a-z]+",
+    ])
+    # Should NOT raise re.error; bad entry is silently skipped.
+    out = pol.redact("ticket valid-12345 internal-secret")
+    assert "valid-12345" not in out
+    # The other valid pattern still applies.
+    out2 = pol.redact("ref INTERNAL-foo here")
+    assert "INTERNAL-foo" not in out2
+
+
+def test_redact_thread_safe_under_concurrent_calls():
+    """R2 N2: SafetyPolicy.redact called from multiple adapter reader
+    threads at once must never raise or return corrupted text."""
+
+    import threading
+
+    pol = _policy(redact_extra_patterns=[r"TOK-[a-z0-9]+"])
+    errors: list[Exception] = []
+    barrier = threading.Barrier(16)
+
+    def worker():
+        try:
+            barrier.wait()
+            for _ in range(500):
+                out = pol.redact("call TOK-abc123 here and TOK-xyz789 there")
+                assert "TOK-abc123" not in out
+                assert "TOK-xyz789" not in out
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+
+
+def test_redact_cache_invalidates_when_signature_changes():
+    """R2 (cache correctness): mutating config.redact_extra_patterns between
+    calls must recompile, not serve a stale tuple."""
+
+    pol = _policy(redact_extra_patterns=[r"FIRST-\d+"])
+    assert "***" in pol.redact("FIRST-123 hello")
+    # Mutate the same list in place — the cache key is signature-based.
+    pol.config.redact_extra_patterns = [r"SECOND-\d+"]
+    out = pol.redact("FIRST-123 and SECOND-456")
+    assert "FIRST-123" in out      # no longer redacted
+    assert "SECOND-456" not in out  # new pattern took effect

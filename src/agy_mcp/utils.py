@@ -68,15 +68,23 @@ _AUTHZ_HEADER = re.compile(
 REDACTION_PLACEHOLDER = "***"
 
 # Anonymise per-user paths to keep operator usernames + tooling layout out
-# of error envelopes (Phase 3 review M3). The regex collapses leading
-# ``/Users/<u>/`` (macOS) and ``/home/<u>/`` (Linux) to ``~/`` so the rest
-# of the path stays diagnostic. Windows ``C:\Users\<u>\`` is normalised
-# similarly. We intentionally keep relative paths and ``/etc``-style system
-# paths untouched.
+# of error envelopes (Phase 3 review M3 + R2 N1). The regex set covers:
+#   * Windows native:  C:\Users\<u>\...
+#   * Windows long path: \\?\C:\Users\<u>\...
+#   * UNC: \\server\share\Users\<u>\...
+#   * Mixed / forward-slash form on Windows: C:/Users/<u>/...
+#   * POSIX:  /Users/<u>/...   (macOS)
+#             /home/<u>/...    (Linux)
+# Order matters: Windows patterns run BEFORE the POSIX ``/Users/`` rule so
+# a string like ``C:/Users/<u>/`` gets the drive prefix stripped together
+# with the user segment, rather than leaving a stray ``C:~/`` behind.
 _HOME_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Windows: optional ``\\?\`` long-path prefix, drive letter, both \ and /.
+    re.compile(r"(?i)(?:\\\\\?\\)?[A-Z]:[\\/]Users[\\/][^\\/\s\"']+[\\/]"),
+    # UNC ``\\server\share\Users\<u>\``.
+    re.compile(r"(?i)\\\\[^\\/\s\"']+\\[^\\/\s\"']+\\Users\\[^\\/\s\"']+\\"),
     re.compile(r"/Users/[^/\s\"']+/"),
     re.compile(r"/home/[^/\s\"']+/"),
-    re.compile(r"(?i)C:\\Users\\[^\\\s\"']+\\"),
 )
 
 

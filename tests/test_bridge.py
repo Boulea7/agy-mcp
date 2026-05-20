@@ -880,6 +880,28 @@ def test_main_rejects_detach(monkeypatch, capsys, tmp_path: Path):
     assert "--detach" in payload["error"]
 
 
+def test_main_detach_rejects_invalid_request_first(monkeypatch, capsys, tmp_path: Path):
+    """Phase 3 R2 N4: --detach with an invalid request (e.g. empty prompt)
+    must surface the pydantic validation error, not the detach-not-implemented
+    placeholder — input validation runs before detach handling."""
+
+    monkeypatch.setattr("agy_mcp.bridge.get_config", lambda: _default_config())
+    rc = main(
+        [
+            "--PROMPT", "   ",   # whitespace-only, BridgeRequest validator rejects
+            "--cd", str(tmp_path),
+            "--detach",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    payload = json.loads(out.splitlines()[-1])
+    assert payload["success"] is False
+    # The error must mention "prompt", not "--detach".
+    assert "prompt" in payload["error"]
+    assert "--detach" not in payload["error"]
+
+
 def test_run_unsafe_no_backend_short_circuits(monkeypatch, tmp_path: Path):
     """Phase 3 R1 / P1.3: missing binary must NOT create a worktree before
     bailing out."""

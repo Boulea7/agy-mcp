@@ -8,6 +8,7 @@ can log and surface the reason.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -100,10 +101,15 @@ class SafetyPolicy:
     # Pre-compiled extra patterns; lazily populated so callers that mutate
     # ``config.redact_extra_patterns`` between requests still see fresh
     # regexes (Phase 3 review P2.2: avoid recompiling per redact call).
+    # ``_lock`` guards the two correlated fields so adapter reader threads
+    # (drain_stream, klog tail, stream-json reader) calling ``safety.redact``
+    # concurrently cannot observe a torn pattern/signature pair
+    # (Phase 3 R2 review N2).
     _redact_patterns: tuple[re.Pattern[str], ...] | None = field(
         default=None, repr=False,
     )
     _redact_signature: tuple[str, ...] | None = field(default=None, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
     def from_config(cls, config: Config | None = None) -> "SafetyPolicy":
@@ -123,10 +129,21 @@ class SafetyPolicy:
 
     def _extra_patterns(self) -> tuple[re.Pattern[str], ...]:
         signature = tuple(self.config.redact_extra_patterns)
-        if self._redact_patterns is None or self._redact_signature != signature:
-            self._redact_patterns = tuple(re.compile(p) for p in signature)
-            self._redact_signature = signature
-        return self._redact_patterns
+        with self._lock:
+            if self._redact_patterns is None or self._redact_signature != signature:
+                compiled: list[re.Pattern[str]] = []
+                for pat in signature:
+                    # Defense in depth: a malformed user pattern must not
+                    # crash _run via the top-level handler (Phase 3 R2 P3b).
+                    # Skip the bad entry, keep the others, log via Capability
+                    # warnings if/when SafetyPolicy gains that channel.
+                    try:
+                        compiled.append(re.compile(pat))
+                    except re.error:
+                        continue
+                self._redact_patterns = tuple(compiled)
+                self._redact_signature = signature
+            return self._redact_patterns
 
     def redact(self, text: str) -> str:
         return redact_text(text, extra_patterns=self._extra_patterns())

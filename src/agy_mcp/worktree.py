@@ -213,15 +213,23 @@ def create_worktree(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         # Roll back the empty dir we just allocated so a retry can succeed.
-        _safe_rmdir(worktree_path)
-        raise WorktreeError(f"git worktree add failed to launch: {exc}") from exc
+        rolled_back = _safe_rmdir(worktree_path)
+        suffix = "" if rolled_back else (
+            f" (leftover dir at {worktree_path} — remove manually before retry)"
+        )
+        raise WorktreeError(
+            f"git worktree add failed to launch: {exc}{suffix}"
+        ) from exc
     if proc.returncode != 0:
-        _safe_rmdir(worktree_path)
+        rolled_back = _safe_rmdir(worktree_path)
         # Surface a redact-safe error: git's stderr never contains secrets
         # in this command, but we cap it to keep the response envelope small.
         stderr = (proc.stderr or "").strip()[:500]
+        suffix = "" if rolled_back else (
+            f" (leftover dir at {worktree_path} — remove manually before retry)"
+        )
         raise WorktreeError(
-            f"git worktree add exited {proc.returncode}: {stderr}"
+            f"git worktree add exited {proc.returncode}: {stderr}{suffix}"
         )
 
     return WorktreeHandle(
@@ -268,15 +276,22 @@ def _ensure_parent_dir(parent: Path) -> None:
             pass
 
 
-def _safe_rmdir(path: Path) -> None:
-    """Remove an empty directory we just created. Never follows symlinks."""
+def _safe_rmdir(path: Path) -> bool:
+    """Remove an empty directory we just created. Never follows symlinks.
+
+    Returns True on success or when the path was already gone (idempotent).
+    Returns False if git partially populated the dir (``ENOTEMPTY``) or any
+    other failure — caller surfaces this so a stale leaf doesn't block a
+    retry under the same slug (Phase 3 R2 review N3).
+    """
 
     try:
         os.rmdir(path)
+        return True
+    except FileNotFoundError:
+        return True
     except OSError:
-        # Either already gone, contains stuff git wrote, or a symlink we
-        # refused to traverse. Leave it for human inspection.
-        pass
+        return False
 
 
 def cleanup_worktree(

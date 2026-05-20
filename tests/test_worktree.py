@@ -361,6 +361,20 @@ def test_create_worktree_rolls_back_dir_on_git_failure(fresh_repo: Path):
 
 
 @needs_git
+def test_create_worktree_surfaces_partial_rollback(fresh_repo: Path, monkeypatch):
+    """R2 N3: if _safe_rmdir cannot remove the leaf (ENOTEMPTY because git
+    partially populated it), the WorktreeError must mention the leftover so
+    the operator knows a retry under the same slug will fail."""
+
+    from agy_mcp import worktree as wt_module
+
+    # Force _safe_rmdir to fail so we exercise the suffix path.
+    monkeypatch.setattr(wt_module, "_safe_rmdir", lambda _path: False)
+    with pytest.raises(WorktreeError, match=r"leftover dir at .* — remove manually"):
+        create_worktree(fresh_repo, "partial", base_ref="does-not-exist")
+
+
+@needs_git
 def test_create_worktree_leaf_dir_is_0o700(fresh_repo: Path):
     """Parent and leaf should both be locked down to the running user."""
 
