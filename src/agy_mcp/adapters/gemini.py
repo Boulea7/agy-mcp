@@ -26,6 +26,14 @@ from agy_mcp.adapters.base import (
     has_flag,
     resolve_cwd,
 )
+# Process-group helpers live in the agy adapter today (same cross-platform
+# implementation). Importing from a sibling keeps duplication out without
+# pulling them up to base.py before we know a third adapter needs them.
+from agy_mcp.adapters.agy import (  # noqa: PLC0415 - sibling reuse, not a cycle
+    _kill_group,
+    _process_group_kwargs,
+    _terminate_group,
+)
 from agy_mcp.models import BackendName, BridgeRequest, CanonicalEvent, Capability
 from agy_mcp.utils import (
     is_windows,
@@ -117,6 +125,7 @@ class GeminiCliBackend(BaseAdapter):
         stdout_path: Path | None = None,
         stderr_path: Path | None = None,
         event_sink: EventSink | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> AdapterRunResult:
         cap = self.detect()
         argv = self.build_command(request, log_path=log_path)
@@ -171,6 +180,9 @@ class GeminiCliBackend(BaseAdapter):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                # Mirror agy.py: run the child in its own group so cancel
+                # can SIGTERM the subtree.
+                **_process_group_kwargs(),
             )
         except OSError as exc:
             self._emit(
@@ -209,10 +221,31 @@ class GeminiCliBackend(BaseAdapter):
         deadline = start + max(request.timeout, 1)
         exit_code: int | None = None
         timed_out = False
+        cancelled = False
         try:
             while True:
                 if proc.poll() is not None:
                     exit_code = proc.returncode
+                    break
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    self._emit(
+                        ctx,
+                        CanonicalEvent(
+                            type="error",
+                            subtype="cancelled",
+                            text="job cancelled by supervisor",
+                        ),
+                    )
+                    _terminate_group(proc)
+                    try:
+                        exit_code = proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        _kill_group(proc)
+                        try:
+                            exit_code = proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            exit_code = None
                     break
                 if time.time() >= deadline:
                     timed_out = True
@@ -224,11 +257,11 @@ class GeminiCliBackend(BaseAdapter):
                             text=f"gemini did not finish within {request.timeout}s",
                         ),
                     )
-                    proc.terminate()
+                    _terminate_group(proc)
                     try:
                         exit_code = proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
-                        proc.kill()
+                        _kill_group(proc)
                         try:
                             exit_code = proc.wait(timeout=5)
                         except subprocess.TimeoutExpired:
@@ -239,15 +272,15 @@ class GeminiCliBackend(BaseAdapter):
             ctx.stop_event.set()
             stdout_thread.join(timeout=5)
             stderr_thread.join(timeout=5)
-            # Mirror agy.py: kill child on any abnormal exit so the
-            # subprocess can never be orphaned.
+            # Mirror agy.py: kill the whole process group on any abnormal
+            # exit so we don't orphan a subagent the child might have spawned.
             if proc is not None and proc.poll() is None:
                 try:
-                    proc.terminate()
+                    _terminate_group(proc)
                     try:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        proc.kill()
+                        _kill_group(proc)
                         try:
                             proc.wait(timeout=2)
                         except subprocess.TimeoutExpired:
@@ -265,7 +298,7 @@ class GeminiCliBackend(BaseAdapter):
         stderr_text = "".join(ctx.stderr_buf)
         duration_ms = int((time.time() - start) * 1000)
 
-        if exit_code == 0 and not timed_out:
+        if exit_code == 0 and not timed_out and not cancelled:
             self._emit(
                 ctx,
                 CanonicalEvent(
@@ -276,17 +309,24 @@ class GeminiCliBackend(BaseAdapter):
                 ),
             )
         else:
+            if cancelled:
+                subtype = "cancelled"
+            elif timed_out:
+                subtype = "wrapper_timeout"
+            else:
+                subtype = "error"
             self._emit(
                 ctx,
                 CanonicalEvent(
                     type="result",
-                    subtype="error" if not timed_out else "wrapper_timeout",
+                    subtype=subtype,
                     session_id=ctx.seen_session_id[0],
                     text=self.safety.redact(stderr_text)[:2000],
                     metadata={
                         "duration_ms": duration_ms,
                         "exit_code": exit_code,
                         "timed_out": timed_out,
+                        "cancelled": cancelled,
                     },
                 ),
             )

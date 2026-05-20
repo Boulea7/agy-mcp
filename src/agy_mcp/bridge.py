@@ -46,6 +46,7 @@ from agy_mcp.models import (
     CanonicalEvent,
 )
 from agy_mcp.safety import SafetyPolicy, is_git_workspace
+from agy_mcp.session_store import SessionStore
 from agy_mcp.worktree import (
     WorktreeError,
     WorktreeHandle,
@@ -97,7 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Embed every translated event in the response body.")
     p.add_argument(
         "--detach", action="store_true",
-        help="(reserved for Phase 4) — rejected today; pass --PROMPT directly.",
+        help="Spawn the job in the background via the supervisor; return a job_id.",
     )
     p.add_argument("--debug", action="store_true")
     p.add_argument("--dry-run", action="store_true",
@@ -296,14 +297,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.detach:
-        # Refuse loudly until Phase 4 wires the supervisor in — silent no-op
-        # was the worst of both worlds (Phase 3 review P3.1).
-        response = BridgeResponse(
-            success=False,
-            error="--detach is not implemented yet (reserved for Phase 4 supervisor)",
-            cwd=request.cwd,
-            adapter=AdapterMetadata(),
-        ).touch()
+        # Hand the request off to the supervisor for background execution.
+        # The synchronous response carries the new job_id + status="running";
+        # callers poll via agy_status / agy_read.
+        from agy_mcp.supervisor import Supervisor
+
+        store = SessionStore(config.session_store_root())
+        supervisor = Supervisor(store=store, config=config, safety=safety)
+        response = supervisor.start(request)
     else:
         response = _run(request, config, safety)
     json.dump(response.model_dump(exclude_none=False), sys.stdout)

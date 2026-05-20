@@ -311,8 +311,17 @@ class BaseAdapter(abc.ABC):
         stdout_path: Path | None = None,
         stderr_path: Path | None = None,
         event_sink: "EventSink | None" = None,
+        cancel_event: "threading.Event | None" = None,
     ) -> "AdapterRunResult":
-        """Run the bound CLI for ``request`` and return canonical events."""
+        """Run the bound CLI for ``request`` and return canonical events.
+
+        ``cancel_event``: when supplied by the supervisor, the adapter's
+        main wait loop polls it alongside ``proc.poll()`` and triggers the
+        same terminate -> wait -> kill cascade as a wrapper timeout when
+        the event is set. Reason field in the synthesised error is
+        ``"cancelled"`` so callers can distinguish operator cancellation
+        from a timeout.
+        """
 
     # ------------------------------------------------------------------
     # Helpers shared by subclasses

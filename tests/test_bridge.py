@@ -866,10 +866,27 @@ def test_main_returns_one_on_failure(monkeypatch, capsys, tmp_path: Path):
     assert "destructive" in payload["error"]
 
 
-def test_main_rejects_detach(monkeypatch, capsys, tmp_path: Path):
-    """Phase 3 R1 / P3.1: --detach is reserved for Phase 4; reject loudly."""
+def test_main_detach_returns_running_envelope(monkeypatch, capsys, tmp_path: Path):
+    """Phase 4: --detach hands off to the supervisor and returns a job_id."""
 
-    monkeypatch.setattr("agy_mcp.bridge.get_config", lambda: _default_config())
+    cap = _capability("agy")
+    fake = _FakeAdapter(
+        capability=cap,
+        run_result=_result(
+            events=[
+                CanonicalEvent(type="system", subtype="init"),
+                CanonicalEvent(type="assistant", text="async done"),
+                CanonicalEvent(type="result", subtype="success"),
+            ],
+            session_id="sess-detach",
+        ),
+    )
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+    # Pin the session store under tmp_path so we don't pollute the user's
+    # real ~/.agy-mcp tree.
+    cfg = _default_config()
+    cfg.session_store.root = str(tmp_path / "sessions")
+    monkeypatch.setattr("agy_mcp.bridge.get_config", lambda: cfg)
     rc = main(
         [
             "--PROMPT", "hi",
@@ -878,16 +895,18 @@ def test_main_rejects_detach(monkeypatch, capsys, tmp_path: Path):
         ]
     )
     out = capsys.readouterr().out
-    assert rc == 1
     payload = json.loads(out.splitlines()[-1])
-    assert payload["success"] is False
-    assert "--detach" in payload["error"]
+    assert rc == 0
+    assert payload["success"] is True
+    assert payload["status"] == "running"
+    assert payload["job_id"]
+    assert payload["job_id"].startswith("job_")
 
 
 def test_main_detach_rejects_invalid_request_first(monkeypatch, capsys, tmp_path: Path):
     """Phase 3 R2 N4: --detach with an invalid request (e.g. empty prompt)
-    must surface the pydantic validation error, not the detach-not-implemented
-    placeholder — input validation runs before detach handling."""
+    must surface the pydantic validation error, not the detach handler —
+    input validation runs before detach handling."""
 
     monkeypatch.setattr("agy_mcp.bridge.get_config", lambda: _default_config())
     rc = main(
@@ -901,9 +920,8 @@ def test_main_detach_rejects_invalid_request_first(monkeypatch, capsys, tmp_path
     assert rc == 1
     payload = json.loads(out.splitlines()[-1])
     assert payload["success"] is False
-    # The error must mention "prompt", not "--detach".
+    # The error must mention "prompt", not the detach handler.
     assert "prompt" in payload["error"]
-    assert "--detach" not in payload["error"]
 
 
 def test_run_unsafe_no_backend_short_circuits(monkeypatch, tmp_path: Path):
