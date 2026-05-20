@@ -48,8 +48,15 @@ from agy_mcp.models import (
     BackendName,
     BridgeRequest,
     BridgeResponse,
+    CancelToolResponse,
+    DoctorToolResponse,
+    InstallSkillToolResponse,
+    JobRecord,
     Mode,
     OutputProtocol,
+    ReadToolResponse,
+    SessionsToolResponse,
+    StatusToolResponse,
 )
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
@@ -228,17 +235,46 @@ def _build_request(payload: dict[str, Any]) -> BridgeRequest:
     return BridgeRequest(**payload)
 
 
-def _structured_failure(safety: SafetyPolicy, exc: BaseException, *, cwd: str = "") -> dict[str, Any]:
-    """Top-level guard: any tool exception becomes a structured envelope."""
+def _structured_failure(safety: SafetyPolicy, exc: BaseException, *, cwd: str = "") -> BridgeResponse:
+    """Top-level guard: any tool exception becomes a structured envelope.
+
+    Returns a :class:`BridgeResponse` instance so the FastMCP runtime can
+    emit ``structuredContent`` alongside the text fallback. Callers that
+    historically expected a ``dict`` can still call ``.model_dump()`` —
+    but the tool functions themselves now return the model directly.
+    """
 
     return BridgeResponse(
         success=False,
         error=safety.redact(str(exc)),
         cwd=safety.redact(cwd),
-    ).model_dump(mode="json")
+    )
+
+
+def _wrapper_failure(
+    safety: SafetyPolicy,
+    exc: BaseException,
+    cls: type,
+    **extra: Any,
+):
+    """Failure envelope for the metadata tools (status / read / cancel / ...).
+
+    ``cls`` is one of the wrapper Tool response models; ``extra`` lets the
+    caller pin echo fields like ``job_id`` so a client comparing input and
+    output can correlate the failure with the call. Pydantic validates
+    that ``extra`` fits the model's field set, so a typo blows up at
+    development time, not at serialisation.
+    """
+
+    return cls(
+        success=False,
+        error=safety.redact(str(exc)),
+        **extra,
+    )
 
 
 def _response_to_dict(resp: BridgeResponse) -> dict[str, Any]:
+    # Retained for tests / external callers that depended on the dict form.
     return resp.model_dump(mode="json")
 
 
@@ -305,7 +341,7 @@ async def agy_tool(
     debug: bool = False,
     dry_run: bool = False,
     extra_env: dict[str, str] | None = None,
-) -> dict[str, Any]:
+) -> BridgeResponse:
     # Phase 5 R4 P3.11: ``extra_env`` keeps ``| None = None`` on the
     # tool surface (MCP clients omit the key entirely on most callers)
     # but normalises to ``{}`` immediately so the downstream
@@ -350,7 +386,7 @@ async def agy_tool(
     response = await anyio.to_thread.run_sync(
         _bridge_run, request, config, safety, limiter=limiter,
     )
-    return _response_to_dict(response)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +418,7 @@ async def agy_continue_tool(
     debug: bool = False,
     dry_run: bool = False,
     extra_env: dict[str, str] | None = None,
-) -> dict[str, Any]:
+) -> BridgeResponse:
     config, safety, _store_, _supervisor_ = _ensure_state()
     if not SESSION_ID:
         return _structured_failure(
@@ -417,7 +453,7 @@ async def agy_continue_tool(
     response = await anyio.to_thread.run_sync(
         _bridge_run, request, config, safety, limiter=limiter,
     )
-    return _response_to_dict(response)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +484,7 @@ def agy_start_tool(
     debug: bool = False,
     extra_env: dict[str, str] | None = None,
     job_id: str | None = None,
-) -> dict[str, Any]:
+) -> BridgeResponse:
     config, safety, _store_, supervisor = _ensure_state()
     if SESSION_ID is not None:
         err = _validate_session_id(safety, SESSION_ID)
@@ -484,7 +520,7 @@ def agy_start_tool(
         response = supervisor.start(request, job_id=job_id)
     except Exception as exc:  # noqa: BLE001 - top-level guard
         return _structured_failure(safety, exc, cwd=cd)
-    return _response_to_dict(response)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -496,23 +532,25 @@ def agy_start_tool(
     name="agy_status",
     description="Return the JobRecord (status, exit code, error, timestamps) for a job_id.",
 )
-def agy_status_tool(job_id: str) -> dict[str, Any]:
+def agy_status_tool(job_id: str) -> StatusToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
     err = _validate_job_id(safety, job_id)
     if err is not None:
-        return _structured_failure(safety, ValueError(err))
+        return _wrapper_failure(safety, ValueError(err), StatusToolResponse)
     try:
         record = supervisor.status(job_id)
     except Exception as exc:  # noqa: BLE001
-        return _structured_failure(safety, exc)
+        return _wrapper_failure(safety, exc, StatusToolResponse)
     if record is None:
         # Use the same envelope shape as other failures so consumers can
         # rely on ``success/error`` keys regardless of why the lookup
         # failed. (Phase 5 R1 arch P1.3)
-        return _structured_failure(
-            safety, ValueError(f"job_id {job_id!r} not found"),
+        return _wrapper_failure(
+            safety,
+            ValueError(f"job_id {job_id!r} not found"),
+            StatusToolResponse,
         )
-    return {"success": True, "record": record.model_dump(mode="json")}
+    return StatusToolResponse(success=True, record=record)
 
 
 # ---------------------------------------------------------------------------
@@ -532,22 +570,31 @@ def agy_read_tool(
     job_id: str,
     since: int = 0,
     translate: OutputProtocol | None = None,
-) -> dict[str, Any]:
+) -> ReadToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
     err = _validate_job_id(safety, job_id)
     if err is not None:
-        return _structured_failure(safety, ValueError(err))
+        return _wrapper_failure(
+            safety, ValueError(err), ReadToolResponse, job_id=job_id,
+        )
     if since < 0:
-        return _structured_failure(
-            safety, ValueError("since must be a non-negative integer"),
+        return _wrapper_failure(
+            safety,
+            ValueError("since must be a non-negative integer"),
+            ReadToolResponse,
+            job_id=job_id,
+            since=since,
         )
     try:
         record = supervisor.status(job_id)
     except Exception as exc:  # noqa: BLE001
-        return _structured_failure(safety, exc)
+        return _wrapper_failure(safety, exc, ReadToolResponse, job_id=job_id)
     if record is None:
-        return _structured_failure(
-            safety, ValueError(f"job_id {job_id!r} not found"),
+        return _wrapper_failure(
+            safety,
+            ValueError(f"job_id {job_id!r} not found"),
+            ReadToolResponse,
+            job_id=job_id,
         )
     try:
         if translate is None:
@@ -560,15 +607,17 @@ def agy_read_tool(
                 job_id, since=since, protocol=translate,
             )
     except Exception as exc:  # noqa: BLE001
-        return _structured_failure(safety, exc)
-    return {
-        "success": True,
-        "job_id": job_id,
-        "since": since,
-        "translate": translate,
-        "events": payload,
-        "count": len(payload),
-    }
+        return _wrapper_failure(
+            safety, exc, ReadToolResponse, job_id=job_id, since=since,
+        )
+    return ReadToolResponse(
+        success=True,
+        job_id=job_id,
+        since=since,
+        translate=translate,
+        events=payload,
+        count=len(payload),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -584,16 +633,20 @@ def agy_read_tool(
         "already finished."
     ),
 )
-def agy_cancel_tool(job_id: str) -> dict[str, Any]:
+def agy_cancel_tool(job_id: str) -> CancelToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
     err = _validate_job_id(safety, job_id)
     if err is not None:
-        return _structured_failure(safety, ValueError(err))
+        return _wrapper_failure(
+            safety, ValueError(err), CancelToolResponse, job_id=job_id,
+        )
     try:
         signalled = supervisor.cancel(job_id)
     except Exception as exc:  # noqa: BLE001
-        return _structured_failure(safety, exc)
-    return {"success": True, "job_id": job_id, "signalled": signalled}
+        return _wrapper_failure(
+            safety, exc, CancelToolResponse, job_id=job_id,
+        )
+    return CancelToolResponse(success=True, job_id=job_id, signalled=signalled)
 
 
 # ---------------------------------------------------------------------------
@@ -608,22 +661,24 @@ def agy_cancel_tool(job_id: str) -> dict[str, Any]:
         "for the full list."
     ),
 )
-def agy_sessions_tool(limit: int = 50) -> dict[str, Any]:
+def agy_sessions_tool(limit: int = 50) -> SessionsToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
     if limit < 0:
-        return _structured_failure(
-            safety, ValueError("limit must be a non-negative integer"),
+        return _wrapper_failure(
+            safety,
+            ValueError("limit must be a non-negative integer"),
+            SessionsToolResponse,
         )
     effective: int | None = limit if limit > 0 else None
     try:
         records = supervisor.list_sessions(limit=effective)
     except Exception as exc:  # noqa: BLE001
-        return _structured_failure(safety, exc)
-    return {
-        "success": True,
-        "count": len(records),
-        "records": [r.model_dump(mode="json") for r in records],
-    }
+        return _wrapper_failure(safety, exc, SessionsToolResponse)
+    return SessionsToolResponse(
+        success=True,
+        count=len(records),
+        records=list(records),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -641,12 +696,12 @@ def agy_sessions_tool(limit: int = 50) -> dict[str, Any]:
         "the MCP server)."
     ),
 )
-def agy_doctor_tool(force_refresh: bool = False) -> dict[str, Any]:
+def agy_doctor_tool(force_refresh: bool = False) -> DoctorToolResponse:
     config, safety, store, _supervisor_ = _ensure_state()
     try:
         agy_adapter, gemini_adapter = _ensure_adapters(force_refresh=force_refresh)
     except Exception as exc:  # noqa: BLE001 - never let init crash the tool
-        return _structured_failure(safety, exc)
+        return _wrapper_failure(safety, exc, DoctorToolResponse, version=__version__)
     try:
         report = run_doctor(
             config=config,
@@ -656,8 +711,12 @@ def agy_doctor_tool(force_refresh: bool = False) -> dict[str, Any]:
             session_store=store,
         )
     except Exception as exc:  # noqa: BLE001
-        return _structured_failure(safety, exc)
-    return {"success": True, "report": report.to_dict(), "version": __version__}
+        return _wrapper_failure(safety, exc, DoctorToolResponse, version=__version__)
+    return DoctorToolResponse(
+        success=True,
+        report=report.to_dict(),
+        version=__version__,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -687,11 +746,13 @@ def agy_install_skill_tool(
     scope: SkillScope = "user",
     project_root: str | None = None,
     force: bool = False,
-) -> dict[str, Any]:
+) -> InstallSkillToolResponse:
     config, safety, _store_, _supervisor_ = _ensure_state()
     if scope not in ("user", "project"):
-        return _structured_failure(
-            safety, ValueError(f"scope must be 'user' or 'project', got {scope!r}"),
+        return _wrapper_failure(
+            safety,
+            ValueError(f"scope must be 'user' or 'project', got {scope!r}"),
+            InstallSkillToolResponse,
         )
     chosen_targets = targets if targets else ["all"]
     # Defence-in-depth at the tool boundary. The installer's own
@@ -703,26 +764,33 @@ def agy_install_skill_tool(
     # the duplication so future contributors don't relax one and
     # leave the other exposed.
     if not isinstance(chosen_targets, list):
-        return _structured_failure(
-            safety, ValueError("targets must be a list of strings"),
+        return _wrapper_failure(
+            safety,
+            ValueError("targets must be a list of strings"),
+            InstallSkillToolResponse,
         )
     if len(chosen_targets) > _MAX_INSTALL_TARGETS:
-        return _structured_failure(
+        return _wrapper_failure(
             safety,
             ValueError(
                 f"targets exceeds {_MAX_INSTALL_TARGETS} entries "
                 f"({len(chosen_targets)} given)",
             ),
+            InstallSkillToolResponse,
         )
     cleaned: list[SkillTarget] = []
     for t in chosen_targets:
         if not isinstance(t, str):
-            return _structured_failure(
-                safety, ValueError("targets entries must be strings"),
+            return _wrapper_failure(
+                safety,
+                ValueError("targets entries must be strings"),
+                InstallSkillToolResponse,
             )
         if t not in _ALLOWED_TARGETS:
-            return _structured_failure(
-                safety, ValueError(f"unknown skill target: {t!r}"),
+            return _wrapper_failure(
+                safety,
+                ValueError(f"unknown skill target: {t!r}"),
+                InstallSkillToolResponse,
             )
         cleaned.append(t)  # type: ignore[arg-type]
     try:
@@ -734,8 +802,14 @@ def agy_install_skill_tool(
             force=force,
         )
     except Exception as exc:  # noqa: BLE001
-        return _structured_failure(safety, exc)
-    return result.to_dict()
+        return _wrapper_failure(safety, exc, InstallSkillToolResponse)
+    payload = result.to_dict()
+    return InstallSkillToolResponse(
+        success=bool(payload.get("success", False)),
+        error=payload.get("error"),
+        warnings=list(payload.get("warnings", [])),
+        installed=list(payload.get("installed", [])),
+    )
 
 
 # ---------------------------------------------------------------------------

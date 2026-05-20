@@ -184,7 +184,12 @@ def test_agy_dry_run_returns_command_preview(reset_state, tmp_path: Path):
         )
     )
     assert out["success"] is True
-    assert isinstance(out["adapter"], dict)
+    # Phase 9: tools now return typed pydantic envelopes (FastMCP
+    # structuredContent). ``adapter`` is the AdapterMetadata model, not a
+    # raw dict — model_dump() round-trips it back to a dict for the wire.
+    adapter = out["adapter"]
+    assert adapter.bin_path
+    assert isinstance(adapter.model_dump(), dict)
     assert out["command_preview"] is not None
 
 
@@ -436,10 +441,13 @@ def test_agy_status_unknown_uses_structured_failure(reset_state):
     out = server.agy_status_tool("job_does_not_exist_consistent_envelope")
     assert out["success"] is False
     assert "not found" in (out["error"] or "")
-    # The envelope is a BridgeResponse dump, so it has cwd/error keys, not
-    # the bare ``job_id`` field of the previous shape.
-    assert "cwd" in out
+    # Phase 9: agy_status returns ``StatusToolResponse``, not BridgeResponse.
+    # The envelope intentionally does NOT carry ``cwd`` — that field
+    # belonged to the bridge call, not the metadata tool. ``error`` and
+    # ``record`` remain the two canonical wrapper fields.
     assert "error" in out
+    assert "record" in out
+    assert out["record"] is None
 
 
 def test_agy_status_rejects_oversized_job_id(reset_state):
@@ -880,3 +888,91 @@ def test_agy_read_translate_schema_is_anyof_enum_or_null(reset_state):
     null_branch = next(b for b in branches if b.get("type") == "null")
     assert set(enum_branch["enum"]) == {"raw", "claude", "codex"}
     assert null_branch == {"type": "null"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: structuredContent / typed return regression suite
+# ---------------------------------------------------------------------------
+
+
+def test_all_tools_advertise_output_schema(reset_state):
+    """Every registered tool returns a pydantic model so MCP clients see
+    ``structuredContent`` + an ``outputSchema`` for type-safe parsing.
+
+    Without this guarantee, FastMCP would emit text-only ``content`` and
+    a downstream code-gen pipeline that relies on outputSchema would
+    silently degrade to ``object``. Pin every tool by name.
+    """
+
+    import asyncio
+
+    async def _get_tools() -> list:
+        return await server.mcp.list_tools()
+
+    tools = asyncio.run(_get_tools())
+    by_name = {t.name: t for t in tools}
+    expected = {
+        "agy",
+        "agy_continue",
+        "agy_start",
+        "agy_status",
+        "agy_read",
+        "agy_cancel",
+        "agy_sessions",
+        "agy_doctor",
+        "agy_install_skill",
+    }
+    assert expected.issubset(by_name.keys()), (
+        f"missing tools: {expected - by_name.keys()}"
+    )
+    for name in expected:
+        out_schema = getattr(by_name[name], "outputSchema", None)
+        assert out_schema is not None, f"{name} missing outputSchema"
+        assert out_schema.get("type") == "object", (
+            f"{name}.outputSchema should be an object schema, got {out_schema}"
+        )
+        # Every envelope shape pins ``success`` so a generic MCP client can
+        # branch on it without knowing the specific tool name.
+        props = out_schema.get("properties") or {}
+        # Resolve $ref if pydantic emitted one (envelope models declared
+        # ``success`` as ``bool`` -> direct property).
+        if "success" not in props and "$ref" in out_schema:
+            defs = out_schema.get("$defs", {})
+            ref_name = out_schema["$ref"].rsplit("/", 1)[-1]
+            props = defs.get(ref_name, {}).get("properties", {})
+        assert "success" in props, (
+            f"{name}.outputSchema is missing the canonical 'success' field: "
+            f"{out_schema}"
+        )
+
+
+def test_tool_response_models_support_dict_access(reset_state):
+    """The dict-like envelope mixin must expose ``[...]`` / ``in`` / ``.get``
+    so legacy callers that did ``out['success']`` keep working alongside the
+    new ``out.success`` style.
+    """
+
+    from agy_mcp.models import (
+        BridgeResponse,
+        CancelToolResponse,
+        StatusToolResponse,
+    )
+
+    r = StatusToolResponse(success=False, error="boom")
+    assert r["success"] is False
+    assert r["error"] == "boom"
+    assert "record" in r
+    assert r.get("missing") is None
+    assert r.get("missing", "default") == "default"
+
+    c = CancelToolResponse(success=True, job_id="job_x", signalled=True)
+    assert c["job_id"] == "job_x"
+    assert c.signalled is True
+    keys = list(c.keys())
+    assert {"success", "error", "job_id", "signalled"} <= set(keys)
+
+    b = BridgeResponse(success=True, cwd="/tmp")
+    assert b["cwd"] == "/tmp"
+    assert b.success is True
+    with pytest.raises(KeyError):
+        b["does_not_exist"]

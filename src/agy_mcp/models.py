@@ -17,6 +17,49 @@ BackendName = Literal["auto", "agy", "gemini"]
 OutputProtocol = Literal["raw", "claude", "codex"]
 JobStatus = Literal["completed", "running", "failed", "cancelled", "unknown"]
 
+
+# ---------------------------------------------------------------------------
+# Dict-like compatibility mixin for envelope models.
+#
+# FastMCP serialises a pydantic model return into structuredContent + a
+# text fallback; consumers reading the wire format always see a dict.
+# But in-process consumers (our tests, the bridge CLI, anything that
+# imports the model) historically used ``out["success"]`` because tools
+# used to return raw dicts. Adding ``__getitem__`` / ``__contains__`` /
+# ``.get`` lets that callsite keep working without forcing every test
+# to be rewritten as ``out.success``. Both forms remain valid.
+# ---------------------------------------------------------------------------
+
+
+class _DictLikeEnvelope(BaseModel):
+    """Mixin that gives a pydantic model a dict-like read interface.
+
+    Raises ``KeyError`` (not ``AttributeError``) on missing keys so
+    ``in`` / ``.get`` / ``[...]`` consumers see the dict-style error.
+    Iteration yields field names — matching ``dict.__iter__``.
+    """
+
+    def __getitem__(self, key: str) -> Any:
+        if not isinstance(key, str) or key not in self.__class__.model_fields:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and key in self.__class__.model_fields
+
+    def __iter__(self):  # type: ignore[override]
+        # Iterate field names so ``dict()`` over the model works.
+        return iter(self.__class__.model_fields)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def keys(self):
+        return list(self.__class__.model_fields.keys())
+
 # ---------------------------------------------------------------------------
 # extra_env safety patterns. The bridge CLI's ``_parse_extra_env`` enforces
 # the same rules on its argv path; this validator catches MCP callers that
@@ -255,7 +298,7 @@ class AdapterMetadata(BaseModel):
     supports_tool_events: bool = False
 
 
-class BridgeResponse(BaseModel):
+class BridgeResponse(_DictLikeEnvelope):
     """Stable result envelope returned by the bridge CLI and MCP tools."""
 
     model_config = ConfigDict(extra="forbid")
@@ -327,7 +370,7 @@ class CanonicalEvent(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class JobRecord(BaseModel):
+class JobRecord(_DictLikeEnvelope):
     """Persisted state of a long-running agy job (one per SESSION_ID/job_id)."""
 
     model_config = ConfigDict(extra="forbid")
@@ -368,15 +411,113 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ---------------------------------------------------------------------------
+# MCP tool envelopes (Phase 9 sec — structuredContent typed returns)
+# ---------------------------------------------------------------------------
+#
+# Each MCP tool returns a pydantic model so FastMCP can auto-derive the
+# tool's ``outputSchema`` and emit ``structuredContent`` alongside the
+# textContent fallback. Keeping ``success`` + ``error`` shape consistent
+# across every envelope lets a generic MCP client write one parser.
+# ``BridgeResponse`` covers the synchronous ``agy`` / ``agy_continue`` /
+# ``agy_start`` returns; the wrappers below cover the metadata tools.
+
+
+class StatusToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_status``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    record: JobRecord | None = None
+
+
+class ReadToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_read``.
+
+    ``events`` is a list of generic dicts because the canonical event
+    type depends on ``translate`` (raw → CanonicalEvent.dict; claude /
+    codex → wire-format dict shaped by the protocol translator).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    job_id: str | None = None
+    since: int | None = None
+    translate: OutputProtocol | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+
+
+class CancelToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_cancel``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    job_id: str | None = None
+    signalled: bool = False
+
+
+class SessionsToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_sessions``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    count: int = 0
+    records: list[JobRecord] = Field(default_factory=list)
+
+
+class DoctorToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_doctor``.
+
+    ``report`` is a generic dict — DoctorReport is a dataclass-backed
+    aggregate whose internal shape (checks list, severity enum) does not
+    benefit from being re-modelled here. The text content fallback keeps
+    the full JSON; structuredContent gives clients the success / version
+    handles they need to act programmatically.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    report: dict[str, Any] | None = None
+    version: str | None = None
+
+
+class InstallSkillToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_install_skill``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    installed: list[dict[str, Any]] = Field(default_factory=list)
+
+
 __all__ = [
     "AdapterMetadata",
     "BackendName",
     "BridgeRequest",
     "BridgeResponse",
+    "CancelToolResponse",
     "CanonicalEvent",
     "Capability",
+    "DoctorToolResponse",
+    "InstallSkillToolResponse",
     "JobRecord",
     "JobStatus",
     "Mode",
     "OutputProtocol",
+    "ReadToolResponse",
+    "SessionsToolResponse",
+    "StatusToolResponse",
 ]
