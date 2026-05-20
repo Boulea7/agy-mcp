@@ -79,7 +79,7 @@ def test_release_check_rejects_secret_shaped_content():
         [
             ArtifactFile(
                 "README.md",
-                b"OPENAI_API_KEY=sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                b"OPENAI_API_KEY=" b"sk" b"-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
         ],
     )

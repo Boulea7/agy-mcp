@@ -320,7 +320,7 @@ def test_agy_read_rejects_invalid_job_id_without_echo(reset_state):
 def test_job_id_rejects_secret_shaped_value_without_echo(
     reset_state, tmp_path: Path, tool_name: str
 ):
-    secret_job_id = "job_sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    secret_job_id = "job_" "sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     if tool_name == "agy_start":
         out = server.agy_start_tool(

@@ -49,7 +49,7 @@ def test_utc_now_iso_is_sortable():
     "value, expect_redaction",
     [
         ("Bearer abcdef1234567890abcdef1234567890", True),
-        ("Authorization: gho" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", True),
+        ("Authorization: " "gho" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", True),
         ("X-Api-Key: shh-12345-secret-xyz-678", True),
         ('X-Api-Key: "abc123"', True),
         ("X-Auth-Token=verylongheadervaluexyz123456", True),
@@ -59,10 +59,18 @@ def test_utc_now_iso_is_sortable():
         ("sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", True),
         ("AIza" "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", True),
         ("ya29" ".aaaaaaaaaaaaaaaaaaaaaaaa", True),
-        ("eyJ" "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", True),
+        (
+            "eyJ" "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3In0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            True,
+        ),
         ("AKIA" "IOSFODNN7EXAMPLE", True),
         ("xox" "b-1234567890-abcdefghijklmn", True),
-        ("github_pat" "_11ABCDEFGHIJKLMNOPQRST_abcdef1234567890abcdef1234567890abcdef1234567890", True),
+        (
+            "github_pat" "_11ABCDEFGHIJKLMNOPQRST_"
+            "abcdef1234567890abcdef1234567890abcdef1234567890",
+            True,
+        ),
         ("hello world", False),
         ("short_token", False),
     ],
@@ -92,7 +100,7 @@ def test_redact_text_empty_string_returns_empty():
 
 
 def test_redact_command_redacts_each_arg():
-    argv = ["agy", "--prompt", "use Bearer gho" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+    argv = ["agy", "--prompt", "use Bearer " "gho" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
     out = redact_command(argv)
     assert REDACTION_PLACEHOLDER in out[-1]
     assert out[0] == "agy"
@@ -102,10 +110,10 @@ def test_redact_command_redacts_each_arg():
 @pytest.mark.parametrize(
     "value",
     [
-        "job_sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "job_ghp" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "job_AKIA" "IOSFODNN7EXAMPLE",
-        "job_github_pat" "_11ABCDEFGHIJKLMNOPQRST_abcdef1234567890abcdef1234567890",
+        "job_" "sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "job_" "ghp" "_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "job_" "AKIA" "IOSFODNN7EXAMPLE",
+        "job_" "github_pat" "_11ABCDEFGHIJKLMNOPQRST_abcdef1234567890abcdef1234567890",
     ],
 )
 def test_redact_text_handles_secret_shapes_after_safe_prefix(value: str):
