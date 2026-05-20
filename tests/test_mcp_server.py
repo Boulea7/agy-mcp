@@ -292,10 +292,21 @@ def test_agy_install_skill_writes_scaffold(reset_state, tmp_path: Path):
     assert out["success"] is True
     installed = out["installed"]
     assert installed
-    skill_file = project / ".claude" / "skills" / "collaborating-with-antigravity" / "SKILL.md"
+    skill_root = project / ".claude" / "skills" / "collaborating-with-antigravity"
+    skill_file = skill_root / "SKILL.md"
     assert skill_file.is_file()
     body = skill_file.read_text(encoding="utf-8")
     assert "collaborating-with-antigravity" in body
+    # Phase 7: the full bundle lands — scripts/ + references/, not just
+    # a SKILL.md placeholder.
+    assert (skill_root / "scripts" / "agy_bridge.py").is_file()
+    assert (skill_root / "references" / "usage.md").is_file()
+    assert (skill_root / "references" / "prompt-patterns.md").is_file()
+    assert (skill_root / "references" / "security.md").is_file()
+    # Every file is recorded in the envelope.
+    paths = {entry["path"] for entry in installed}
+    assert any("SKILL.md" in p for p in paths)
+    assert any("agy_bridge.py" in p for p in paths)
 
 
 def test_agy_install_skill_rejects_project_scope_without_root(reset_state):
@@ -349,30 +360,56 @@ def test_agy_install_skill_rejects_symlinked_project_root(reset_state, tmp_path:
     assert "symlink" in (out["error"] or "")
 
 
-def test_agy_install_skill_rejects_user_scope_antigravity(reset_state):
-    """Phase 5 R1 sec P1: user-scope antigravity write is refused."""
+def test_agy_install_skill_writes_user_scope_antigravity(reset_state, monkeypatch, tmp_path: Path):
+    """Phase 7: user-scope antigravity lands under ``~/.agy/skills/``.
+
+    Use a fake HOME so we do not write into the real user's home
+    directory during tests.
+    """
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    # Importlib has already resolved ``Path.home()`` at module import; we
+    # re-resolve via reload of install._USER_SKILL_DIRS to honour the
+    # monkeypatched HOME.
+    from agy_mcp import install as install_mod
+
+    fresh_dirs = {
+        "claude": fake_home / ".claude" / "skills",
+        "codex": fake_home / ".agents" / "skills",
+        "antigravity": fake_home / ".agy" / "skills",
+    }
+    monkeypatch.setattr(install_mod, "_USER_SKILL_DIRS", fresh_dirs)
 
     out = server.agy_install_skill_tool(targets=["antigravity"], scope="user")
-    # No installs land; the resolver records a warning that ``antigravity``
-    # is not a user-scope target, and install_skills surfaces an error so
-    # the caller sees ``success=False``.
-    assert out["success"] is False
-    assert not out["installed"]
-    assert any("antigravity" in w for w in out["warnings"])
-
-
-def test_agy_install_skill_all_excludes_antigravity(reset_state, tmp_path: Path):
-    """Phase 5 R1 sec P1: ``all`` must NOT install antigravity (opt-in only)."""
-
-    project = tmp_path / "proj"
-    project.mkdir()
-    out = server.agy_install_skill_tool(
-        targets=["all"], scope="project", project_root=str(project),
-    )
     assert out["success"] is True
-    paths = {entry["target"] for entry in out["installed"]}
-    assert "antigravity" not in paths
-    assert {"claude", "codex"} <= paths
+    skill = fake_home / ".agy" / "skills" / "agy-collaboration" / "SKILL.md"
+    assert skill.is_file()
+    body = skill.read_text(encoding="utf-8")
+    assert "agy-collaboration" in body
+
+
+def test_agy_install_skill_all_includes_antigravity(reset_state, monkeypatch, tmp_path: Path):
+    """Phase 7: ``all`` expands to all three targets now that antigravity
+    has a wrapper-owned destination (``~/.agy/skills/``)."""
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    from agy_mcp import install as install_mod
+
+    fresh_dirs = {
+        "claude": fake_home / ".claude" / "skills",
+        "codex": fake_home / ".agents" / "skills",
+        "antigravity": fake_home / ".agy" / "skills",
+    }
+    monkeypatch.setattr(install_mod, "_USER_SKILL_DIRS", fresh_dirs)
+
+    out = server.agy_install_skill_tool(targets=["all"], scope="user")
+    assert out["success"] is True
+    targets = {entry["target"] for entry in out["installed"]}
+    assert {"claude", "codex", "antigravity"} <= targets
 
 
 def test_agy_status_unknown_uses_structured_failure(reset_state):
@@ -470,6 +507,76 @@ def test_agy_install_skill_rejects_non_string_target(reset_state, tmp_path: Path
     )
     assert out["success"] is False
     assert "string" in (out["error"] or "")
+
+
+def test_agy_install_skill_force_false_is_idempotent(reset_state, tmp_path: Path):
+    """Phase 7: re-installing an unchanged bundle reports ``overwrote=False``
+    for every file (no needless write)."""
+
+    from agy_mcp.install import install_skills
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    r1 = install_skills(
+        targets=["claude"], scope="project", project_root=project,
+    )
+    assert r1.success is True
+    # First install: nothing existed yet, every file is a fresh write.
+    assert all(e.overwrote is False for e in r1.installed)
+
+    r2 = install_skills(
+        targets=["claude"], scope="project", project_root=project,
+    )
+    assert r2.success is True
+    # Second install with default ``force=False``: bodies match, so we
+    # skip every file and still record overwrote=False.
+    assert r2.installed
+    assert all(e.overwrote is False for e in r2.installed)
+
+
+def test_agy_install_skill_force_true_rewrites_unchanged(reset_state, tmp_path: Path):
+    """Phase 7: ``force=True`` rewrites even when the on-disk body matches."""
+
+    from agy_mcp.install import install_skills
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    r1 = install_skills(
+        targets=["claude"], scope="project", project_root=project,
+    )
+    assert r1.success is True
+
+    r2 = install_skills(
+        targets=["claude"], scope="project", project_root=project, force=True,
+    )
+    assert r2.success is True
+    # Force rewrite: every dest already exists, so overwrote=True for all.
+    assert r2.installed
+    assert all(e.overwrote is True for e in r2.installed)
+
+
+def test_agy_install_skill_recovers_from_modified_on_disk(reset_state, tmp_path: Path):
+    """Phase 7: if a user edits SKILL.md on disk, default install replaces
+    it (content differs) and reports ``overwrote=True``."""
+
+    from agy_mcp.install import install_skills
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    install_skills(
+        targets=["claude"], scope="project", project_root=project,
+    )
+    skill = project / ".claude" / "skills" / "collaborating-with-antigravity" / "SKILL.md"
+    skill.write_text("LOCAL EDIT", encoding="utf-8")
+    r = install_skills(
+        targets=["claude"], scope="project", project_root=project,
+    )
+    assert r.success is True
+    overwrote = {entry.path: entry.overwrote for entry in r.installed}
+    assert any(value is True for value in overwrote.values())
+    body = skill.read_text(encoding="utf-8")
+    assert "collaborating-with-antigravity" in body
+    assert "LOCAL EDIT" not in body
 
 
 def test_agy_doctor_force_refresh_rebuilds_adapters(reset_state):

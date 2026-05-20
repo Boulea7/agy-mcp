@@ -629,12 +629,16 @@ def agy_doctor_tool(force_refresh: bool = False) -> dict[str, Any]:
 @mcp.tool(
     name="agy_install_skill",
     description=(
-        "Install the agy-mcp collaboration skill into one or more agent "
-        "platforms. ``targets`` may include 'claude', 'codex', "
-        "'antigravity', or 'all' (default expands to claude+codex; "
-        "antigravity is opt-in via an explicit target list). ``scope`` is "
-        "'user' (default) or 'project'; project scope requires "
-        "``project_root``."
+        "Install the agy-mcp collaboration skill bundle into one or more "
+        "agent platforms. ``targets`` may include 'claude', 'codex', "
+        "'antigravity', or 'all' (default expands to all three). User "
+        "scope writes to ``~/.claude/skills/``, ``~/.agents/skills/``, "
+        "and ``~/.agy/skills/`` respectively; project scope writes to "
+        "``.claude/skills/``, ``.agents/skills/``, and "
+        "``.antigravity/skills/`` under the supplied ``project_root``. "
+        "Antigravity's wrapper-owned ``~/.agy/`` is used in user scope "
+        "because the standing rule 'do not write under ~/.gemini/' rules "
+        "out the Antigravity CLI's own state directory."
     ),
 )
 def agy_install_skill_tool(
