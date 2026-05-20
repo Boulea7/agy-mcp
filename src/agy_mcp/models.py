@@ -33,6 +33,12 @@ _EXTRA_ENV_VALUE_BANNED = re.compile(r"[\x00\r\n]")
 # millions of entries or hold megabytes per value.
 _EXTRA_ENV_MAX_ENTRIES = 64
 _EXTRA_ENV_MAX_VALUE_LEN = 4096
+# Phase 8 R1: cap the synchronous one-shot dimensions. Long jobs go
+# through ``mode="long"`` + ``agy_start`` and live in the supervisor's
+# session store, not in process memory.
+_PROMPT_MAX_CHARS = 256_000          # ~256 KiB; well under any platform's argv cap when fused as --print=<value>
+_TIMEOUT_MAX_SECONDS = 24 * 60 * 60  # 24h ceiling for the synchronous call
+_MAX_OUTPUT_CHARS_CEIL = 8 * 1024 * 1024  # 8 MiB buffered transcript ceiling
 
 # ---------------------------------------------------------------------------
 # Capability — runtime detection result
@@ -102,6 +108,15 @@ class BridgeRequest(BaseModel):
     def _prompt_not_empty(cls, value: str) -> str:
         if not value or not value.strip():
             raise ValueError("prompt must not be empty")
+        # Phase 8 R1 arch P2-3: cap prompt length so a hostile caller
+        # cannot push a multi-megabyte string through argv (the bridge
+        # forwards prompts via ``--print=<value>`` and the kernel argv
+        # limit is OS-dependent; well below 1 MiB on most platforms).
+        if len(value) > _PROMPT_MAX_CHARS:
+            raise ValueError(
+                f"prompt exceeds {_PROMPT_MAX_CHARS} characters "
+                f"({len(value)} given)",
+            )
         return value
 
     @field_validator("timeout")
@@ -109,6 +124,14 @@ class BridgeRequest(BaseModel):
     def _timeout_positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("timeout must be positive seconds")
+        # Phase 8 R1 arch P2-1: cap at 24h. Beyond that the long-job
+        # supervisor should be used (``mode="long"`` + ``agy_start``)
+        # rather than a single synchronous call.
+        if value > _TIMEOUT_MAX_SECONDS:
+            raise ValueError(
+                f"timeout exceeds {_TIMEOUT_MAX_SECONDS} seconds "
+                f"({value} given); use mode='long' for jobs that exceed 24h",
+            )
         return value
 
     @field_validator("max_output_chars")
@@ -116,6 +139,14 @@ class BridgeRequest(BaseModel):
     def _max_output_positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("max_output_chars must be positive")
+        # Phase 8 R1 arch P2-1: cap at 8 MiB so a hostile caller cannot
+        # ask the bridge to buffer an unbounded transcript in process
+        # memory before truncation.
+        if value > _MAX_OUTPUT_CHARS_CEIL:
+            raise ValueError(
+                f"max_output_chars exceeds {_MAX_OUTPUT_CHARS_CEIL} "
+                f"({value} given)",
+            )
         return value
 
     @field_validator("extra_env")

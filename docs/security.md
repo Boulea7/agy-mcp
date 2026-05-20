@@ -32,14 +32,19 @@ job. It's a hardened gateway that:
 
 Pydantic v2 with `extra="forbid"`. Notable validators:
 
+- `prompt`: 1 ≤ length ≤ 256_000 characters (well under any platform's
+  argv ceiling when fused as `--print=<value>`). Also passed to
+  `SafetyPolicy`'s pattern-based deny-list.
 - `extra_env` (passed through to `agy` subprocess): keys must match
   `^[A-Z_][A-Z0-9_]*$`, values cannot contain `\n` / `\r` / NUL, max
   64 entries, max 4096 chars per value. Rejects the POSIX-special `_`
   key. (Phase 5 R2 sec P0-1.)
-- `prompt`: capped length; pattern-matched against a deny-list.
 - `mode`, `backend`, `output_protocol`: closed enums.
-- `timeout`: 1 ≤ value ≤ 86400.
-- `max_output_chars`: 1 ≤ value ≤ 1_000_000.
+- `timeout`: 1 ≤ value ≤ 86400 (24h ceiling; longer runs should use
+  `mode="long"` + `agy_start`).
+- `max_output_chars`: 1 ≤ value ≤ 8 MiB (caps the in-process buffered
+  transcript; the full stream is always persisted in
+  `events.jsonl`).
 
 ### 2. Deny-list (`safety.py::SafetyPolicy`)
 
@@ -72,9 +77,14 @@ being parsed as a new flag. The fused form is what we pass to
   `CTRL_BREAK_EVENT` without losing the whole tree.
 - `stdin=DEVNULL` — `agy` is never given interactive input.
 - Environment is **filtered**, not inherited: start from
-  `os.environ.copy()`, drop secret-bearing names (`*_TOKEN`,
-  `*_API_KEY`, `*_SECRET`, `AWS_*`, `GCP_*`, `AZURE_*`, `OPENAI_*`,
-  `ANTHROPIC_*`, etc.), then layer the caller's validated `extra_env`.
+  `os.environ.copy()`, drop any key matching `SECRET_ENV_NAME_PATTERN`
+  (regex covering `*TOKEN`, `*API_KEY`, `*SECRET`, `*PASSWORD`,
+  `*CRED*`, etc.) PLUS the explicit `DEFAULT_SCRUB_ENV_NAMES` list
+  (`AWS_*`, `GCP_*`, `AZURE_*`, `OPENAI_*`, `ANTHROPIC_*`,
+  `GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, `PYPI_TOKEN`, etc. — 32
+  entries). The regex and the list run in tandem so an env name like
+  `MY_CUSTOM_API_KEY` (regex match) and `AWS_PROFILE` (explicit list
+  match) both get dropped.
 
 ### 5. File-write primitive (`utils.py::safe_write_text`)
 
@@ -122,14 +132,29 @@ Env var overrides: `AGY_MCP_WORKTREE_DEFAULT=0/1`,
 Every string that leaves the process (`error`, `warnings`,
 `agent_messages`, `installed[*].path`, `command_preview`, log lines):
 
-- PEM blocks → `<REDACTED PEM>`
-- JWT tokens → `<REDACTED JWT>`
-- AWS access key IDs (`AKIA...`) → `<REDACTED AWS AKID>`
-- `Bearer <token>` / `Authorization: ...` → `<REDACTED AUTHZ>`
+- PEM blocks → `***`
+- JWT tokens → `***`
+- AWS access key IDs (`AKIA...`) → `***`
+- `Bearer <token>` / `Authorization: <scheme> <token>` → `Bearer ***` / `Authorization: <scheme> ***`
+- Slack tokens (`xoxb-…`, `xoxp-…`) → `***`
+- GitHub fine-grained PATs (`github_pat_…`) → `***`
+- Generic high-entropy key=value secrets → `***`
 - `/Users/<u>/` → `~/`, `/home/<u>/` → `~/`, `C:\Users\<u>\` → `~\`
 
-Compiled patterns are cached behind an RLock so two concurrent MCP
-tool calls cannot race on first redaction.
+The placeholder is the opaque token `***` (defined as
+`utils.REDACTION_PLACEHOLDER`) rather than a typed marker like
+`<REDACTED PEM>`. The opacity is deliberate: a tagged placeholder
+would tell an observer the original value type, giving an attacker
+an oracle on what kind of secret leaked. Operators auditing logs
+should treat any `***` as "credential-shaped material was redacted
+here"; the exact type lives only in the process that did the
+redaction, not in the persisted output.
+
+Compiled patterns are cached behind a `threading.RLock` so two
+concurrent MCP tool calls cannot race on first redaction. The lock
+is re-entrant so a future custom user pattern that itself raises and
+gets re-redacted in an `except` block via `_extra_patterns` will not
+deadlock.
 
 ### 8. MCP tool surface guards (`server.py`)
 

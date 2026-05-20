@@ -33,17 +33,18 @@ For every `agy --print` invocation the adapter spawns:
 ### What the klog tail recognises
 
 ```
-Created conversation <uuid>         -> {type: system, subtype: conversation_started, id}
-Streaming conversation <uuid>       -> {type: system, subtype: conversation_streaming}
-Starting new conversation (agent=*) -> {type: system, subtype: turn_start, is_agent}
-Print mode: starting (...)          -> {type: system, subtype: print_started, prompt_length, model}
-Auto-flush: sending N queued        -> {type: user, subtype: input, count: N}
-Language server listening ... :NNN  -> {type: system, subtype: sidecar_ready, grpc_port: N}
-Stopping conversation stream        -> {type: system, subtype: turn_end}
-Language server shutting down       -> {type: system, subtype: shutdown}
-SendUserMessage failed: <reason>    -> {type: error, source: send, detail}
-Print mode: auth ... failed         -> {type: error, source: auth, detail}
-auth timed out                      -> {type: error, source: auth, detail: "timed out"}
+Created conversation <uuid>                  -> {type: system, subtype: conversation_started, id}
+Streaming conversation <uuid>                -> {type: system, subtype: conversation_streaming}
+Starting new conversation (agent=*)          -> {type: system, subtype: turn_start, is_agent}
+Print mode: starting (...)                   -> {type: system, subtype: print_started, prompt_length, model}
+Print mode: resuming conversation <uuid>     -> {type: system, subtype: print_resumed, id}
+Auto-flush: sending N queued                 -> {type: user, subtype: input, count: N}
+Language server listening ... :NNN           -> {type: system, subtype: sidecar_ready, grpc_port: N}
+Stopping conversation stream                 -> {type: system, subtype: turn_end}
+Language server shutting down                -> {type: system, subtype: shutdown}
+Print mode: SendUserMessage failed: <detail> -> {type: error, source: send, detail}
+Print mode: auth error: <detail>             -> {type: error, source: auth, detail}
+Print mode: auth timed out                   -> {type: error, source: auth, subtype: auth_timeout}
 ```
 
 The session ID extracted from `Created conversation <uuid>` is the

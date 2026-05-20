@@ -109,7 +109,15 @@ class SafetyPolicy:
         default=None, repr=False,
     )
     _redact_signature: tuple[str, ...] | None = field(default=None, repr=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Re-entrant on purpose (Phase 8 R1 sec P0-2): a future custom
+    # ``extra_pattern`` whose substitution raises and gets re-redacted
+    # inside an ``except`` block via ``_extra_patterns`` would deadlock
+    # under a plain ``Lock``. RLock has the same critical-section
+    # semantics for the common single-call path and is essentially
+    # free under contention.
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False,  # type: ignore[arg-type]
+    )
 
     @classmethod
     def from_config(cls, config: Config | None = None) -> "SafetyPolicy":

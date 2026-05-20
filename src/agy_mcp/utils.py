@@ -68,23 +68,30 @@ _AUTHZ_HEADER = re.compile(
 REDACTION_PLACEHOLDER = "***"
 
 # Anonymise per-user paths to keep operator usernames + tooling layout out
-# of error envelopes (Phase 3 review M3 + R2 N1). The regex set covers:
+# of error envelopes (Phase 3 review M3 + R2 N1; widened in Phase 8 R1
+# sec P1-1 to also anonymise bare ``/Users/<u>`` with no trailing path
+# component). The regex set covers:
 #   * Windows native:  C:\Users\<u>\...
 #   * Windows long path: \\?\C:\Users\<u>\...
 #   * UNC: \\server\share\Users\<u>\...
 #   * Mixed / forward-slash form on Windows: C:/Users/<u>/...
 #   * POSIX:  /Users/<u>/...   (macOS)
 #             /home/<u>/...    (Linux)
+#   * Trailing terminator: either ``/`` (followed by more path components),
+#     ``\`` (Windows), or end-of-string. The end-of-string anchor is
+#     essential — a string ending with ``/Users/<u>`` (no trailing path)
+#     would otherwise escape with the username visible.
 # Order matters: Windows patterns run BEFORE the POSIX ``/Users/`` rule so
 # a string like ``C:/Users/<u>/`` gets the drive prefix stripped together
 # with the user segment, rather than leaving a stray ``C:~/`` behind.
 _HOME_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Windows: optional ``\\?\`` long-path prefix, drive letter, both \ and /.
-    re.compile(r"(?i)(?:\\\\\?\\)?[A-Z]:[\\/]Users[\\/][^\\/\s\"']+[\\/]"),
-    # UNC ``\\server\share\Users\<u>\``.
-    re.compile(r"(?i)\\\\[^\\/\s\"']+\\[^\\/\s\"']+\\Users\\[^\\/\s\"']+\\"),
-    re.compile(r"/Users/[^/\s\"']+/"),
-    re.compile(r"/home/[^/\s\"']+/"),
+    # Trailing component is ``[\\/]`` or end-of-string.
+    re.compile(r"(?i)(?:\\\\\?\\)?[A-Z]:[\\/]Users[\\/][^\\/\s\"']+(?:[\\/]|$)"),
+    # UNC ``\\server\share\Users\<u>\`` (or end-of-string).
+    re.compile(r"(?i)\\\\[^\\/\s\"']+\\[^\\/\s\"']+\\Users\\[^\\/\s\"']+(?:\\|$)"),
+    re.compile(r"/Users/[^/\s\"']+(?:/|$)"),
+    re.compile(r"/home/[^/\s\"']+(?:/|$)"),
 )
 
 

@@ -63,6 +63,35 @@ def test_bridge_request_rejects_invalid_max_output_chars():
         BridgeRequest(prompt="x", max_output_chars=0)
 
 
+def test_bridge_request_rejects_oversized_prompt():
+    """Phase 8 R1 arch P2-3: cap prompt length to defeat
+    argv-overflow / unbounded buffering."""
+
+    huge = "x" * (256_001)  # 1 char over the documented cap
+    with pytest.raises(ValidationError) as excinfo:
+        BridgeRequest(prompt=huge)
+    assert "prompt exceeds" in str(excinfo.value)
+
+
+def test_bridge_request_rejects_oversized_timeout():
+    """Phase 8 R1 arch P2-1: timeout is capped at 24h. Beyond that
+    callers should use ``mode='long'`` + ``agy_start``."""
+
+    with pytest.raises(ValidationError) as excinfo:
+        BridgeRequest(prompt="x", timeout=86_401)  # 1s over 24h
+    assert "timeout exceeds" in str(excinfo.value)
+
+
+def test_bridge_request_rejects_oversized_max_output_chars():
+    """Phase 8 R1 arch P2-1: max_output_chars is capped at 8 MiB so
+    a hostile caller cannot ask the bridge to buffer an unbounded
+    transcript in process memory."""
+
+    with pytest.raises(ValidationError) as excinfo:
+        BridgeRequest(prompt="x", max_output_chars=(8 * 1024 * 1024) + 1)
+    assert "max_output_chars exceeds" in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # BridgeResponse
 # ---------------------------------------------------------------------------

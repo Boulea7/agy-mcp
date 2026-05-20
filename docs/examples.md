@@ -68,6 +68,12 @@ all and keep tests green. Don't merge until tests pass.
 """,
     cd="/Users/me/work/api",
     mode="long",
+    # `allow_write=True` is required for any mutation. Bridge default
+    # `worktree=True` means the run lands under
+    # `.agy-mcp/worktrees/<session_id>/` rather than the live checkout —
+    # that's the safety net. Override with config or
+    # `AGY_MCP_WORKTREE_DEFAULT=0` if you intentionally want writes in
+    # the main tree.
     allow_write=True,
 )
 job_id = start["job_id"]
@@ -75,12 +81,16 @@ print("kicked off", job_id)
 
 # ... do other work, handle other turns ...
 
-# Poll status when you want a check-in
+# Poll status when you want a check-in. agy_status returns:
+#   {"success": True, "record": {... JobRecord fields incl. artifacts ...}}
 status = agy_status(job_id)
-if status["record"]["status"] in {"completed", "failed", "cancelled"}:
+record = status["record"]
+if record["status"] in {"completed", "failed", "cancelled"}:
     out = agy_read(job_id, translate="claude")
-    # out["events"] is the full claude-protocol event stream
-    # out["artifacts"] lists files written under the worktree
+    # out["events"] is the claude-protocol event stream (a list of dicts).
+    # out["count"] is len(out["events"]). Artifacts (files written under
+    # the worktree) live on the JobRecord, NOT on agy_read's response:
+    artifacts = record["artifacts"]
 ```
 
 If the job hangs you can `agy_cancel(job_id)` — the supervisor sends
@@ -120,18 +130,34 @@ Before kicking off a complex job, verify the environment is ready
 without consuming an `agy` request.
 
 ```python
-report = agy_doctor()
+out = agy_doctor()
+# agy_doctor returns the envelope:
+#   {"success": True, "report": {...}, "version": "<agy-mcp version>"}
+# The actual report lives under out["report"]:
+report = out["report"]
+# report["healthy"] is True iff every check has ok=True OR severity != "error".
 # report["checks"] is a list of:
-#   {"name": "python", "ok": True, "severity": "info", "detail": "Python 3.12.13; requires >= 3.11"}
-#   {"name": "uv", "ok": True, ...}
-#   {"name": "agy_binary", "ok": True, "detail": "agy 1.0.0 at ~/.local/bin/agy"}
-#   {"name": "gemini_binary", "ok": True/False, ...}
-#   {"name": "auth", "ok": True, "detail": "Google OAuth credentials present at ~/.gemini/oauth_creds.json"}
-#   {"name": "session_store", "ok": True, "detail": "session store at ~/.agy-mcp/sessions"}
-# `report["healthy"]` is True iff every check has ok=True OR severity != "error".
+#   {"name": "python",        "ok": True,  "severity": "info",
+#    "detail": "detected Python 3.12.13; requires >= 3.11"}
+#   {"name": "uv",            "ok": True,  ...}
+#   {"name": "agy_binary",    "ok": True,
+#    "detail": "agy 1.0.0 at ~/.local/bin/agy"}
+#   {"name": "gemini_binary", "ok": True or False, ...}
+#       # gemini_binary may report ok=False with severity="warning":
+#       # gemini is a fallback backend, not required, so this is fine
+#       # unless you explicitly set backend="gemini".
+#   {"name": "auth",          "ok": True,
+#    "detail": "Google OAuth credentials present at ~/.gemini/oauth_creds.json"}
+#   {"name": "session_store", "ok": True,
+#    "detail": "session store at ~/.agy-mcp/sessions"}
+#
+# Some checks emit per-warning extra rows whose name is
+# "<label>_warning" (e.g. "agy_warning", "gemini_warning") — these are
+# additional diagnostic strings, not separate probes. Filter on `name`
+# if you only want the main probes.
 
 # After upgrading the agy CLI in place:
-report = agy_doctor(force_refresh=True)  # re-probes capabilities, no stale cache
+out = agy_doctor(force_refresh=True)  # re-probes capabilities, no stale cache
 ```
 
 The doctor never leaks secrets — `auth` reports presence, never the

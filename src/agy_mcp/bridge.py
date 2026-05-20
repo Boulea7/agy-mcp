@@ -119,31 +119,41 @@ _EXTRA_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _EXTRA_ENV_VALUE_BANNED = re.compile(r"[\x00\r\n]")
 
 
-def _parse_extra_env(items: list[str]) -> dict[str, str]:
+def _parse_extra_env(items: list[str]) -> tuple[dict[str, str], list[str]]:
     """Parse ``--extra-env KEY=value`` flags.
 
     Names that look like environment variables (uppercase + underscore +
-    digit) are accepted; anything else is silently dropped — we don't want
-    a poisoned flag like ``--extra-env "/etc/passwd=x"`` to reach the env.
-    Values containing NUL / CR / LF are also dropped to block smuggling of
-    a fake second variable into the child env.
+    digit) are accepted; anything else is dropped — we don't want a
+    poisoned flag like ``--extra-env "/etc/passwd=x"`` to reach the env.
+    Values containing NUL / CR / LF are also dropped to block smuggling
+    of a fake second variable into the child env.
+
+    Returns ``(accepted, rejected_keys)`` so the caller can surface the
+    dropped entries as warnings instead of silently losing them (Phase 8
+    R1 sec P1-2). The MCP-side validator (``models._extra_env_safe``)
+    raises on bad input; the CLI keeps the lenient behaviour so a
+    typo doesn't fail the whole run, but we report what was dropped.
     """
 
     out: dict[str, str] = {}
+    rejected: list[str] = []
     for raw in items:
         if "=" not in raw:
+            rejected.append(raw)
             continue
         k, _, v = raw.partition("=")
         k = k.strip()
         if not k or not _EXTRA_ENV_NAME_RE.match(k):
+            rejected.append(raw)
             continue
         if _EXTRA_ENV_VALUE_BANNED.search(v):
+            rejected.append(raw)
             continue
         out[k] = v
-    return out
+    return out, rejected
 
 
-def _request_from_args(args: argparse.Namespace, config: Config) -> BridgeRequest:
+def _request_from_args(args: argparse.Namespace, config: Config) -> tuple[BridgeRequest, list[str]]:
     worktree_arg: bool | None
     if args.worktree == "default":
         worktree_arg = None
@@ -153,7 +163,18 @@ def _request_from_args(args: argparse.Namespace, config: Config) -> BridgeReques
     backend = args.backend or config.backend.prefer
     output_protocol = args.output_protocol or config.backend.output_protocol
 
-    return BridgeRequest(
+    extra_env, rejected = _parse_extra_env(args.extra_env)
+    warnings: list[str] = []
+    if rejected:
+        # Surface each rejected entry without leaking the value: keep
+        # the key prefix (if any) but drop everything after ``=``.
+        for raw in rejected:
+            key = raw.partition("=")[0].strip() or "<empty>"
+            warnings.append(
+                f"--extra-env entry dropped (invalid name or value): {key}=...",
+            )
+
+    request = BridgeRequest(
         prompt=args.PROMPT,
         cwd=args.cd,
         session_id=args.SESSION_ID,
@@ -170,8 +191,9 @@ def _request_from_args(args: argparse.Namespace, config: Config) -> BridgeReques
         dry_run=bool(args.dry_run),
         backend=backend,  # type: ignore[arg-type]
         output_protocol=output_protocol,  # type: ignore[arg-type]
-        extra_env=_parse_extra_env(args.extra_env),
+        extra_env=extra_env,
     )
+    return request, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     # Otherwise --detach lets malformed argv through with raw args.cd echoed
     # back in the response.
     try:
-        request = _request_from_args(args, config)
+        request, parse_warnings = _request_from_args(args, config)
     except Exception as exc:  # noqa: BLE001 - surface validation as envelope
         response = BridgeResponse(
             success=False,
@@ -307,6 +329,13 @@ def main(argv: list[str] | None = None) -> int:
         response = supervisor.start(request)
     else:
         response = _run(request, config, safety)
+    if parse_warnings:
+        # Surface CLI-side ``--extra-env`` drops as structured warnings so
+        # an operator sees what was silently rejected. Each warning is run
+        # through ``SafetyPolicy.redact`` first — the key name is fine to
+        # leak but a hostile key like ``/etc/passwd`` would otherwise land
+        # raw in the envelope. Phase 8 R1 sec P1-2.
+        response.warnings.extend(safety.redact(w) for w in parse_warnings)
     json.dump(response.model_dump(exclude_none=False), sys.stdout)
     sys.stdout.write("\n")
     return 0 if response.success else 1

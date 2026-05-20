@@ -58,6 +58,12 @@ Thumbs.db
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+# ...but the canonical drop-in snippets under prompts/ ARE meant to be
+# committed; the bare-name patterns above would otherwise silently
+# match prompts/CLAUDE.md and prompts/AGENTS.md.
+!prompts/AGENTS.md
+!prompts/CLAUDE.md
+!prompts/GEMINI.md
 
 # Secrets — never commit
 .env

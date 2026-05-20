@@ -207,7 +207,8 @@ def test_request_from_args_honours_overrides():
         ]
     )
     cfg = _default_config()
-    req = _request_from_args(args, cfg)
+    req, warnings = _request_from_args(args, cfg)
+    assert warnings == []
     assert req.prompt == "do thing"
     assert req.cwd == "/tmp"
     assert req.mode == "execute"
@@ -229,14 +230,14 @@ def test_request_from_args_honours_overrides():
 def test_request_from_args_worktree_default_uses_config():
     parser = _build_parser()
     args = parser.parse_args(["--PROMPT", "x"])
-    req = _request_from_args(args, _default_config())
+    req, _warnings = _request_from_args(args, _default_config())
     assert req.worktree is None  # None means "follow config"
 
 
 def test_request_from_args_worktree_false_is_explicit():
     parser = _build_parser()
     args = parser.parse_args(["--PROMPT", "x", "--worktree", "false"])
-    req = _request_from_args(args, _default_config())
+    req, _warnings = _request_from_args(args, _default_config())
     assert req.worktree is False
 
 
@@ -246,38 +247,44 @@ def test_request_from_args_worktree_false_is_explicit():
 
 
 def test_parse_extra_env_accepts_valid_names():
-    out = _parse_extra_env(["FOO=bar", "BAZ_QUX=1", "_LEADING=ok"])
+    out, rejected = _parse_extra_env(["FOO=bar", "BAZ_QUX=1", "_LEADING=ok"])
     assert out == {"FOO": "bar", "BAZ_QUX": "1", "_LEADING": "ok"}
+    assert rejected == []
 
 
 def test_parse_extra_env_rejects_unsafe_keys():
-    # Lowercase, leading digit, path-like, special chars all dropped silently.
-    out = _parse_extra_env(
-        [
-            "lowercase=x",
-            "1leading=x",
-            "/etc/passwd=x",
-            "FOO BAR=x",
-            "FOO-BAR=x",       # hyphen disallowed
-            "no-equals-here",  # no = at all
-            "=missing-key",
-        ]
-    )
+    # Lowercase, leading digit, path-like, special chars all dropped — but the
+    # CLI surfaces them via the returned ``rejected`` list (Phase 8 R1 sec
+    # P1-2) so they are no longer SILENTLY dropped.
+    inputs = [
+        "lowercase=x",
+        "1leading=x",
+        "/etc/passwd=x",
+        "FOO BAR=x",
+        "FOO-BAR=x",       # hyphen disallowed
+        "no-equals-here",  # no = at all
+        "=missing-key",
+    ]
+    out, rejected = _parse_extra_env(inputs)
     assert out == {}
+    assert set(rejected) == set(inputs)
 
 
 def test_parse_extra_env_keeps_value_verbatim_for_valid_keys():
     """Values are NOT scrubbed by _parse_extra_env itself — env-scrub happens later."""
 
-    out = _parse_extra_env(["MY_TOKEN=secret-value-here"])
+    out, rejected = _parse_extra_env(["MY_TOKEN=secret-value-here"])
     assert out == {"MY_TOKEN": "secret-value-here"}
+    assert rejected == []
 
 
 def test_parse_extra_env_rejects_control_chars_in_value():
     """Phase 3 R1 / M5: newline/CR/NUL in value must drop the entry — they
-    smuggle a fake second variable into the child env when echoed."""
+    smuggle a fake second variable into the child env when echoed.
+    Phase 8 R1 sec P1-2: rejected entries surface in the second tuple
+    element instead of being silently lost."""
 
-    out = _parse_extra_env(
+    out, rejected = _parse_extra_env(
         [
             "FOO=line1\nline2",
             "BAR=carriage\rreturn",
@@ -286,11 +293,14 @@ def test_parse_extra_env_rejects_control_chars_in_value():
         ]
     )
     assert out == {"OK": "clean"}
+    assert len(rejected) == 3
+    assert all(r.split("=")[0] in {"FOO", "BAR", "BAZ"} for r in rejected)
 
 
 def test_parse_extra_env_last_value_wins():
-    out = _parse_extra_env(["FOO=first", "FOO=second"])
+    out, rejected = _parse_extra_env(["FOO=first", "FOO=second"])
     assert out == {"FOO": "second"}
+    assert rejected == []
 
 
 # ---------------------------------------------------------------------------

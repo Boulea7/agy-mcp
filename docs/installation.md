@@ -148,11 +148,33 @@ so the bridge re-probes capabilities instead of returning a cached version.
 
 ```bash
 uv tool uninstall agy-mcp
-# Optional: remove installed skill bundles
+```
+
+The installed SKILL bundles are NOT removed automatically. The packaged
+files are:
+
+- `~/.claude/skills/collaborating-with-antigravity/SKILL.md`
+- `~/.claude/skills/collaborating-with-antigravity/scripts/agy_bridge.py`
+- `~/.claude/skills/collaborating-with-antigravity/references/{usage,prompt-patterns,security}.md`
+- `~/.agents/skills/collaborating-with-antigravity/` — same five files
+- `~/.agy/skills/agy-collaboration/SKILL.md`
+- `~/.agy/skills/agy-collaboration/references/collaboration.md`
+
+If you have not added local overrides to those directories, remove
+them with:
+
+```bash
+# Inspect first — these are the canonical files install_skills writes.
+# Local overrides under the same paths would be lost.
+ls -la ~/.claude/skills/collaborating-with-antigravity/ \
+       ~/.agents/skills/collaborating-with-antigravity/ \
+       ~/.agy/skills/agy-collaboration/ 2>/dev/null
+
+# Once verified there's nothing of your own under those paths:
 rm -rf ~/.claude/skills/collaborating-with-antigravity \
        ~/.agents/skills/collaborating-with-antigravity \
        ~/.agy/skills/agy-collaboration
 ```
 
-The bridge writes nothing under `~/.gemini/`, so removing `agy-mcp` cannot
-affect Antigravity's own state.
+`agy-mcp` never writes anywhere under `~/.gemini/`, so removing it
+cannot affect Antigravity's own state directory.

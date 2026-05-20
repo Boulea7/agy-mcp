@@ -79,9 +79,14 @@ Resolution precedence (highest wins):
 1. Tool / CLI flag argument.
 2. Environment variable (`AGY_MCP_WORKTREE_DEFAULT`,
    `AGY_MCP_ALLOW_WRITE_DEFAULT`, `AGY_MCP_BACKEND`,
-   `AGY_MCP_OUTPUT_PROTOCOL`, `AGY_CLI_DISABLE_AUTO_UPDATE`).
+   `AGY_MCP_OUTPUT_PROTOCOL`).
 3. `~/.config/agy-mcp/config.toml` (or `%APPDATA%/agy-mcp/config.toml`).
 4. Built-in defaults.
+
+`AGY_CLI_DISABLE_AUTO_UPDATE` is **not** part of this resolution chain
+— it is a subprocess passthrough set by `adapters/agy.py` into the
+child's environment so the `agy` CLI does not phone home during a
+build, and it has no effect on `agy-mcp`'s own behaviour.
 
 Defaults: `worktree=True` for `execute` mode, `allow_write=False`,
 `backend="auto"`, `output_protocol="claude"`.
@@ -128,18 +133,18 @@ it). The `openat`-based airtight fix is logged in
 
 ```python
 class BridgeRequest(BaseModel):
-    prompt: str
-    cwd: Path = Path(".")
+    prompt: str                          # 1 ≤ len ≤ 256_000
+    cwd: str = "."
     session_id: str | None = None
     model: str | None = None
     sandbox: bool = False
     mode: Literal["ask","plan","prototype","review","execute","browser","long"] = "ask"
     return_all_messages: bool = False
-    timeout: int = 900
+    timeout: int = 900                    # 1 ≤ value ≤ 86400 (24h)
     detach: bool = False
     allow_write: bool = False
     worktree: bool | None = None          # None -> use config default
-    max_output_chars: int = 60000
+    max_output_chars: int = 60000         # 1 ≤ value ≤ 8 MiB
     backend: Literal["auto", "agy", "gemini"] = "auto"
     output_protocol: Literal["raw", "claude", "codex"] = "claude"
     extra_env: dict[str, str] = {}        # validated: ^[A-Z_][A-Z0-9_]*$,
