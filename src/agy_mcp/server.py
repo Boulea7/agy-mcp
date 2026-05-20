@@ -537,6 +537,18 @@ def agy_read_tool(
     err = _validate_job_id(safety, job_id)
     if err is not None:
         return _structured_failure(safety, ValueError(err))
+    if since < 0:
+        return _structured_failure(
+            safety, ValueError("since must be a non-negative integer"),
+        )
+    try:
+        record = supervisor.status(job_id)
+    except Exception as exc:  # noqa: BLE001
+        return _structured_failure(safety, exc)
+    if record is None:
+        return _structured_failure(
+            safety, ValueError(f"job_id {job_id!r} not found"),
+        )
     try:
         if translate is None:
             events = supervisor.read_events(job_id, since=since)
@@ -598,6 +610,10 @@ def agy_cancel_tool(job_id: str) -> dict[str, Any]:
 )
 def agy_sessions_tool(limit: int = 50) -> dict[str, Any]:
     config, safety, _store_, supervisor = _ensure_state()
+    if limit < 0:
+        return _structured_failure(
+            safety, ValueError("limit must be a non-negative integer"),
+        )
     effective: int | None = limit if limit > 0 else None
     try:
         records = supervisor.list_sessions(limit=effective)

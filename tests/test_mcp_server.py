@@ -245,6 +245,18 @@ def test_agy_status_unknown_returns_structured_failure(reset_state):
     assert "not found" in (out["error"] or "")
 
 
+def test_agy_read_unknown_returns_structured_failure(reset_state):
+    out = server.agy_read_tool("job_does_not_exist_12345")
+    assert out["success"] is False
+    assert "not found" in (out["error"] or "")
+
+
+def test_agy_read_rejects_negative_since(reset_state):
+    out = server.agy_read_tool("job_does_not_exist_12345", since=-1)
+    assert out["success"] is False
+    assert "since" in (out["error"] or "")
+
+
 def test_agy_cancel_unknown_job_signalled_false(reset_state):
     out = server.agy_cancel_tool("job_does_not_exist_67890")
     assert out["success"] is True
@@ -261,6 +273,12 @@ def test_agy_sessions_lists_recent_jobs(reset_state, tmp_path: Path):
     assert out["success"] is True
     assert out["count"] >= 1
     assert any(r["job_id"] == job_id for r in out["records"])
+
+
+def test_agy_sessions_rejects_negative_limit(reset_state):
+    out = server.agy_sessions_tool(limit=-1)
+    assert out["success"] is False
+    assert "limit" in (out["error"] or "")
 
 
 # ---------------------------------------------------------------------------
