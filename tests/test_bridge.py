@@ -952,27 +952,10 @@ def test_main_returns_one_on_failure(monkeypatch, capsys, tmp_path: Path):
     assert "destructive" in payload["error"]
 
 
-def test_main_detach_returns_running_envelope(monkeypatch, capsys, tmp_path: Path):
-    """Phase 4: --detach hands off to the supervisor and returns a job_id."""
+def test_main_detach_rejects_cli_background_mode(monkeypatch, capsys, tmp_path: Path):
+    """CLI --detach cannot outlive its process; MCP agy_start owns long jobs."""
 
-    cap = _capability("agy")
-    fake = _FakeAdapter(
-        capability=cap,
-        run_result=_result(
-            events=[
-                CanonicalEvent(type="system", subtype="init"),
-                CanonicalEvent(type="assistant", text="async done"),
-                CanonicalEvent(type="result", subtype="success"),
-            ],
-            session_id="sess-detach",
-        ),
-    )
-    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
-    # Pin the session store under tmp_path so we don't pollute the user's
-    # real ~/.agy-mcp tree.
-    cfg = _default_config()
-    cfg.session_store.root = str(tmp_path / "sessions")
-    monkeypatch.setattr("agy_mcp.bridge.get_config", lambda: cfg)
+    monkeypatch.setattr("agy_mcp.bridge.get_config", lambda: _default_config())
     rc = main(
         [
             "--PROMPT", "hi",
@@ -982,11 +965,9 @@ def test_main_detach_returns_running_envelope(monkeypatch, capsys, tmp_path: Pat
     )
     out = capsys.readouterr().out
     payload = json.loads(out.splitlines()[-1])
-    assert rc == 0
-    assert payload["success"] is True
-    assert payload["status"] == "running"
-    assert payload["job_id"]
-    assert payload["job_id"].startswith("job_")
+    assert rc == 1
+    assert payload["success"] is False
+    assert "agy_start" in payload["error"]
 
 
 def test_main_detach_rejects_invalid_request_first(monkeypatch, capsys, tmp_path: Path):

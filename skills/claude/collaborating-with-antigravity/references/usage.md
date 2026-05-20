@@ -15,14 +15,14 @@ agy-bridge --PROMPT <text> --cd <dir>
           [--output-protocol claude|raw|codex]
           [--timeout <seconds>] [--max-output-chars <int>]
           [--return-all-messages]
-          [--detach] [--dry-run] [--debug]
+          [--dry-run] [--debug]
           [--extra-env KEY=value ...]
 ```
 
 Notable defaults:
 
-- `--timeout` defaults to `900` seconds (15 min). Use a longer value for
-  `long` mode or set `--detach` instead.
+- `--timeout` defaults to `900` seconds (15 min). For durable long jobs,
+  use the MCP `agy_start` tool rather than CLI `--detach`.
 - `--worktree default` (the default) lets config / env decide; pass
   `--worktree true` to force-on or `--worktree false` to force-off.
 - `--backend auto` chooses `agy` when available, falling back to `gemini`

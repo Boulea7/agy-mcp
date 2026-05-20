@@ -47,7 +47,6 @@ from agy_mcp.models import (
     CanonicalEvent,
 )
 from agy_mcp.safety import SafetyPolicy, is_git_workspace
-from agy_mcp.session_store import SessionStore
 from agy_mcp.worktree import (
     WorktreeError,
     create_worktree,
@@ -345,14 +344,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.detach:
-        # Hand the request off to the supervisor for background execution.
-        # The synchronous response carries the new job_id + status="running";
-        # callers poll via agy_status / agy_read.
-        from agy_mcp.supervisor import Supervisor
-
-        store = SessionStore(config.session_store_root())
-        supervisor = Supervisor(store=store, config=config, safety=safety)
-        response = supervisor.start(request)
+        response = BridgeResponse(
+            success=False,
+            error=(
+                "CLI --detach is not durable because the bridge process exits; "
+                "use the MCP agy_start tool for long-running jobs."
+            ),
+            cwd=request.cwd,
+            adapter=AdapterMetadata(),
+        ).touch()
     else:
         response = _run(request, config, safety)
     if parse_warnings:
