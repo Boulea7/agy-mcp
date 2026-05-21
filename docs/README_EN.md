@@ -184,7 +184,9 @@ that repo knows when to call `agy`:
 | [`output-strategy.md`](output-strategy.md) | Hybrid backend: stdout + klog + transcript.jsonl + protocol translator |
 | [`security.md`](security.md) | Threat model, defence catalogue, explicit non-defences |
 | [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix |
-| [`examples.md`](examples.md) | 6 end-to-end scenarios |
+| [`examples.md`](examples.md) | 7 end-to-end scenarios |
+| [`comparison-with-cli-wrappers.md`](comparison-with-cli-wrappers.md) | Stream-json passthrough vs Hybrid backend wrapper patterns |
+| [`release.md`](release.md) | PyPI trusted publishing + GitHub Release manual (one-time setup + routine flow) |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history (Keep a Changelog) |
 
 ## Development

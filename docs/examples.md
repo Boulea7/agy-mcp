@@ -1,6 +1,6 @@
 # Examples
 
-Six end-to-end scenarios showing the typical bridge call patterns. All
+Seven end-to-end scenarios showing the typical bridge call patterns. All
 examples assume `agy-mcp` is registered with the caller (see
 [`installation.md`](installation.md)).
 
@@ -197,6 +197,32 @@ out = agy_install_skill(targets=["claude"], force=True)
 
 The `antigravity` target lands under the wrapper-owned `~/.agy/skills/`
 in user scope (project policy forbids writes under `~/.gemini/`).
+
+---
+
+## 7. Prune the local session store
+
+Long-running projects accumulate per-job directories under
+`~/.agy-mcp/sessions/`. Drop ones older than a threshold without
+shelling out.
+
+```python
+# Drop sessions whose mtime is older than 30 days.
+out = agy_purge(days=30)
+# out["removed"]: list of dicts {job_id, age_days, ...} (paths redacted)
+# out["removed_count"]: int, len(out["removed"])
+# out["remaining"]: int, coarse count still on disk
+
+# Refuses days <= 0 — guards against an off-by-one config wiping the
+# entire store.
+agy_purge(days=0)        # {"success": False, "error": "days must be > 0"}
+agy_purge(days=-7)       # ditto
+agy_purge(days=4000)     # also refuses (cap is 10 years)
+```
+
+The tool only touches directories whose name parses as a valid
+`job_id` slug; arbitrary files under `~/.agy-mcp/sessions/` are
+left alone.
 
 ---
 

@@ -165,7 +165,9 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 | [`docs/output-strategy.md`](docs/output-strategy.md) | Hybrid backend：stdout + klog + transcript.jsonl + 协议翻译器 |
 | [`docs/security.md`](docs/security.md) | 威胁模型、防护清单、明确不防御项 |
 | [`docs/cli-capabilities.md`](docs/cli-capabilities.md) | `agy --help` 实测 + capability 矩阵 |
-| [`docs/examples.md`](docs/examples.md) | 6 个典型场景 |
+| [`docs/examples.md`](docs/examples.md) | 7 个典型场景 |
+| [`docs/comparison-with-cli-wrappers.md`](docs/comparison-with-cli-wrappers.md) | Stream-json passthrough vs Hybrid backend 两种 wrapper 模式对比 |
+| [`docs/release.md`](docs/release.md) | PyPI trusted publishing + GitHub Release 发布手册（一次性设置 + 常规流程） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录（Keep a Changelog） |
 
 英文版 README → [`docs/README_EN.md`](docs/README_EN.md)。

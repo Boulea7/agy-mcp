@@ -1,0 +1,155 @@
+name: Release
+
+# Triggered when a tag matching ``v*`` is pushed (e.g. ``v0.1.6``).
+# The flow rebuilds artefacts from the exact tag, re-runs the release-gate
+# audit, and publishes to PyPI via OIDC trusted publishing — no API token
+# stored anywhere.
+#
+# Prerequisites (one-time setup, see docs/release.md):
+#   1. PyPI: configure trusted publisher pointing at this workflow
+#      (repository=Boulea7/agy-mcp, workflow=release.yml,
+#       environment=release).
+#   2. GitHub: create environment ``release`` under repo Settings →
+#      Environments. No secrets needed; OIDC handles auth.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v0.1.5). Manual override."
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Test ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Setup Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Lint (ruff)
+        run: uv run --python ${{ matrix.python-version }} ruff check src tests scripts
+
+      - name: Run pytest
+        run: uv run --python ${{ matrix.python-version }} pytest -q
+
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Setup Python 3.12
+        run: uv python install 3.12
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Audit release artefacts
+        run: uv run --python 3.12 python scripts/check_release_artifacts.py
+
+      - name: Upload dist/
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI (trusted publishing via OIDC)
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: release
+      url: https://pypi.org/p/agy-mcp
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist/
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: false
+          verbose: true
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download dist/
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          fail_on_unmatched_files: true
