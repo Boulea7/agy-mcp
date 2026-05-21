@@ -6,6 +6,20 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-05-21
+
+### Fixed
+
+- **CI: ``astral-sh/setup-uv`` floating tag**. v0.1.3 bumped the
+  action from ``@v3`` to ``@v8``, but ``setup-uv`` (per their v8.0
+  release notes) stops publishing floating major tags; ``@v8`` and
+  ``@v8.0`` no longer resolve and CI failed at "Set up job" with
+  ``Unable to resolve action astral-sh/setup-uv@v8``. Pinned to
+  ``@v7`` instead — the most recent floating major tag the project
+  still publishes — until we move to an SHA-pinned reference. No
+  functional change; v0.1.3 source is identical and remains a valid
+  pin if you're already on it (only CI/release-gate are affected).
+
 ## [0.1.3] — 2026-05-21
 
 ### Security
@@ -222,7 +236,8 @@ First public-ready cut.
   dry-run on three modes, real `agy --print` call with session
   resume.
 
-[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Boulea7/agy-mcp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Boulea7/agy-mcp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Boulea7/agy-mcp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Boulea7/agy-mcp/compare/v0.1.0...v0.1.1
