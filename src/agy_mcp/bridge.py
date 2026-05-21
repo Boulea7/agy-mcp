@@ -507,9 +507,26 @@ def _run_unsafe(
             "agent_messages truncated from "
             f"{original_len} to {len(assistant_text)} chars by max_output_chars"
         )
-    success = result.exit_code == 0
-    status = "completed" if success else "failed"
+    success = result.exit_code == 0 and not result.had_upstream_error
+    if result.had_upstream_error and result.exit_code == 0:
+        # agy v1.0.0 swallows upstream API errors and exits 0. The adapter
+        # already promoted the result envelope's subtype to ``upstream_error``
+        # via klog detection; surface the same failure at the bridge top level
+        # so callers reading only ``success`` / ``status`` / ``error`` (e.g.
+        # an MCP client that does not iterate ``all_messages``) still see it.
+        status = "upstream_error"
+    elif success:
+        status = "completed"
+    else:
+        status = "failed"
     all_messages = translated if request.return_all_messages else []
+
+    if success:
+        error_field: str | None = None
+    elif result.had_upstream_error and result.upstream_error_text:
+        error_field = result.upstream_error_text
+    else:
+        error_field = _pick_error_text(result.events) or "non-zero exit"
 
     return BridgeResponse(
         success=success,
@@ -518,7 +535,7 @@ def _run_unsafe(
         agent_messages=assistant_text,
         all_messages=all_messages,
         artifacts=result.artifacts,
-        error=None if success else (_pick_error_text(result.events) or "non-zero exit"),
+        error=error_field,
         warnings=all_warnings,
         cwd=_response_cwd(safety, effective_cwd),
         adapter=_adapter_meta(adapter, request, safety),

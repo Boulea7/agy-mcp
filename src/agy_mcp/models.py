@@ -15,7 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 Mode = Literal["ask", "plan", "prototype", "review", "execute", "browser", "long"]
 BackendName = Literal["auto", "agy", "gemini"]
 OutputProtocol = Literal["raw", "claude", "codex"]
-JobStatus = Literal["completed", "running", "failed", "cancelled", "unknown"]
+JobStatus = Literal[
+    "completed", "running", "failed", "cancelled", "unknown", "upstream_error"
+]
 
 
 # ---------------------------------------------------------------------------

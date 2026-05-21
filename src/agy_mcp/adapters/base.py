@@ -36,6 +36,14 @@ class AdapterRunResult:
     stderr_tail: str
     log_path: str | None
     artifacts: list[dict]
+    # v0.1.7: when the klog tail reader catches an upstream API error pattern
+    # (e.g. ``FAILED_PRECONDITION`` from a region-blocked Antigravity call) we
+    # set this flag so callers — and in particular ``bridge._build_response``
+    # — know exit_code 0 + empty stdout was actually a silent failure, not a
+    # successful no-op. ``upstream_error_text`` carries the first redacted
+    # message for the BridgeResponse.error field.
+    had_upstream_error: bool = False
+    upstream_error_text: str | None = None
 
 
 # ---------------------------------------------------------------------------

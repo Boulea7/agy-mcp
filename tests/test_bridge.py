@@ -776,6 +776,88 @@ def test_run_unsafe_success_path(monkeypatch, tmp_path: Path):
     assert resp.all_messages == []
 
 
+def test_run_promotes_upstream_error_to_top_level(monkeypatch, tmp_path: Path):
+    """v0.1.7: when the adapter detects a swallowed upstream API error
+    (``had_upstream_error=True``) the BridgeResponse must surface it at
+    the top level as ``success=False``, ``status='upstream_error'`` and
+    ``error=<first upstream message>`` even though ``exit_code == 0``.
+
+    Without this, MCP clients that read only ``success`` / ``status`` /
+    ``error`` (rather than iterating ``all_messages``) would mistake a
+    region-blocked / quota-exceeded call for a successful no-op."""
+
+    cap = _capability("agy", supports_log_file=True)
+    events = [
+        CanonicalEvent(type="system", subtype="init"),
+        CanonicalEvent(
+            type="error",
+            subtype="upstream_failed_precondition",
+            text="FAILED_PRECONDITION (code 400): User location is not supported.",
+        ),
+        CanonicalEvent(type="result", subtype="upstream_error"),
+    ]
+    upstream_msg = (
+        "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
+    )
+    run_result = AdapterRunResult(
+        events=events,
+        session_id="sess-region-block",
+        exit_code=0,
+        duration_ms=5000,
+        stdout_tail="",
+        stderr_tail="",
+        log_path=None,
+        artifacts=[],
+        had_upstream_error=True,
+        upstream_error_text=upstream_msg,
+    )
+    fake = _FakeAdapter(capability=cap, run_result=run_result)
+
+    def _build(backend, cfg, safety):
+        return fake
+
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", _build)
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path))
+    resp = _run(request, _default_config(), _safety())
+    assert resp.success is False
+    assert resp.status == "upstream_error"
+    assert resp.error == upstream_msg
+    assert resp.SESSION_ID == "sess-region-block"
+
+
+def test_run_keeps_success_when_no_upstream_error_and_exit_zero(
+    monkeypatch, tmp_path: Path
+):
+    """Regression guard: had_upstream_error=False + exit_code=0 must still
+    map to success=True / status=completed (don't accidentally penalise
+    the happy path)."""
+
+    cap = _capability("agy", supports_log_file=True)
+    run_result = AdapterRunResult(
+        events=[CanonicalEvent(type="assistant", text="ok")],
+        session_id="sess-OK",
+        exit_code=0,
+        duration_ms=5,
+        stdout_tail="",
+        stderr_tail="",
+        log_path=None,
+        artifacts=[],
+        had_upstream_error=False,
+        upstream_error_text=None,
+    )
+    fake = _FakeAdapter(capability=cap, run_result=run_result)
+
+    def _build(backend, cfg, safety):
+        return fake
+
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", _build)
+    request = BridgeRequest(prompt="hi", cwd=str(tmp_path))
+    resp = _run(request, _default_config(), _safety())
+    assert resp.success is True
+    assert resp.status == "completed"
+    assert resp.error is None
+
+
 def test_run_redacts_public_cwd_but_keeps_adapter_cwd_raw(monkeypatch):
     cap = _capability("agy", supports_log_file=True)
     fake = _FakeAdapter(

@@ -6,6 +6,50 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-05-21
+
+### Fixed
+
+- **Top-level `BridgeResponse` fields now reflect upstream silent
+  failures**. v0.1.6 added klog ERROR_PATTERNS detection in the agy
+  adapter, surfacing upstream API errors via the canonical event
+  stream as `error/upstream_*` events plus a
+  `result/upstream_error` envelope — but the wrapper's top-level
+  `success`, `status`, and `error` fields were still derived from
+  `exit_code == 0` alone, so an MCP client reading only the
+  envelope's top level would still mistake a region-blocked /
+  quota-exhausted call for a successful no-op. v0.1.7 plumbs
+  `had_upstream_error` + `upstream_error_text` from the adapter run
+  result through `bridge._build_response`: on detection, the response
+  is now `success=False`, `status="upstream_error"`, and `error=<first
+  redacted upstream message>`. `JobStatus` literal gains the
+  `"upstream_error"` value (additive — does not break supervisor /
+  session-store consumers that only set the existing
+  running/completed/failed/cancelled values).
+
+### CI
+
+- **GitHub Actions bumped to Node 24-compatible majors**. The
+  release workflow now uses `actions/upload-artifact@v5`,
+  `actions/download-artifact@v5`, and
+  `softprops/action-gh-release@v3`. Each upgrade is a Node 24
+  runtime change with no functional breaking changes for our
+  upload-by-name / download-by-name / annotated-release pattern;
+  see release notes upstream. Floating major tags `@v5` (artifact
+  actions) and `@v3` (gh-release) verified to exist via
+  `git ls-remote --tags` before the bump (avoiding the
+  `setup-uv@v8`-style trap of upgrading to a major tag the upstream
+  chose not to publish).
+
+### Added
+
+- **Bridge regression-guard tests**. `test_bridge.py` gains
+  `test_run_promotes_upstream_error_to_top_level` (asserts a fake
+  adapter returning `had_upstream_error=True, exit_code=0` produces a
+  `success=False, status='upstream_error', error=<msg>` envelope) and
+  `test_run_keeps_success_when_no_upstream_error_and_exit_zero` (the
+  symmetric happy-path guard). Suite goes 529 → 531 hermetic tests.
+
 ## [0.1.6] — 2026-05-21
 
 ### Fixed

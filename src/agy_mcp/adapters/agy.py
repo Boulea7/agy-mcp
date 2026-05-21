@@ -565,6 +565,8 @@ class AgyPrintBackend(BaseAdapter):
             ),
             log_path=str(log_path) if log_path else None,
             artifacts=[],
+            had_upstream_error=ctx.had_upstream_error,
+            upstream_error_text=ctx.first_upstream_error,
         )
 
     # ------------------------------------------------------------------
