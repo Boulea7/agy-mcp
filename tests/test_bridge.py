@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -156,18 +157,50 @@ def _safety() -> SafetyPolicy:
 
 
 def _init_git_repo(path: Path) -> Path:
+    """Create a git repo at ``path`` immune to the runner's git config.
+
+    Adds ``GIT_CONFIG_NOSYSTEM`` + a per-test ``HOME`` so the system /
+    user gitconfig (gpg signing, hook paths, commit templates) never
+    leaks in. Phase 8 review: prior helper inherited whatever the
+    developer had in ``~/.gitconfig`` and intermittently failed in
+    environments with signing enforced.
+    """
+
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    (path / "README.md").write_text("fixture\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    isolated_home = path.parent / f"{path.name}.gitconfig"
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "HOME": str(isolated_home),
+        "XDG_CONFIG_HOME": str(isolated_home / ".config"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    base_argv = [
+        "git",
+        "-c", "init.defaultBranch=main",
+        "-c", "commit.gpgsign=false",
+        "-c", "tag.gpgsign=false",
+    ]
     subprocess.run(
-        [
-            "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        base_argv + ["init"],
+        cwd=path, check=True, capture_output=True, env=env,
+    )
+    (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(
+        base_argv + ["add", "README.md"],
+        cwd=path, check=True, capture_output=True, env=env,
+    )
+    subprocess.run(
+        base_argv + [
+            "-c", "user.name=Test",
+            "-c", "user.email=test@example.com",
             "commit", "-m", "init",
         ],
         cwd=path,
         check=True,
         capture_output=True,
+        env=env,
     )
     return path
 

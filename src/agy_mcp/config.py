@@ -10,6 +10,7 @@ Precedence (highest first):
 from __future__ import annotations
 
 import os
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -238,14 +239,28 @@ def _apply_env_overrides(config: Config) -> None:
 
 
 # Module-level singleton cache; callers may force reload via load_config().
+# ``_CACHED_LOCK`` serialises the first-touch race so two concurrent MCP
+# tool calls cannot both trigger a TOML parse on the same path (Phase 8
+# review). The lock is held only across the assignment to ``_CACHED``;
+# ``load_config`` runs outside the critical section after a fresh load
+# decision is committed, so a slow disk read doesn't block other readers
+# of an already-warm cache.
 _CACHED: Config | None = None
+_CACHED_LOCK = threading.Lock()
 
 
 def get_config(*, reload: bool = False, path: Path | None = None) -> Config:
     global _CACHED
-    if _CACHED is None or reload or path is not None:
-        _CACHED = load_config(path=path)
-    return _CACHED
+    # Fast path: cached singleton, no reload requested, no explicit path.
+    # Reads of the bare reference are atomic in CPython, so the lock-free
+    # peek is safe; if we miss we re-check under the lock.
+    cached = _CACHED
+    if cached is not None and not reload and path is None:
+        return cached
+    with _CACHED_LOCK:
+        if _CACHED is None or reload or path is not None:
+            _CACHED = load_config(path=path)
+        return _CACHED
 
 
 __all__ = [

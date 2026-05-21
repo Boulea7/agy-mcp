@@ -171,7 +171,10 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> bool:
 
 
 def test_nine_tools_registered():
-    """The 9 documented tools must all live on the FastMCP instance."""
+    """The documented agy tool set must all live on the FastMCP instance.
+
+    Historically nine tools; v0.1.5 added ``agy_purge`` as the tenth.
+    """
 
     expected = {
         "agy",
@@ -183,6 +186,7 @@ def test_nine_tools_registered():
         "agy_sessions",
         "agy_doctor",
         "agy_install_skill",
+        "agy_purge",
     }
     assert expected == set(server.mcp._tool_manager._tools.keys())
 
@@ -554,6 +558,137 @@ def test_agy_install_skill_all_includes_antigravity(reset_state, monkeypatch, tm
     assert out["success"] is True
     targets = {entry["target"] for entry in out["installed"]}
     assert {"claude", "codex", "antigravity"} <= targets
+
+
+def test_install_skill_mixed_user_and_project_scopes_no_cross_pollution(
+    reset_state, monkeypatch, tmp_path: Path,
+):
+    """v0.1.5: a user-scope install followed by a project-scope install in the
+    same process must not contaminate each other — user files stay under
+    ``~/.claude/skills/`` and project files stay under ``<root>/.claude/skills/``.
+
+    Closes a class of bug where module-level ``_USER_SKILL_DIRS`` or a
+    cached install path could leak the prior call's destination into the
+    next call. Run the two scopes back-to-back in the same process to
+    catch any shared-state regression. Asserts on the filesystem rather
+    than the install envelope ``path`` strings because the envelope is
+    redacted (``/home/<user>/`` collapses to ``~/``) before it leaves the
+    server boundary.
+    """
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    from agy_mcp import install as install_mod
+
+    fresh_user_dirs = {
+        "claude": fake_home / ".claude" / "skills",
+        "codex": fake_home / ".agents" / "skills",
+        "antigravity": fake_home / ".agy" / "skills",
+    }
+    monkeypatch.setattr(install_mod, "_USER_SKILL_DIRS", fresh_user_dirs)
+
+    user_out = server.agy_install_skill_tool(
+        targets=["claude", "codex"], scope="user",
+    )
+    assert user_out["success"] is True
+
+    # Assert directly on the filesystem so the redacted envelope strings
+    # don't fool the test. The bundle layout for both claude and codex
+    # is the same ``collaborating-with-antigravity/`` leaf.
+    user_claude_skill = (
+        fake_home / ".claude" / "skills"
+        / "collaborating-with-antigravity" / "SKILL.md"
+    )
+    user_codex_skill = (
+        fake_home / ".agents" / "skills"
+        / "collaborating-with-antigravity" / "SKILL.md"
+    )
+    assert user_claude_skill.is_file(), "user-scope claude SKILL.md missing"
+    assert user_codex_skill.is_file(), "user-scope codex SKILL.md missing"
+    # Project paths must not exist yet — no leakage in the other direction.
+    assert not (project / ".claude").exists()
+    assert not (project / ".agents").exists()
+
+    project_out = server.agy_install_skill_tool(
+        targets=["claude", "codex"], scope="project",
+        project_root=str(project),
+    )
+    assert project_out["success"] is True
+
+    project_claude_skill = (
+        project / ".claude" / "skills"
+        / "collaborating-with-antigravity" / "SKILL.md"
+    )
+    project_codex_skill = (
+        project / ".agents" / "skills"
+        / "collaborating-with-antigravity" / "SKILL.md"
+    )
+    assert project_claude_skill.is_file(), "project-scope claude SKILL.md missing"
+    assert project_codex_skill.is_file(), "project-scope codex SKILL.md missing"
+
+    # The earlier user-scope installs must still be intact — no shared
+    # state should have wiped or overwritten them.
+    assert user_claude_skill.is_file(), "user-scope SKILL.md was clobbered"
+    assert user_codex_skill.is_file(), "user-scope codex SKILL.md was clobbered"
+    # And the project install must NOT have written into the fake HOME.
+    leaked_home = fake_home / "proj"
+    assert not leaked_home.exists()
+
+    # A second user-scope round must remain idempotent + leave project files.
+    user_out2 = server.agy_install_skill_tool(
+        targets=["claude"], scope="user",
+    )
+    assert user_out2["success"] is True
+    assert project_claude_skill.is_file(), (
+        "project-scope SKILL.md was deleted by a subsequent user install"
+    )
+
+
+def test_agy_purge_rejects_zero_or_negative(reset_state):
+    """v0.1.5: ``agy_purge(days=0)`` would otherwise wipe the entire store."""
+
+    for bad in (0, -1, -90):
+        out = server.agy_purge_tool(days=bad)
+        assert out["success"] is False
+        assert "days" in (out["error"] or "")
+
+
+def test_agy_purge_rejects_non_integer(reset_state):
+    """v0.1.5: typed inputs only — bool and float should be refused."""
+
+    # bool is a subclass of int in Python; reject it explicitly.
+    out_bool = server.agy_purge_tool(days=True)  # type: ignore[arg-type]
+    assert out_bool["success"] is False
+    out_float = server.agy_purge_tool(days=1.5)  # type: ignore[arg-type]
+    assert out_float["success"] is False
+
+
+def test_agy_purge_returns_removed_jobs(reset_state, tmp_path: Path, monkeypatch):
+    """v0.1.5: removing aged job dirs returns the redacted id list."""
+
+    monkeypatch.setenv("AGY_MCP_SESSION_ROOT", str(tmp_path / "sessions"))
+    config, safety, store, _supervisor_ = server._ensure_state()
+    young = store.create_job()
+    aged = store.create_job()
+    from agy_mcp.session_store import JobPaths
+
+    aged_paths = JobPaths.for_job(store.root, aged.job_id)
+    import os as _os
+
+    ancient = time.time() - 90 * 86400
+    _os.utime(aged_paths.root, (ancient, ancient))
+    out = server.agy_purge_tool(days=30)
+    assert out["success"] is True
+    assert out["days"] == 30
+    removed_ids = set(out["removed"])
+    assert aged.job_id in removed_ids
+    assert young.job_id not in removed_ids
+    assert out["removed_count"] == 1
+    assert out["remaining"] >= 1
+    server._reset_state_for_tests()
 
 
 def test_agy_status_unknown_uses_structured_failure(reset_state):
@@ -1068,6 +1203,7 @@ def test_all_tools_advertise_output_schema(reset_state):
         "agy_sessions",
         "agy_doctor",
         "agy_install_skill",
+        "agy_purge",
     }
     assert expected.issubset(by_name.keys()), (
         f"missing tools: {expected - by_name.keys()}"
@@ -1139,6 +1275,7 @@ def test_all_tool_output_models_round_trip_json(reset_state):
         DoctorToolResponse,
         InstallSkillToolResponse,
         JobRecord,
+        PurgeToolResponse,
         ReadToolResponse,
         SessionsToolResponse,
         StatusToolResponse,
@@ -1184,6 +1321,13 @@ def test_all_tool_output_models_round_trip_json(reset_state):
         "agy_install_skill": InstallSkillToolResponse(
             success=True,
             installed=[{"target": "claude", "path": "/tmp/SKILL.md"}],
+        ),
+        "agy_purge": PurgeToolResponse(
+            success=True,
+            days=30,
+            removed=["job_old1", "job_old2"],
+            removed_count=2,
+            remaining=4,
         ),
     }
 

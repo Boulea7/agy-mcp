@@ -258,6 +258,51 @@ def test_redact_skips_malformed_extra_pattern():
     assert "INTERNAL-foo" not in out2
 
 
+def test_safety_policy_compile_warnings_surfaces_bad_pattern_index():
+    """v0.1.5: bad ``redact_extra_patterns`` entries no longer disappear —
+    they show up in :attr:`SafetyPolicy.compile_warnings` so an operator
+    can see which index failed without echoing the pattern body (which
+    might itself be a secret-shaped probe)."""
+
+    pol = _policy(redact_extra_patterns=[
+        r"valid-\d+",
+        r"[unterminated",
+        r"INTERNAL-[a-z]+",
+        r"(?P<dup>x)(?P<dup>y)",  # duplicate named group — also broken
+    ])
+    warnings = pol.compile_warnings
+    # Two entries are broken; expect exactly two diagnostic lines.
+    assert len(warnings) == 2
+    # Diagnostics name the index but never echo the raw pattern body so
+    # a secret-shaped pattern cannot leak via the warnings channel. The
+    # re.error description (``unterminated character set``, ``duplicate
+    # named group``) is allowed — it describes the failure category, not
+    # the original pattern bytes.
+    assert any("[1]" in w for w in warnings)
+    assert any("[3]" in w for w in warnings)
+    for w in warnings:
+        # Raw pattern bodies must not leak. The first pattern is
+        # ``[unterminated`` (with the literal opening bracket); the
+        # second is the named-group regex containing ``<dup>``.
+        assert "[unterminated" not in w
+        assert "(?P<dup>" not in w
+    # The valid patterns still work.
+    assert "valid-12345" not in pol.redact("valid-12345")
+    assert "INTERNAL-foo" not in pol.redact("INTERNAL-foo")
+
+
+def test_safety_policy_compile_warnings_clear_after_signature_change():
+    """v0.1.5: replacing ``redact_extra_patterns`` with an all-valid list
+    must reset the warnings collected on the previous compile."""
+
+    pol = _policy(redact_extra_patterns=[r"[unterminated"])
+    assert pol.compile_warnings, "expected a warning on the first compile"
+    pol.config.redact_extra_patterns = [r"FIXED-\d+"]
+    # Trigger re-compile via a redact call.
+    pol.redact("nothing here")
+    assert pol.compile_warnings == []
+
+
 def test_redact_thread_safe_under_concurrent_calls():
     """R2 N2: SafetyPolicy.redact called from multiple adapter reader
     threads at once must never raise or return corrupted text."""

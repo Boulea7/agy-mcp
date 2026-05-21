@@ -60,6 +60,7 @@ from agy_mcp.models import (
     JobRecord,
     JobStatus,
 )
+from agy_mcp.routing import select_backend as _routing_select_backend
 from agy_mcp.safety import SafetyPolicy, is_git_workspace
 from agy_mcp.session_store import (
     JobPaths,
@@ -184,17 +185,18 @@ class Supervisor:
         return record.model_copy(update={"cwd": self._response_cwd(record.cwd)})
 
     # ------------------------------------------------------------------
-    # Default adapter factory (delegates to bridge._select_backend)
+    # Default adapter factory (delegates to routing.select_backend)
     # ------------------------------------------------------------------
 
     @staticmethod
     def _default_adapter_factory(
         request: BridgeRequest, config: Config, safety: SafetyPolicy,
     ) -> tuple[BaseAdapter, list[str]]:
-        # Local import to avoid an import cycle: bridge imports Supervisor.
-        from agy_mcp.bridge import _select_backend
-
-        return _select_backend(request, config, safety)
+        # Phase 8 review P3: route via the canonical ``agy_mcp.routing``
+        # module so the supervisor never has to lazy-import the bridge's
+        # CLI surface. Tests that need to inject a custom factory still
+        # do so via the ``adapter_factory=`` constructor arg.
+        return _routing_select_backend(request, config, safety)
 
     # ------------------------------------------------------------------
     # Public surface (called by bridge --detach and MCP tools)
@@ -783,11 +785,33 @@ def _wants_worktree(request: BridgeRequest, config: Config) -> bool:
 
 
 def _worktree_slug(request: BridgeRequest, job_id: str) -> str:
+    """Compose a unique worktree slug from the session id + job id.
+
+    Phase 8 review: prior shape was ``session_id or job_id`` which meant
+    two concurrent ``agy_start`` calls sharing the same ``session_id``
+    (e.g. the supervisor resuming a long conversation) would attempt to
+    create the same worktree path and the second one would crash with
+    ``FileExistsError``. Always appending the job-id suffix guarantees
+    per-job uniqueness while still embedding the session slug for
+    operator-friendly branch names.
+    """
+
     # Reuse the bridge sanitiser so sync and detached execute requests
-    # produce the same branch/path shape.
+    # produce the same branch/path shape. The job id is already
+    # ``job_<digits>_<hex>`` from ``generate_job_id`` — sanitise once
+    # more in case a caller injected a custom (already-validated) id
+    # whose grammar still surprises ``_make_session_slug``.
     from agy_mcp.bridge import _make_session_slug
 
-    return _make_session_slug(request.session_id or job_id)
+    job_suffix = _make_session_slug(job_id)
+    if request.session_id:
+        seed = _make_session_slug(request.session_id)
+        # 80-char cap stays as the worktree module's invariant. Take 48
+        # chars from the session slug then dash-join the trailing job
+        # suffix so the worktree always carries a per-job tail.
+        truncated = seed[:48].rstrip(".-_") or "session"
+        return f"{truncated}-{job_suffix}"[:80]
+    return job_suffix
 
 
 def _cleanup_unstarted_worktree(handle: WorktreeHandle | None) -> None:

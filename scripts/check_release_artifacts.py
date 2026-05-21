@@ -50,6 +50,7 @@ REQUIRED_SDIST_FILES: set[str] = {
     "src/agy_mcp/doctor.py",
     "src/agy_mcp/install.py",
     "src/agy_mcp/models.py",
+    "src/agy_mcp/routing.py",
     "src/agy_mcp/safety.py",
     "src/agy_mcp/session_store.py",
     "src/agy_mcp/supervisor.py",
@@ -81,6 +82,46 @@ ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
     "src/agy_mcp/_skill_bodies/codex/references/security.md",
     "src/agy_mcp/_skill_bodies/codex/references/usage.md",
     "src/agy_mcp/_skill_bodies/codex/scripts/agy_bridge.py",
+}
+
+# Files we positively require in the wheel. The wheel is what users install,
+# so a missing _skill_bodies entry here means ``agy_install_skill`` would
+# crash at runtime with ``FileNotFoundError`` and the user never finds out
+# until they invoke the tool. Phase 8 review P3: gate on the wheel surface
+# explicitly rather than trusting hatch to mirror the sdist whitelist.
+REQUIRED_WHEEL_FILES: set[str] = {
+    "agy_mcp/__init__.py",
+    "agy_mcp/__main__.py",
+    "agy_mcp/bridge.py",
+    "agy_mcp/cli.py",
+    "agy_mcp/config.py",
+    "agy_mcp/doctor.py",
+    "agy_mcp/install.py",
+    "agy_mcp/models.py",
+    "agy_mcp/routing.py",
+    "agy_mcp/safety.py",
+    "agy_mcp/server.py",
+    "agy_mcp/session_store.py",
+    "agy_mcp/supervisor.py",
+    "agy_mcp/utils.py",
+    "agy_mcp/worktree.py",
+    "agy_mcp/adapters/__init__.py",
+    "agy_mcp/adapters/agy.py",
+    "agy_mcp/adapters/base.py",
+    "agy_mcp/adapters/gemini.py",
+    "agy_mcp/adapters/protocol.py",
+    "agy_mcp/_skill_bodies/claude/SKILL.md",
+    "agy_mcp/_skill_bodies/claude/scripts/agy_bridge.py",
+    "agy_mcp/_skill_bodies/claude/references/usage.md",
+    "agy_mcp/_skill_bodies/claude/references/prompt-patterns.md",
+    "agy_mcp/_skill_bodies/claude/references/security.md",
+    "agy_mcp/_skill_bodies/codex/SKILL.md",
+    "agy_mcp/_skill_bodies/codex/scripts/agy_bridge.py",
+    "agy_mcp/_skill_bodies/codex/references/usage.md",
+    "agy_mcp/_skill_bodies/codex/references/prompt-patterns.md",
+    "agy_mcp/_skill_bodies/codex/references/security.md",
+    "agy_mcp/_skill_bodies/antigravity/SKILL.md",
+    "agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
 }
 
 # Files / patterns that MUST NOT appear in any artefact. A match here aborts
@@ -301,6 +342,75 @@ def _check_contents(label: str, files: list[ArtifactFile]) -> list[str]:
     return problems
 
 
+_DIST_INFO_RE = re.compile(r"^agy_mcp-[^/]+\.dist-info/")
+
+
+def _check_wheel_metadata(label: str, files: list[ArtifactFile]) -> list[str]:
+    """Verify the wheel's dist-info carries the expected control files.
+
+    A wheel without RECORD or METADATA installs (pip is lenient) but
+    every subsequent ``pip show``, ``importlib.metadata.version``, and
+    ``uv pip list`` either misreports or crashes. The release-gate
+    check pulls them up so a broken hatch build never escapes CI.
+    Phase 8 review P3.
+    """
+
+    problems: list[str] = []
+    dist_info_files = [f for f in files if _DIST_INFO_RE.match(f.path)]
+    if not dist_info_files:
+        problems.append(
+            f"[{label}] wheel has no .dist-info/ directory; "
+            "did the build run to completion?",
+        )
+        return problems
+
+    expected_suffixes = ("METADATA", "RECORD", "WHEEL")
+    present = {f.path.rsplit("/", 1)[-1] for f in dist_info_files}
+    for suffix in expected_suffixes:
+        if suffix not in present:
+            problems.append(
+                f"[{label}] wheel dist-info missing required file: {suffix}",
+            )
+
+    metadata = next(
+        (f for f in dist_info_files if f.path.endswith("/METADATA")),
+        None,
+    )
+    if metadata is not None:
+        body = metadata.data.decode("utf-8", errors="replace")
+        if "Name: agy-mcp" not in body:
+            problems.append(
+                f"[{label}] METADATA missing ``Name: agy-mcp`` header",
+            )
+        if "Version:" not in body:
+            problems.append(
+                f"[{label}] METADATA missing ``Version:`` header",
+            )
+
+    record = next(
+        (f for f in dist_info_files if f.path.endswith("/RECORD")),
+        None,
+    )
+    if record is not None:
+        try:
+            entries = record.data.decode("utf-8").splitlines()
+        except UnicodeDecodeError:
+            entries = []
+        recorded_paths = {line.split(",", 1)[0] for line in entries if line}
+        # Every shipped python file must be listed in RECORD. Skipping
+        # the dist-info entries themselves keeps the check honest about
+        # the wheel payload rather than the metadata bookkeeping.
+        payload_paths = {
+            f.path for f in files if not _DIST_INFO_RE.match(f.path)
+        }
+        missing_from_record = sorted(payload_paths - recorded_paths)
+        for path in missing_from_record:
+            problems.append(
+                f"[{label}] wheel ships {path} but RECORD does not list it",
+            )
+    return problems
+
+
 def main() -> int:
     if not DIST_DIR.is_dir():
         print(f"dist/ not found at {DIST_DIR}; run `uv build` first", file=sys.stderr)
@@ -331,10 +441,15 @@ def main() -> int:
     for wheel in wheels:
         artifact_files = _read_wheel(wheel)
         files = [file.path for file in artifact_files]
-        # Wheels do not ship docs/, so we cannot enforce a required-set there
-        # without false positives. Only forbidden-substring matters.
-        problems.extend(_check_files(wheel.name, files, required=None))
+        # Required set: every runtime-critical module + every skill body
+        # file. Wheels do not ship docs/, so docs are not in the required
+        # set. Forbidden-substring still runs to block secrets / private
+        # prompts that might slip in.
+        problems.extend(
+            _check_files(wheel.name, files, REQUIRED_WHEEL_FILES, allowed=None)
+        )
         problems.extend(_check_contents(wheel.name, artifact_files))
+        problems.extend(_check_wheel_metadata(wheel.name, artifact_files))
 
     if problems:
         print("Release artefact audit FAILED:", file=sys.stderr)

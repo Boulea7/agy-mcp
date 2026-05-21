@@ -76,11 +76,14 @@ _KLOG_LINE = re.compile(
 
 _RE_GRPC_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTPS")
 _RE_HTTP_PORT = re.compile(r"Language server listening on random port at (\d+) for HTTP\b")
-# Real agy conversation ids are UUIDs (8-4-4-4-12 hex). Require ``>=8`` hex
-# chars in the first segment and ``>=2`` per subsequent dash-separated
-# group, so trailing junk like ``...-extra`` is rejected and we never
-# capture a sub-UUID prefix like a stray ``abcd``.
-_RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{2,})*)")
+# Real agy conversation ids are canonical UUIDs (8-4-4-4-12 hex). Pin the
+# capture to that exact shape so trailing junk like ``...-extra`` is
+# rejected, the prior regex's loose ``[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{2,})*``
+# stops accepting partial / drifted ids, and we cannot capture a sub-UUID
+# prefix like a stray ``abcd`` from an unrelated klog line that happens to
+# share the ``Created conversation`` substring.
+_UUID_CANON = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_RE_CREATED_CONV = re.compile(rf"Created conversation ({_UUID_CANON})\b")
 # Tolerate format drift: ``Print mode: starting (k1=v1, k2="v2", ...)``.
 # We match the prefix, then extract ``key=value`` pairs from the body.
 # The body class uses ``[^)]*`` so values containing literal ``)`` would
@@ -89,7 +92,7 @@ _RE_CREATED_CONV = re.compile(r"Created conversation ([0-9a-fA-F]{8,}(?:-[0-9a-f
 _RE_PRINT_START_PREFIX = re.compile(r"Print mode: starting \((?P<body>[^)]*)\)")
 _RE_PRINT_START_KV = re.compile(r'(?P<k>\w+)=(?:"(?P<qv>[^"]*)"|(?P<rv>[^,\s)]+))')
 _RE_RESUMING_CONV = re.compile(
-    r"Print mode: resuming conversation ([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{2,})*)"
+    rf"Print mode: resuming conversation ({_UUID_CANON})\b"
 )
 _RE_NEW_CONV = re.compile(r"Starting new conversation \(agent=(true|false)\)")
 _RE_AUTO_FLUSH = re.compile(
@@ -98,8 +101,8 @@ _RE_AUTO_FLUSH = re.compile(
 _RE_SEND_FAILED = re.compile(r"Print mode: SendUserMessage failed: (.+)")
 _RE_AUTH_TIMEOUT = re.compile(r"Print mode: auth timed out")
 _RE_AUTH_ERROR = re.compile(r"Print mode: auth error: (.+)")
-_RE_REWIND = re.compile(r"Rewinding conversation [0-9a-fA-F-]+ to step (\d+)")
-_RE_STREAM_START = re.compile(r"Starting conversation update stream for ([0-9a-fA-F-]+)\b")
+_RE_REWIND = re.compile(rf"Rewinding conversation {_UUID_CANON} to step (\d+)")
+_RE_STREAM_START = re.compile(rf"Starting conversation update stream for ({_UUID_CANON})\b")
 _RE_TURN_END = re.compile(r"Stopping conversation stream|Language server shutting down")
 
 

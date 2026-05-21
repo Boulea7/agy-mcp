@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-513%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-525%20passed-brightgreen.svg)](#)
 [![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-README-red.svg)](../README.md)
 
 > **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
@@ -63,7 +63,7 @@ Constraints:
   proceed.
 
 Report a one-liner per step. After everything is done, give me a
-4-line summary: where it landed, whether all 9 MCP tools are
+4-line summary: where it landed, whether all 10 MCP tools are
 exposed, where the SKILL files live, and what remains optional.
 ````
 
@@ -115,7 +115,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 Full installation and Codex setup in
 [`docs/installation.md`](installation.md).
 
-## 9 MCP tools
+## 10 MCP tools
 
 | Tool | Purpose |
 |---|---|
@@ -128,6 +128,7 @@ Full installation and Codex setup in
 | `agy_sessions` | List recent sessions with mtime / status / cwd summary |
 | `agy_doctor` | Environment + auth + capability probe (no secrets) |
 | `agy_install_skill` | Install SKILL bundle into Claude / Codex / Antigravity skill dirs |
+| `agy_purge` | Prune session-store directories older than `days` (refuses `days<=0`) |
 
 ## When to use
 
@@ -191,7 +192,7 @@ that repo knows when to call `agy`:
 
 ```bash
 uv sync
-uv run pytest        # full suite — 513 tests
+uv run pytest        # full suite — 525 tests
 uv run agymcp        # FastMCP stdio server (manual testing)
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 uv run agy-doctor    # environment and auth probe

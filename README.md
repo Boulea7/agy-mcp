@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-513%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-525%20passed-brightgreen.svg)](#)
 [![English](https://img.shields.io/badge/English-README-blue.svg)](docs/README_EN.md)
 
 > **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
@@ -54,7 +54,7 @@ CLI**（任选其一即可），它会自己读、自己执行、自己验证。
 - 任何写入操作（包括上面这些）做之前先简短说一下要做什么，等我点头
   再执行；如果你的当前权限模式允许 acceptEdits，就直接执行。
 
-每完成一步给我一行汇报，全部完成后给出一份 4 行总结：装在哪、9 个
+每完成一步给我一行汇报，全部完成后给出一份 4 行总结：装在哪、10 个
 MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 ````
 
@@ -69,7 +69,7 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 
 - **Skill 优先**：通过 `~/.claude/skills/` / `~/.agents/skills/` 让 Claude / Codex 学会
   *什么时候* 调 `agy`、*怎么* 调；
-- **MCP 次之**：通过 `agymcp` FastMCP server 暴露 9 个稳定 JSON 工具，调用方拿到的总是
+- **MCP 次之**：通过 `agymcp` FastMCP server 暴露 10 个稳定 JSON 工具，调用方拿到的总是
   结构化 envelope；
 - **安全为底**：所有错误、日志、响应字段都过一遍 `SafetyPolicy.redact`；写入操作默认走临时 git
   worktree；命令注入 / 路径穿越 / 父级 symlink 替换都有针对性防护。
@@ -100,7 +100,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 
 完整安装与 Codex 配置参考 [`docs/installation.md`](docs/installation.md)。
 
-## 9 个 MCP 工具
+## 10 个 MCP 工具
 
 | 工具 | 用途 |
 |---|---|
@@ -113,6 +113,7 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 | `agy_sessions` | 列最近 session（含 mtime / status / cwd 摘要） |
 | `agy_doctor` | 环境 + 鉴权 + capability 探测（不泄漏 secrets） |
 | `agy_install_skill` | 把 SKILL bundle 装到 Claude / Codex / Antigravity skill 目录 |
+| `agy_purge` | 按 `days` 清理本机 session-store 目录（refuse `days<=0` 防误删） |
 
 ## 何时调用
 

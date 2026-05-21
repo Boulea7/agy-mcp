@@ -25,7 +25,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from pydantic import ValidationError
 
@@ -94,9 +94,20 @@ class JobPaths:
 class SessionStore:
     """File-backed session/job store with append-only event log."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        clock: "Callable[[], float] | None" = None,
+    ) -> None:
         self.root = Path(root)
         ensure_directory(self.root, mode=0o700)
+        # ``clock`` is an injection seam for tests so they can pin the
+        # mtime of job directories without sleeping between create_job
+        # calls. ``None`` keeps the production path on the OS-default
+        # mtime; when provided, ``create_job`` / ``update_job`` rewrite
+        # the dir mtime with ``os.utime`` so ordering is deterministic.
+        self._clock = clock
 
     # ------------------------------------------------------------------
     # Job lifecycle
@@ -142,6 +153,7 @@ class SessionStore:
         self._write_meta(paths.meta, record)
         # Touch event log so subsequent appends never need to mkdir again.
         paths.events.touch(exist_ok=True)
+        self._stamp(paths.root)
         return record
 
     def get_job(self, job_id: str) -> JobRecord | None:
@@ -165,6 +177,7 @@ class SessionStore:
         paths = JobPaths.for_job(self.root, record.job_id)
         ensure_directory(paths.root, mode=0o700)
         self._write_meta(paths.meta, record)
+        self._stamp(paths.root)
         return record
 
     def finalize_job(
@@ -312,6 +325,29 @@ class SessionStore:
             record.model_dump_json(exclude_none=False, indent=2),
             mode=0o600,
         )
+
+    def _stamp(self, path: Path) -> None:
+        """Pin the directory mtime when an injected clock is in use.
+
+        Production code path (``clock=None``) keeps the OS-default mtime
+        so retention behaviour matches what an operator would expect from
+        an ``ls -lt`` of the store. Tests pass a deterministic clock to
+        eliminate ``time.sleep(0.05)`` between back-to-back ``create_job``
+        calls when verifying ``list_jobs`` ordering. Errors are swallowed
+        — failing to set the mtime on a perfectly-good job dir should not
+        block the create/update path.
+        """
+
+        if self._clock is None:
+            return
+        try:
+            stamp = float(self._clock())
+        except (TypeError, ValueError):
+            return
+        try:
+            os.utime(path, (stamp, stamp))
+        except OSError:
+            return
 
 
 def _rmtree(path: Path) -> None:

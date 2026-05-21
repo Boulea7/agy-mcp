@@ -522,6 +522,26 @@ class InstallSkillToolResponse(_DictLikeEnvelope):
     installed: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PurgeToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_purge``.
+
+    ``removed`` carries the redacted job ids that were deleted from the
+    session store; ``days`` echoes the cutoff the tool applied so the
+    caller can record what was just discarded. ``remaining`` is a
+    coarse count of jobs that survived the purge — useful for operators
+    sizing retention.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    days: int | None = None
+    removed: list[str] = Field(default_factory=list)
+    removed_count: int = 0
+    remaining: int = 0
+
+
 __all__ = [
     "AdapterMetadata",
     "BackendName",
@@ -536,6 +556,7 @@ __all__ = [
     "JobStatus",
     "Mode",
     "OutputProtocol",
+    "PurgeToolResponse",
     "ReadToolResponse",
     "SessionsToolResponse",
     "StatusToolResponse",

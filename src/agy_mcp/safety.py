@@ -7,6 +7,7 @@ can log and surface the reason.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from pathlib import Path
 from agy_mcp.config import Config, SafetyConfig
 from agy_mcp.models import BridgeRequest, Mode
 from agy_mcp.utils import redact_command, redact_text, scrub_env
+
+_LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Always-on env name scrub list. SafetyConfig.scrub_extra_env extends this.
@@ -147,6 +150,14 @@ class SafetyPolicy:
     _lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False,  # type: ignore[arg-type]
     )
+    # Compile-time warnings for bad user-supplied ``redact_extra_patterns``.
+    # The old behaviour silently dropped the bad entry; v0.1.5 promotes
+    # this to a visible diagnostic so an operator who misconfigured the
+    # TOML can see why their pattern never matched. Stored as a list of
+    # ``(index, error_message)`` tuples — index identifies the pattern
+    # without echoing the raw body (which may itself look like a secret
+    # to a downstream log scrubber).
+    _compile_warnings: list[str] = field(default_factory=list, repr=False)
 
     @classmethod
     def from_config(cls, config: Config | None = None) -> "SafetyPolicy":
@@ -169,18 +180,47 @@ class SafetyPolicy:
         with self._lock:
             if self._redact_patterns is None or self._redact_signature != signature:
                 compiled: list[re.Pattern[str]] = []
-                for pat in signature:
+                fresh_warnings: list[str] = []
+                for idx, pat in enumerate(signature):
                     # Defense in depth: a malformed user pattern must not
                     # crash _run via the top-level handler (Phase 3 R2 P3b).
-                    # Skip the bad entry, keep the others, log via Capability
-                    # warnings if/when SafetyPolicy gains that channel.
+                    # Skip the bad entry, keep the others, record a warning
+                    # so an operator inspecting ``compile_warnings`` can
+                    # see exactly which TOML pattern was dropped (Phase 8
+                    # review P2). We never echo the pattern body — it may
+                    # be a secret-shaped probe — only its index + the
+                    # ``re.error`` message (which never contains the
+                    # pattern, only the compiler diagnostic).
                     try:
                         compiled.append(re.compile(pat))
-                    except re.error:
+                    except re.error as exc:
+                        msg = (
+                            f"redact_extra_patterns[{idx}] failed to compile "
+                            f"and was dropped: {exc}"
+                        )
+                        fresh_warnings.append(msg)
+                        _LOG.warning("agy_mcp.safety: %s", msg)
                         continue
                 self._redact_patterns = tuple(compiled)
                 self._redact_signature = signature
+                self._compile_warnings = fresh_warnings
             return self._redact_patterns
+
+    @property
+    def compile_warnings(self) -> list[str]:
+        """Return a copy of the current compile-time warnings.
+
+        Materialised on demand so operators (and the doctor probe) can
+        surface bad ``redact_extra_patterns`` without poking at the
+        private ``_compile_warnings`` field. Returns a copy so callers
+        cannot mutate the lock-protected list.
+        """
+
+        with self._lock:
+            # Force lazy compile so a never-called SafetyPolicy still
+            # reports its TOML pattern diagnostics.
+            self._extra_patterns()
+            return list(self._compile_warnings)
 
     def redact(self, text: str) -> str:
         return redact_text(text, extra_patterns=self._extra_patterns())

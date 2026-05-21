@@ -32,26 +32,45 @@ import uuid
 from pathlib import Path
 
 from agy_mcp.adapters import (
-    AgyPrintBackend,
     BaseAdapter,
-    GeminiCliBackend,
     ListEventSink,
     ProtocolTranslator,
 )
 from agy_mcp.config import Config, get_config
 from agy_mcp.models import (
     AdapterMetadata,
-    BackendName,
     BridgeRequest,
     BridgeResponse,
     CanonicalEvent,
 )
+from agy_mcp.routing import build_adapter
+from agy_mcp.routing import select_backend as _routing_select_backend
 from agy_mcp.safety import SafetyPolicy, is_git_workspace
 from agy_mcp.utils import truncate_middle
 from agy_mcp.worktree import (
     WorktreeError,
     create_worktree,
 )
+
+# Bridge-local aliases for ``agy_mcp.routing`` callables. Retained so test
+# suites monkeypatching ``agy_mcp.bridge._build_adapter`` /
+# ``agy_mcp.bridge._select_backend`` keep working without churn; the
+# canonical impl lives in ``routing`` and is used by the supervisor.
+_build_adapter = build_adapter
+
+
+def _select_backend(
+    request: BridgeRequest, config: Config, safety: SafetyPolicy,
+) -> tuple[BaseAdapter, list[str]]:
+    """Bridge-local wrapper around :func:`routing.select_backend`.
+
+    Threading ``builder=_build_adapter`` lets tests that monkeypatch the
+    bridge surface (``agy_mcp.bridge._build_adapter`` is the historical
+    seam) still intercept adapter construction even though the routing
+    logic itself now lives in ``agy_mcp.routing``.
+    """
+
+    return _routing_select_backend(request, config, safety, builder=_build_adapter)
 
 # ---------------------------------------------------------------------------
 # argparse
@@ -233,56 +252,12 @@ def _request_from_args(args: argparse.Namespace, config: Config) -> tuple[Bridge
 # ---------------------------------------------------------------------------
 # Backend routing
 # ---------------------------------------------------------------------------
-
-
-def _build_adapter(
-    backend: BackendName, config: Config, safety: SafetyPolicy
-) -> BaseAdapter:
-    if backend == "agy":
-        return AgyPrintBackend(bin_override=config.backend.agy_bin, safety=safety)
-    if backend == "gemini":
-        return GeminiCliBackend(bin_override=config.backend.gemini_bin, safety=safety)
-    raise ValueError(f"unknown backend {backend!r}")
-
-
-def _select_backend(
-    request: BridgeRequest, config: Config, safety: SafetyPolicy
-) -> tuple[BaseAdapter, list[str]]:
-    """Return (adapter, warnings). Auto routing prefers agy; falls back to gemini."""
-
-    warnings: list[str] = []
-    if request.backend in ("agy", "gemini"):
-        adapter = _build_adapter(request.backend, config, safety)
-        cap = adapter.detect()
-        if not cap.bin_path:
-            warnings.append(
-                f"requested backend={request.backend!r} not available: "
-                + "; ".join(cap.warnings)
-            )
-        return adapter, warnings
-
-    # auto routing — lazy-probe gemini only when agy is unhealthy. Each
-    # _build_adapter call re-probes, so unconditional gemini detection in the
-    # healthy-agy path is wasted latency (see Phase 3 review P1.2).
-    agy = _build_adapter("agy", config, safety)
-    cap_agy = agy.detect()
-    if cap_agy.bin_path and cap_agy.authenticated and cap_agy.supports_print:
-        return agy, warnings
-    gemini = _build_adapter("gemini", config, safety)
-    cap_gem = gemini.detect()
-    if cap_gem.bin_path and cap_gem.supports_streaming:
-        warnings.append(
-            "auto routing fell back to gemini-cli (agy unavailable or not authenticated)"
-        )
-        return gemini, warnings
-    # Neither available — return agy so the caller sees the upstream warnings.
-    warnings.append(
-        "no backend available: agy "
-        + ("ok" if cap_agy.bin_path else "missing")
-        + ", gemini "
-        + ("ok" if cap_gem.bin_path else "missing")
-    )
-    return agy, warnings
+#
+# Routing lives in ``agy_mcp.routing`` since v0.1.5; ``_build_adapter`` /
+# ``_select_backend`` are imported above as thin re-exports so legacy callers
+# (and the tests pinning those names) keep working without reaching into a
+# private module. The supervisor imports ``routing.select_backend`` directly
+# now, so this file no longer carries cyclical-import workarounds.
 
 
 # ---------------------------------------------------------------------------

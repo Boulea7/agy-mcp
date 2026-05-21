@@ -90,6 +90,8 @@ def is_git_repo(path: Path) -> bool:
             cwd=str(path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_S,
             check=False,
         )
@@ -107,6 +109,8 @@ def repo_root(path: Path) -> Path | None:
             cwd=str(path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_S,
             check=False,
         )
@@ -207,6 +211,8 @@ def create_worktree(
             cwd=str(root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_S,
             check=False,
         )
@@ -334,6 +340,8 @@ def cleanup_worktree(
             cwd=str(handle.base_repo),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_S,
             check=False,
         )
@@ -367,6 +375,8 @@ def _delete_branch(handle: WorktreeHandle) -> bool:
             cwd=str(handle.base_repo),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_S,
             check=False,
         )

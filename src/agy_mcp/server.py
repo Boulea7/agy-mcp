@@ -53,6 +53,7 @@ from agy_mcp.models import (
     InstallSkillToolResponse,
     Mode,
     OutputProtocol,
+    PurgeToolResponse,
     ReadToolResponse,
     SessionsToolResponse,
     StatusToolResponse,
@@ -115,6 +116,13 @@ _bridge_limiter_lock = threading.Lock()
 # extensions, small enough to refuse pathological payloads.
 _MAX_INSTALL_TARGETS = 16
 _ALLOWED_TARGETS: frozenset[str] = frozenset({"claude", "codex", "antigravity", "all"})
+
+# Conservative cap on the purge cutoff. Operators occasionally want to
+# nuke everything older than a few hours; we still refuse zero/negative
+# (handled by SessionStore.purge_older_than) and refuse anything past 10
+# years to defend against an integer typo wiping the whole store via
+# ``days=99999`` evaluating to a noop cutoff.
+_PURGE_MAX_DAYS = 365 * 10
 
 
 def _ensure_state() -> tuple[Config, SafetyPolicy, SessionStore, Supervisor]:
@@ -834,6 +842,61 @@ def agy_install_skill_tool(
 
 
 # ---------------------------------------------------------------------------
+# Tool: agy_purge — drop session-store rows older than ``days``
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="agy_purge",
+    description=(
+        "Delete session-store job directories whose mtime is older than "
+        "``days``. Returns the removed job ids and a coarse count of "
+        "remaining jobs. ``days`` must be a positive integer <= "
+        f"{_PURGE_MAX_DAYS}; zero or negative values are rejected to "
+        "avoid an accidental wipe via off-by-one config."
+    ),
+)
+def agy_purge_tool(days: int = 30) -> PurgeToolResponse:
+    config, safety, store, _supervisor_ = _ensure_state()
+    if not isinstance(days, int) or isinstance(days, bool):
+        return _wrapper_failure(
+            safety,
+            ValueError("days must be a positive integer"),
+            PurgeToolResponse,
+        )
+    if days <= 0:
+        return _wrapper_failure(
+            safety,
+            ValueError("days must be > 0 (refusing to wipe the entire store)"),
+            PurgeToolResponse,
+            days=days,
+        )
+    if days > _PURGE_MAX_DAYS:
+        return _wrapper_failure(
+            safety,
+            ValueError(
+                f"days exceeds the {_PURGE_MAX_DAYS}-day cap; pick a smaller cutoff"
+            ),
+            PurgeToolResponse,
+            days=days,
+        )
+    try:
+        removed = store.purge_older_than(days)
+        remaining_records = store.list_jobs(limit=None)
+    except Exception as exc:  # noqa: BLE001 - top-level guard
+        return _wrapper_failure(
+            safety, exc, PurgeToolResponse, days=days,
+        )
+    return PurgeToolResponse(
+        success=True,
+        days=days,
+        removed=[safety.redact(job_id) for job_id in removed],
+        removed_count=len(removed),
+        remaining=len(remaining_records),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -852,6 +915,7 @@ __all__ = [
     "agy_continue_tool",
     "agy_doctor_tool",
     "agy_install_skill_tool",
+    "agy_purge_tool",
     "agy_read_tool",
     "agy_sessions_tool",
     "agy_start_tool",

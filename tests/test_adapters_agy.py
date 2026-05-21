@@ -261,6 +261,48 @@ def test_klog_parser_extracts_conversation_id_and_promotes_session():
     assert evt.session_id == ctx.seen_session_id[0]
 
 
+def test_klog_parser_rejects_non_canonical_uuid_shape():
+    """v0.1.5: the conversation-id regex is pinned to the canonical
+    8-4-4-4-12 hex shape so trailing junk, missing dashes, oversize
+    groups, and non-hex tails no longer slip through as conversation
+    ids."""
+
+    adapter = AgyPrintBackend()
+    bad_lines = [
+        # Missing dashes — old loose regex would have captured this.
+        "I0 11:11:11.000001 1 conv.go:1] Created conversation abcdef1234567890\n",
+        # Wrong group sizes (10-4-4-4-12 instead of 8-4-4-4-12).
+        "I0 11:11:11.000001 1 conv.go:1] "
+        "Created conversation abcdef1234-dead-beef-cafe-deadbeef1234\n",
+        # Non-hex characters in the last group.
+        "I0 11:11:11.000001 1 conv.go:1] "
+        "Created conversation abc12345-dead-beef-cafe-zzzzzzzz1234\n",
+    ]
+    for line in bad_lines:
+        ctx = _new_ctx()
+        _handle_klog_line(line, ctx, adapter)
+        assert ctx.events == [], f"unexpectedly emitted event for: {line!r}"
+
+
+def test_klog_parser_rejects_trailing_uuid_chars():
+    """v0.1.5: a canonical UUID followed by extra hex / dashes must not
+    inflate the captured id (the prior regex consumed the trailing
+    ``-extra`` because every group accepted ``>=2`` chars)."""
+
+    adapter = AgyPrintBackend()
+    ctx = _new_ctx()
+    line = (
+        "I0 11:11:11.000001 1 conv.go:1] "
+        "Created conversation abc12345-dead-beef-cafe-deadbeef1234-extra\n"
+    )
+    _handle_klog_line(line, ctx, adapter)
+    [evt] = ctx.events
+    assert evt.subtype == "conversation_started"
+    assert evt.session_id == "abc12345-dead-beef-cafe-deadbeef1234"
+    # The captured id must end at the canonical 36 chars.
+    assert "-extra" not in (evt.session_id or "")
+
+
 def test_klog_parser_extracts_print_starting_with_metadata():
     ctx = _new_ctx()
     adapter = AgyPrintBackend()
@@ -620,7 +662,9 @@ def test_klog_created_conv_does_not_over_capture():
 
 
 def test_klog_created_conv_does_not_over_capture_trailing_dash():
-    """Dash-joined trailing tokens (no whitespace) must still terminate."""
+    """v0.1.5: with the canonical 8-4-4-4-12 UUID regex, a malformed string
+    like ``abcd1234-cafe-extra-nonhex-suffix`` is not a UUID at all and the
+    parser emits no event rather than capturing a sub-UUID prefix."""
 
     ctx = _new_ctx()
     adapter = AgyPrintBackend()
@@ -630,9 +674,7 @@ def test_klog_created_conv_does_not_over_capture_trailing_dash():
         ctx,
         adapter,
     )
-    [evt] = ctx.events
-    # ``extra`` and ``nonhex`` are not hex; capture stops at the last hex run.
-    assert evt.session_id == "abcd1234-cafe"
+    assert ctx.events == []
 
 
 # ---------------------------------------------------------------------------

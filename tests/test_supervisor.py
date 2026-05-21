@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -18,7 +19,7 @@ from agy_mcp.models import (
 )
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
-from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present
+from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present, _worktree_slug
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
 
 # ---------------------------------------------------------------------------
@@ -179,18 +180,50 @@ def _wait_for(predicate, *, timeout: float = 3.0, interval: float = 0.02) -> boo
 
 
 def _init_git_repo(path: Path) -> Path:
+    """Create a git repo at ``path`` immune to the runner's git config.
+
+    Adds ``GIT_CONFIG_NOSYSTEM`` + a per-test ``HOME`` so the system /
+    user gitconfig (gpg signing, hook paths, commit templates) never
+    leaks in. Phase 8 review: prior helper inherited whatever the
+    developer had in ``~/.gitconfig`` and intermittently failed in
+    environments with signing enforced.
+    """
+
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    (path / "README.md").write_text("fixture\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    isolated_home = path.parent / f"{path.name}.gitconfig"
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "HOME": str(isolated_home),
+        "XDG_CONFIG_HOME": str(isolated_home / ".config"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    base_argv = [
+        "git",
+        "-c", "init.defaultBranch=main",
+        "-c", "commit.gpgsign=false",
+        "-c", "tag.gpgsign=false",
+    ]
     subprocess.run(
-        [
-            "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        base_argv + ["init"],
+        cwd=path, check=True, capture_output=True, env=env,
+    )
+    (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(
+        base_argv + ["add", "README.md"],
+        cwd=path, check=True, capture_output=True, env=env,
+    )
+    subprocess.run(
+        base_argv + [
+            "-c", "user.name=Test",
+            "-c", "user.email=test@example.com",
             "commit", "-m", "init",
         ],
         cwd=path,
         check=True,
         capture_output=True,
+        env=env,
     )
     return path
 
@@ -746,3 +779,50 @@ def test_route_warnings_redacted_in_running_envelope(tmp_path: Path):
     assert response.success is True
     # /Users/<u>/ collapses to ~/ in the warnings list.
     assert all(home not in w for w in response.warnings)
+
+
+# ---------------------------------------------------------------------------
+# v0.1.5 — _worktree_slug uniqueness
+# ---------------------------------------------------------------------------
+
+
+def test_worktree_slug_always_carries_job_id_suffix():
+    """v0.1.5: two concurrent jobs sharing the same ``session_id`` must
+    derive different worktree slugs so they can't collide on the same
+    ``<repo>/.agy-mcp/worktrees/<slug>/`` path."""
+
+    req = BridgeRequest(prompt="hello", session_id="conv-shared")
+    slug_a = _worktree_slug(req, "job_111111_aaaaaaaaaaaa")
+    slug_b = _worktree_slug(req, "job_111111_bbbbbbbbbbbb")
+    assert slug_a != slug_b
+    # The sanitiser preserves underscores, so the job-id suffix appears
+    # verbatim inside the slug.
+    assert "job_111111_aaaaaaaaaaaa" in slug_a
+    assert "job_111111_bbbbbbbbbbbb" in slug_b
+    # The session seed is also present so operators can still recognise
+    # which conversation a worktree belongs to.
+    assert slug_a.startswith("conv-shared")
+    assert slug_b.startswith("conv-shared")
+
+
+def test_worktree_slug_without_session_falls_back_to_job_id():
+    """v0.1.5: without a caller-supplied session_id, the slug derives
+    entirely from the job_id so each job still owns a unique worktree."""
+
+    req = BridgeRequest(prompt="hi")
+    slug_a = _worktree_slug(req, "job_222222_111111111111")
+    slug_b = _worktree_slug(req, "job_222222_222222222222")
+    assert slug_a != slug_b
+    assert "111111111111" in slug_a
+    assert "222222222222" in slug_b
+
+
+def test_worktree_slug_caps_length_at_80_chars():
+    """v0.1.5: even with the maximum-length session_id allowed by
+    BridgeRequest (96 chars), the worktree module's 80-char invariant
+    must hold so ``_validate_session_name`` accepts the result."""
+
+    long_session = "s" * 90  # within BridgeRequest's 96-char cap
+    req = BridgeRequest(prompt="hi", session_id=long_session)
+    slug = _worktree_slug(req, "job_333333_cccccccccccc")
+    assert 1 <= len(slug) <= 80

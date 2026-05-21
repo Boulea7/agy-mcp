@@ -94,21 +94,20 @@ def test_read_events_tolerates_corrupt_line(tmp_session_root: Path):
 
 
 def test_list_jobs_returns_newest_first(tmp_session_root: Path):
-    store = SessionStore(tmp_session_root)
+    clock = iter([100.0, 200.0, 300.0])
+    store = SessionStore(tmp_session_root, clock=lambda: next(clock))
     job_a = store.create_job()
-    time.sleep(0.05)
     job_b = store.create_job()
-    time.sleep(0.05)
     job_c = store.create_job()
     listing = store.list_jobs(limit=5)
     assert [r.job_id for r in listing[:3]] == [job_c.job_id, job_b.job_id, job_a.job_id]
 
 
 def test_list_jobs_limit(tmp_session_root: Path):
-    store = SessionStore(tmp_session_root)
+    ticks = iter(float(i + 1) * 10.0 for i in range(8))
+    store = SessionStore(tmp_session_root, clock=lambda: next(ticks))
     for _ in range(4):
         store.create_job()
-        time.sleep(0.02)
     listing = store.list_jobs(limit=2)
     assert len(listing) == 2
 
@@ -131,9 +130,9 @@ def test_purge_older_than_removes_aged_jobs(tmp_session_root: Path):
 
 
 def test_find_by_session_id_returns_most_recent(tmp_session_root: Path):
-    store = SessionStore(tmp_session_root)
+    ticks = iter([100.0, 200.0])
+    store = SessionStore(tmp_session_root, clock=lambda: next(ticks))
     store.create_job(session_id="conv-x")  # older row; only used to populate the store
-    time.sleep(0.05)
     newer = store.create_job(session_id="conv-x")
     found = store.find_by_session_id("conv-x")
     assert found is not None
@@ -224,6 +223,21 @@ def test_append_event_refuses_symlinked_log(tmp_session_root: Path):
     with _pytest.raises(OSError):
         store.append_event(record.job_id, CanonicalEvent(type="assistant", text="x"))
     assert secret.read_text(encoding="utf-8") == "DO_NOT_OVERWRITE"
+
+
+def test_injected_clock_pins_job_dir_mtime(tmp_session_root: Path):
+    """v0.1.5: ``SessionStore(clock=...)`` rewrites the job-dir mtime so
+    tests asserting ordering need not insert ``time.sleep`` between
+    back-to-back ``create_job`` calls."""
+
+    if _is_windows():
+        return  # pragma: no cover - utime semantics differ on Windows
+    expected = 12345.0
+    store = SessionStore(tmp_session_root, clock=lambda: expected)
+    record = store.create_job()
+    paths = JobPaths.for_job(tmp_session_root, record.job_id)
+    actual = paths.root.stat().st_mtime
+    assert abs(actual - expected) < 1.0
 
 
 def _is_windows() -> bool:

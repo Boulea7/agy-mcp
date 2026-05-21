@@ -6,6 +6,115 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-05-21
+
+### Added
+
+- **`agy_purge` MCP tool**. Wraps
+  ``SessionStore.purge_older_than`` so an operator can drop aged
+  session-store directories without dropping to a shell. Accepts
+  ``days`` (positive integer, ≤ 10 years) and returns the redacted
+  list of removed job ids plus a coarse remaining count. Refuses
+  ``days <= 0`` outright so an off-by-one config can't wipe the
+  whole store.
+- **`agy_mcp.routing` module**. Canonical home for
+  ``select_backend`` / ``build_adapter``. The supervisor now imports
+  routing directly instead of lazy-importing the bridge CLI, breaking
+  the historical ``bridge ⇄ supervisor`` import cycle. The bridge
+  keeps thin module-local aliases (``_build_adapter`` /
+  ``_select_backend``) so the test-monkeypatch surface is preserved.
+- **`SafetyPolicy.compile_warnings`**. Bad
+  ``[safety.redact_extra_patterns]`` entries no longer disappear
+  silently — every compile failure surfaces as a
+  ``redact_extra_patterns[<index>] failed to compile and was
+  dropped: <re.error>`` diagnostic plus a ``logging.warning``. The
+  warning never echoes the raw pattern body (it might itself be a
+  secret-shaped probe).
+- **`agy_mcp/_skill_bodies/` REQUIRED set in the release auditor**.
+  ``scripts/check_release_artifacts.py`` now ships a
+  ``REQUIRED_WHEEL_FILES`` set covering every runtime module + every
+  skill body file, plus a wheel-metadata check that validates
+  ``METADATA`` carries ``Name: agy-mcp`` / ``Version:`` and that
+  every shipped path is listed in ``RECORD``. A broken hatch build
+  can no longer escape CI with a missing ``_skill_bodies/`` payload.
+- **`SessionStore(clock=...)` injection**. Tests that previously
+  inserted ``time.sleep(0.05)`` between back-to-back ``create_job``
+  calls to get distinct ``st_mtime`` ordering now pass a controlled
+  clock and skip the sleep entirely. The production path
+  (``clock=None``) keeps the OS-default mtime.
+- **`test_install_skill_mixed_user_and_project_scopes_no_cross_pollution`**.
+  Exercises a user-scope ``agy_install_skill`` followed by a
+  project-scope install in the same process to confirm neither call
+  leaks into the other's destination tree.
+
+### Security
+
+- **Worktree slug uniqueness**.
+  ``supervisor._worktree_slug`` now always appends the job id to the
+  worktree slug instead of using ``session_id or job_id``. Two
+  concurrent ``agy_start`` calls sharing the same ``session_id``
+  (e.g. the supervisor resuming a long conversation) no longer
+  collide on the same ``<repo>/.agy-mcp/worktrees/<slug>/`` path and
+  fail the second one with ``FileExistsError``.
+- **`agy` UUID regex tightened to canonical 8-4-4-4-12**. The
+  ``Created conversation`` / ``Print mode: resuming conversation`` /
+  ``Starting conversation update stream for`` / ``Rewinding
+  conversation`` klog patterns now require the exact canonical UUID
+  shape. The prior loose ``[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{2,})*`` form
+  silently captured ``abcd1234-cafe`` from junk like
+  ``abcd1234-cafe-extra-nonhex-suffix``; v0.1.5 rejects the line
+  outright instead of seeding the session with a sub-UUID prefix.
+- **Worktree git subprocess explicit `encoding="utf-8"`**. All five
+  ``subprocess.run`` sites in ``worktree.py`` now pin
+  ``encoding="utf-8", errors="replace"`` instead of inheriting the
+  platform's preferred encoding. Defends against ``UnicodeDecodeError``
+  in mixed-locale environments where ``locale.getpreferredencoding()``
+  defaults to anything other than UTF-8.
+
+### Changed
+
+- **`Config` singleton cache thread-safe**. ``get_config`` now wraps
+  the lazy ``_CACHED = load_config(...)`` write in a
+  ``threading.Lock``, with a lock-free fast path for the warm-cache
+  case. Two concurrent MCP tool calls touching the module for the
+  first time can no longer both trigger a TOML parse on the same
+  path.
+
+### Tested
+
+- New regression tests:
+  - ``test_klog_parser_rejects_non_canonical_uuid_shape`` /
+    ``test_klog_parser_rejects_trailing_uuid_chars`` pin the
+    tightened conversation-id regex.
+  - ``test_safety_policy_compile_warnings_surfaces_bad_pattern_index``
+    + ``test_safety_policy_compile_warnings_clear_after_signature_change``
+    cover the new ``SafetyPolicy.compile_warnings`` channel.
+  - ``test_worktree_slug_always_carries_job_id_suffix`` /
+    ``test_worktree_slug_without_session_falls_back_to_job_id`` /
+    ``test_worktree_slug_caps_length_at_80_chars`` lock in the slug
+    uniqueness invariant.
+  - ``test_injected_clock_pins_job_dir_mtime`` verifies the new
+    SessionStore clock seam.
+  - ``test_agy_purge_rejects_zero_or_negative`` /
+    ``test_agy_purge_rejects_non_integer`` /
+    ``test_agy_purge_returns_removed_jobs`` cover the new
+    ``agy_purge`` MCP tool surface.
+  - ``test_install_skill_mixed_user_and_project_scopes_no_cross_pollution``
+    catches any future shared-state leak between user + project
+    install scopes.
+- ``tests/test_supervisor.py::_init_git_repo`` and
+  ``tests/test_bridge.py::_init_git_repo`` now pass
+  ``GIT_CONFIG_NOSYSTEM=1``, override ``HOME`` to a per-test scratch
+  dir, and pin ``-c init.defaultBranch=main -c commit.gpgsign=false
+  -c tag.gpgsign=false`` so the runner's ``~/.gitconfig`` (signing,
+  hook paths, commit templates) can't make the suite flaky.
+- ``test_list_jobs_returns_newest_first`` / ``test_list_jobs_limit``
+  / ``test_find_by_session_id_returns_most_recent`` switched to the
+  new injected ``SessionStore(clock=...)`` instead of
+  ``time.sleep(0.05)``.
+- Full suite: 525 tests, hermetic (``env -i`` PATH stripped of
+  ``agy``/``gemini``).
+
 ## [0.1.4] — 2026-05-21
 
 ### Fixed
@@ -236,7 +345,8 @@ First public-ready cut.
   dry-run on three modes, real `agy --print` call with session
   resume.
 
-[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/Boulea7/agy-mcp/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Boulea7/agy-mcp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Boulea7/agy-mcp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Boulea7/agy-mcp/compare/v0.1.1...v0.1.2
