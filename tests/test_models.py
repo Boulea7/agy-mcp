@@ -87,6 +87,30 @@ def test_bridge_request_rejects_oversized_session_id():
     assert "session_id exceeds" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "bad_session_id",
+    [
+        # Phase 8 review P1-1: ``session_id`` flows directly into
+        # ``env["ANTIGRAVITY_CONVERSATION_ID"]`` and ``--conversation=<id>``.
+        # Anything that could split env entries (NUL/CR/LF), break path
+        # semantics (``/``), or smuggle shell metacharacters must be
+        # rejected at the model boundary.
+        "real-id\nLD_PRELOAD=/tmp/x.so",   # newline injection
+        "real-id\r\nfoo",                   # CRLF
+        "real-id\x00foo",                   # NUL
+        "../etc/passwd",                    # path traversal
+        "id with spaces",                   # whitespace
+        "id;rm -rf /",                       # shell metacharacters
+        "id$(id)",                           # command substitution
+        "id`whoami`",                        # backtick command
+    ],
+)
+def test_bridge_request_rejects_unsafe_session_id_charset(bad_session_id: str):
+    with pytest.raises(ValidationError) as excinfo:
+        BridgeRequest(prompt="x", session_id=bad_session_id)
+    assert "session_id" in str(excinfo.value)
+
+
 def test_bridge_request_rejects_oversized_max_output_chars():
     """Phase 8 R1 arch P2-1: max_output_chars is capped at 8 MiB so
     a hostile caller cannot ask the bridge to buffer an unbounded
@@ -134,15 +158,20 @@ def test_bridge_response_round_trip():
     assert decoded["adapter"]["backend"] is None
 
 
-def test_bridge_response_touch_updates_timestamp():
+def test_bridge_response_touch_updates_timestamp(monkeypatch):
+    """Touch bumps ``updated_at`` to the current clock — verified without
+    a real ``time.sleep`` so the test stays deterministic and CI fast
+    (Phase 8 review test-eng P1 #1)."""
+
+    from agy_mcp import models as models_mod
+
     resp = BridgeResponse(success=False, error="x")
     original = resp.updated_at
-    # Sleep a bit so the timestamp string can change (1s resolution).
-    import time
-
-    time.sleep(1.1)
+    later_iso = "2099-12-31T23:59:59Z"
+    monkeypatch.setattr(models_mod, "_iso_now", lambda: later_iso)
     resp.touch()
-    assert resp.updated_at >= original
+    assert resp.updated_at == later_iso
+    assert resp.updated_at > original
 
 
 def test_bridge_response_failure_envelope_has_stable_fields():

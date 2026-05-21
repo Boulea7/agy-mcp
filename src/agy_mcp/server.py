@@ -88,6 +88,9 @@ _gemini_adapter: GeminiCliBackend | None = None
 _MAX_JOB_ID_LEN = 84
 _JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
 _MAX_SESSION_ID_LEN = 96
+# Conservative charset for SESSION_ID; mirrors models._SESSION_ID_RE so
+# the server-side fast path and the pydantic validator stay in lockstep.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,96}$")
 # Concurrency limiter for the async bridge tools. anyio's default thread
 # limiter is global to the process (40); ``_bridge_run`` itself spawns
 # additional reader threads + a subprocess per call, so we add a finer cap
@@ -301,16 +304,25 @@ def _validate_job_id(safety: SafetyPolicy, job_id: str) -> str | None:
 
 
 def _validate_session_id(safety: SafetyPolicy, session_id: str) -> str | None:
-    """Length-cap SESSION_ID before it reaches the bridge.
+    """Length-cap and charset-check SESSION_ID before it reaches the bridge.
 
-    The bridge layer treats SESSION_ID as a worktree slug seed and a
-    conversation id; a multi-megabyte value would survive validation
-    there. (Phase 5 R2 arch P2 #3.)
+    The bridge layer treats SESSION_ID as a worktree slug seed, a child-
+    process env entry, and an ``--conversation=<id>`` flag value; a
+    multi-megabyte value or one containing NUL/CR/LF would either crash
+    ``os.execvpe`` (Linux glibc) or smuggle through on macOS. We mirror
+    the BridgeRequest model validator here so the server returns a clean
+    structured error before the pydantic round-trip raises. (Phase 5 R2
+    arch P2 #3; Phase 8 review P1-1.)
     """
 
     if len(session_id) > _MAX_SESSION_ID_LEN:
         return safety.redact(
             f"SESSION_ID exceeds {_MAX_SESSION_ID_LEN} chars",
+        )
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return safety.redact(
+            "SESSION_ID must match ^[A-Za-z0-9._-]{1,96}$ "
+            "(no whitespace, NUL, CR/LF, slashes, or shell metacharacters)",
         )
     return None
 

@@ -206,7 +206,7 @@ assuming protection that isn't there.
   wins the race. POSIX platforms with openat support use the anchored
   dir-fd path described in § 5.
 - **Versioned `uvx` fallback availability.** The skill forwarder uses a
-  fixed package version (`agy-mcp==0.1.2`) rather than a mutable branch
+  fixed package version (`agy-mcp==0.1.3`) rather than a mutable branch
   ref. If that version is not published in the user's configured Python
   index, the fallback fails closed and the user must install the bridge
   locally or set `AGY_BRIDGE_CMD`.

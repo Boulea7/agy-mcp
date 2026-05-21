@@ -54,8 +54,42 @@ _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}
 _AWS_ACCESS_KEY_ID = re.compile(
     r"(?<![A-Za-z0-9])(AKIA|ASIA|AROA|AGPA|AIDA|ANPA|ANVA)[0-9A-Z]{16}(?![A-Za-z0-9])"
 )
-_SLACK_TOKEN = re.compile(r"(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])")
+_SLACK_TOKEN = re.compile(
+    # Bot/user/refresh/legacy/workspace-app variants.
+    # Reference: https://api.slack.com/authentication/token-types
+    r"(?<![A-Za-z0-9])"
+    r"(?:"
+    r"xox[abeprs]-[A-Za-z0-9-]{10,}"          # xoxb / xoxa / xoxe / xoxp / xoxr / xoxs
+    r"|xoxe\.xox[bp]-[A-Za-z0-9-]{10,}"        # rotated refresh: xoxe.xoxp-... / xoxe.xoxb-...
+    r"|xapp-[0-9]-[A-Z0-9]+-[0-9]+-[a-f0-9]+"  # app-level token
+    r")"
+    r"(?![A-Za-z0-9])"
+)
 _GITHUB_PAT_FG = re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}(?![A-Za-z0-9])")
+# Provider-prefix tokens that fall under the generic 40-char gate. Listed
+# explicitly so a 28-char Stripe key, a 34-char HuggingFace token, etc.
+# still get redacted before the catch-all rule. Each pattern carries its
+# own boundary so values inside JSON / shell quotes still match.
+# Phase 8 review P1-2.
+_PROVIDER_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    # Stripe live/test secret / restricted / publishable / webhook signing.
+    r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}"
+    r"|whsec_[A-Za-z0-9]{20,}"
+    # Anthropic API key (sk-ant-...). Length suffix is implementation-defined;
+    # 20+ chars after the second hyphen is the documented floor.
+    r"|sk-ant-[A-Za-z0-9_-]{20,}"
+    # GitLab personal access token.
+    r"|glpat-[A-Za-z0-9_-]{20,}"
+    # HuggingFace user / read / write token (``hf_<37 alnum>`` typical).
+    r"|hf_[A-Za-z0-9]{34,}"
+    # Notion integration secret.
+    r"|secret_[A-Za-z0-9]{40,}"
+    # Twilio Account / API / Sub-account SID (``AC`` + 32-hex). Auth-token
+    # twin is plain hex so the catch-all 40+ rule will cover it.
+    r"|AC[0-9a-f]{32}"
+    r")(?![A-Za-z0-9])"
+)
 _VALUE_TOKEN = re.compile(
     r"(?<![A-Za-z0-9])(?:gh[opusr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"
     r"AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z_-]{20,}|"
@@ -80,28 +114,39 @@ REDACTION_PLACEHOLDER = "***"
 # Anonymise per-user paths to keep operator usernames + tooling layout out
 # of error envelopes (Phase 3 review M3 + R2 N1; widened in Phase 8 R1
 # sec P1-1 to also anonymise bare ``/Users/<u>`` with no trailing path
-# component). The regex set covers:
+# component, and again in Phase 8 review P1-5/P1-6 to fire on common
+# word-boundary punctuation, plus the ``~user/`` explicit-home form). The
+# regex set covers:
 #   * Windows native:  C:\Users\<u>\...
 #   * Windows long path: \\?\C:\Users\<u>\...
 #   * UNC: \\server\share\Users\<u>\...
 #   * Mixed / forward-slash form on Windows: C:/Users/<u>/...
 #   * POSIX:  /Users/<u>/...   (macOS)
 #             /home/<u>/...    (Linux)
-#   * Trailing terminator: either ``/`` (followed by more path components),
-#     ``\`` (Windows), or end-of-string. The end-of-string anchor is
-#     essential — a string ending with ``/Users/<u>`` (no trailing path)
-#     would otherwise escape with the username visible.
+#   * Explicit-home prefix: ``~user/...`` and ``~user`` followed by a
+#     natural-language boundary.
+#
+# Terminator: either CONSUMES one trailing ``/`` / ``\`` (path continuation),
+# stops at end-of-string, OR uses a lookahead on common punctuation
+# (``"' .,:;!?)\]``) so a string like ``cwd="/Users/alice"`` no longer
+# slips through with the username visible. The replacement is always ``~/``
+# — even in the punctuation-tail case it's strictly better than leaking the
+# username, at the cost of a cosmetic extra ``/``.
+#
 # Order matters: Windows patterns run BEFORE the POSIX ``/Users/`` rule so
 # a string like ``C:/Users/<u>/`` gets the drive prefix stripped together
 # with the user segment, rather than leaving a stray ``C:~/`` behind.
+_HOME_TAIL = r"(?:[\\/]|$|(?=[\s\"'.,:;!?)\]]))"
 _HOME_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Windows: optional ``\\?\`` long-path prefix, drive letter, both \ and /.
-    # Trailing component is ``[\\/]`` or end-of-string.
-    re.compile(r"(?i)(?:\\\\\?\\)?[A-Z]:[\\/]Users[\\/][^\\/\s\"']+(?:[\\/]|$)"),
-    # UNC ``\\server\share\Users\<u>\`` (or end-of-string).
-    re.compile(r"(?i)\\\\[^\\/\s\"']+\\[^\\/\s\"']+\\Users\\[^\\/\s\"']+(?:\\|$)"),
-    re.compile(r"/Users/[^/\s\"']+(?:/|$)"),
-    re.compile(r"/home/[^/\s\"']+(?:/|$)"),
+    re.compile(r"(?i)(?:\\\\\?\\)?[A-Z]:[\\/]Users[\\/][A-Za-z0-9._-]+" + _HOME_TAIL),
+    # UNC ``\\server\share\Users\<u>``.
+    re.compile(r"(?i)\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9._-]+\\Users\\[A-Za-z0-9._-]+" + _HOME_TAIL),
+    re.compile(r"/Users/[A-Za-z0-9._-]+" + _HOME_TAIL),
+    re.compile(r"/home/[A-Za-z0-9._-]+" + _HOME_TAIL),
+    # Explicit-home reference: ``~alice/`` or ``~alice``. Lead-anchor on a
+    # non-word lookbehind so embedded text like ``foo~bar`` won't match.
+    re.compile(r"(?<!\w)~[A-Za-z][A-Za-z0-9._-]*" + _HOME_TAIL),
 )
 
 
@@ -145,6 +190,7 @@ def redact_text(value: str, *, extra_patterns: tuple[re.Pattern[str], ...] = ())
     redacted = _AWS_ACCESS_KEY_ID.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _SLACK_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _GITHUB_PAT_FG.sub(REDACTION_PLACEHOLDER, redacted)
+    redacted = _PROVIDER_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
     redacted = _VALUE_TOKEN.sub(REDACTION_PLACEHOLDER, redacted)
     for pat in extra_patterns:
         redacted = pat.sub(REDACTION_PLACEHOLDER, redacted)

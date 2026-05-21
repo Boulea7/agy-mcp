@@ -565,22 +565,30 @@ class Supervisor:
                         if spool_log is not None:
                             _migrate_if_present(spool_log, paths.agy_log)
         finally:
-            self._finalize(
-                job_id=job_id,
-                result=result,
-                run_error=run_error,
-                cancel_event=cancel_event,
-                request=request,
-                route_warnings=route_warnings,
-            )
-            with self._lock:
-                # Drop the in-memory handle so cancel() on a finished job
-                # returns False and the next start() with the same id
-                # can re-register cleanly.
-                self._jobs.pop(job_id, None)
-            # Release the concurrency slot the start() path acquired so
-            # the next queued job can begin. (Phase 5 R2 security P1-3.)
-            self._job_slots.release()
+            # Phase 8 review (Codex P1 #4): even if ``_finalize`` raises
+            # (session-store IO error, redaction crash, etc.) we MUST drop
+            # the in-memory job handle and release the concurrency slot —
+            # otherwise the supervisor leaks a slot per failure and
+            # eventually rejects every new start() with ``supervisor busy``.
+            try:
+                self._finalize(
+                    job_id=job_id,
+                    result=result,
+                    run_error=run_error,
+                    cancel_event=cancel_event,
+                    request=request,
+                    route_warnings=route_warnings,
+                )
+            finally:
+                with self._lock:
+                    # Drop the in-memory handle so cancel() on a finished
+                    # job returns False and the next start() with the same
+                    # id can re-register cleanly.
+                    self._jobs.pop(job_id, None)
+                # Release the concurrency slot the start() path acquired
+                # so the next queued job can begin. (Phase 5 R2 security
+                # P1-3.)
+                self._job_slots.release()
 
     def _finalize(
         self,

@@ -112,6 +112,11 @@ _PROMPT_MAX_CHARS = 256_000          # ~256 KiB; well under any platform's argv 
 _TIMEOUT_MAX_SECONDS = 24 * 60 * 60  # 24h ceiling for the synchronous call
 _MAX_OUTPUT_CHARS_CEIL = 8 * 1024 * 1024  # 8 MiB buffered transcript ceiling
 _SESSION_ID_MAX_CHARS = 96
+# Conservative charset for ``session_id`` (validated below): the value
+# becomes an env-entry suffix and the ``--conversation=`` flag value, so
+# anything that could break env-parse semantics (NUL, CR, LF), shell-quote
+# semantics, or path semantics is rejected outright.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,96}$")
 
 # ---------------------------------------------------------------------------
 # Capability — runtime detection result
@@ -219,9 +224,23 @@ class BridgeRequest(BaseModel):
     @field_validator("session_id")
     @classmethod
     def _session_id_bounded(cls, value: str | None) -> str | None:
-        if value is not None and len(value) > _SESSION_ID_MAX_CHARS:
+        if value is None:
+            return value
+        if len(value) > _SESSION_ID_MAX_CHARS:
             raise ValueError(
                 f"session_id exceeds {_SESSION_ID_MAX_CHARS} characters",
+            )
+        # Phase 8 review P1-1: ``session_id`` flows directly into
+        # ``env["ANTIGRAVITY_CONVERSATION_ID"]`` and ``--conversation=<id>``.
+        # A NUL/CR/LF in the value would either trip ``os.execvpe`` on
+        # Linux glibc (after leaking the raw bytes via the error path that
+        # runs *before* SafetyPolicy.redact) or pass through unsanitised on
+        # macOS where the kernel accepts \n in environ entries. Lock to the
+        # same conservative charset the worktree slug already enforces.
+        if not _SESSION_ID_RE.fullmatch(value):
+            raise ValueError(
+                "session_id must match ^[A-Za-z0-9._-]{1,96}$ "
+                "(no whitespace, NUL, CR/LF, slashes, or shell metacharacters)",
             )
         return value
 

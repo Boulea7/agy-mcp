@@ -60,6 +60,18 @@ DEFAULT_SCRUB_ENV_NAMES: tuple[str, ...] = (
 # use end-of-string anchors — the screened text can contain arbitrary
 # preamble/postamble from the model.
 _SHELL_WS = r"(?:\s+|\$\{IFS\}|\$IFS)+"
+# Workspace-relative destructive targets the original ``(?:/|~|\$HOME)`` rule
+# misses: ``.``, ``..``, ``./``, ``./src``, ``*``, plus common high-blast
+# project subtrees (``node_modules``, ``.git``, ``dist``, ``build``).
+# LLM-generated cleanup commands hit these constantly. Phase 8 review.
+_RM_RELATIVE_TARGET = (
+    r"(?:"
+    r"\.{1,2}/?(?:\S+)?"   # .  .. ./  ../  ./src etc.
+    r"|\*"                  # wildcard
+    r"|\$\{?[A-Z_][A-Z_0-9]*\}?"   # $VAR / ${VAR}
+    r"|(?:[A-Za-z0-9._-]+/)?(?:src|tests?|dist|build|node_modules|target|\.git)\b"
+    r")"
+)
 _DESTRUCTIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"(?im)\brm"
@@ -67,6 +79,16 @@ _DESTRUCTIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
         + r"(?:(?:-[rRfF]+|--recursive|--force|--)"
         + _SHELL_WS
         + r")+(?:/|~|\$HOME)"
+    ),
+    # Workspace-relative ``rm -rf`` variants. Requires at least one of
+    # ``-r``/``-R``/``-f``/--recursive/--force to avoid blocking ``rm file``.
+    re.compile(
+        r"(?im)\brm"
+        + _SHELL_WS
+        + r"(?:(?:-[rRfF]+|--recursive|--force)"
+        + _SHELL_WS
+        + r")+"
+        + _RM_RELATIVE_TARGET
     ),
     re.compile(r"(?im)\bsudo\s+rm\b"),
     re.compile(r"(?im)\bchmod\s+-?R?\s*777\b"),

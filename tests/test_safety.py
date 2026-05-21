@@ -65,6 +65,17 @@ def test_default_scrub_env_names_includes_provider_keys():
         "mkfs.ext4 /dev/sda1",
         "dd if=/dev/zero of=/dev/sda",
         ":(){ :|:& };:",
+        # Phase 8 review (Codex P1 #5): workspace-relative destructive
+        # commands that the original ``(?:/|~|$HOME)`` rule missed. These
+        # are the variants LLM cleanup suggestions tend to emit.
+        "rm -rf .",
+        "rm -rf ./",
+        "rm -rf ./src",
+        "rm -rf *",
+        "rm -rf node_modules",
+        "rm -rf .git",
+        "rm -rf $WORKSPACE",
+        "rm -rf ${WORKSPACE}",
     ],
 )
 def test_screen_prompt_blocks_destructive_pattern(prompt: str):

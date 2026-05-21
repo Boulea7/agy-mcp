@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-479%20passed-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-513%20passed-brightgreen.svg)](#)
 [![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-README-red.svg)](../README.md)
 
 > **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
@@ -191,7 +191,7 @@ that repo knows when to call `agy`:
 
 ```bash
 uv sync
-uv run pytest        # full suite — 479 tests
+uv run pytest        # full suite — 513 tests
 uv run agymcp        # FastMCP stdio server (manual testing)
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 uv run agy-doctor    # environment and auth probe

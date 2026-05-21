@@ -174,16 +174,43 @@ def _drain_stream(
                 with ctx.lock:
                     ctx.events.append(event)
     try:
-        while not ctx.stop_event.is_set():
+        # Phase 8 review (Codex P1 #1): the pipe reader drains until EOF
+        # regardless of ``ctx.stop_event`` so a finalize-block ``stop_event.set()``
+        # cannot truncate buffered output. ``stop_event`` is intended for the
+        # klog / transcript tail loops, not pipe reads.
+        while True:
             chunk = stream.readline(_MAX_LINE_BYTES)
             if not chunk:
                 break
             with ctx.lock:
                 buf.append(chunk)
+            # Phase 8 review (Codex P1 #2): a failed spool write must not
+            # short-circuit the drain — otherwise pipe back-pressure deadlocks
+            # the child process. Close the spool, emit a warning event, keep
+            # draining the pipe to EOF.
             if spool is not None:
-                spool.write(chunk)
-                spool.flush()
+                try:
+                    spool.write(chunk)
+                    spool.flush()
+                except (OSError, ValueError) as exc:
+                    spool_failure = CanonicalEvent(
+                        type="error",
+                        subtype="spool_write_failed",
+                        text=f"spool write for {label} failed: {exc}; continuing without spool",
+                    )
+                    if adapter is not None:
+                        adapter.emit_event(ctx, spool_failure)
+                    else:
+                        with ctx.lock:
+                            ctx.events.append(spool_failure)
+                    try:
+                        spool.close()
+                    except OSError:
+                        pass
+                    spool = None
     except (OSError, ValueError):
+        # ``stream.readline`` itself raised (pipe vanished / decode error).
+        # Drain loop ends; rely on the caller's ``proc.wait()`` to reap.
         return
     finally:
         if spool is not None:

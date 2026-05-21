@@ -9,9 +9,13 @@ Selection order:
   1. ``AGY_BRIDGE_CMD`` env var (full shell command, advanced override —
      **trust boundary**, see references/security.md).
   2. ``python -m agy_mcp.bridge`` if importable from the current env.
-  3. ``uvx --from agy-mcp==0.1.2 agy-bridge`` as the last-resort
-     install-on-demand fallback. Use a fixed package version here;
-     branch refs are mutable and not acceptable for the skill launcher.
+  3. ``uvx --from agy-mcp==<version> agy-bridge`` as the last-resort
+     install-on-demand fallback. The pinned version resolves at module
+     import time: when ``agy-mcp`` is installed, ``importlib.metadata``
+     wins (so the wheel that hosts this script and the wheel that uvx
+     fetches stay in sync). Otherwise the fallback literal kicks in —
+     ``agy_mcp.install`` rewrites that literal at install time so a
+     deployed copy carries a real version even on a wheel-less host.
 
 All argv is forwarded verbatim. We do NOT parse the bridge response —
 the caller (the Claude agent) reads the JSON line and decides what to do.
@@ -26,7 +30,25 @@ import shutil
 import subprocess
 import sys
 
-BRIDGE_PACKAGE_SPEC = "agy-mcp==0.1.2"
+
+def _resolve_package_spec() -> str:
+    """Return ``agy-mcp==<version>`` for the uvx fallback.
+
+    Prefer the importable package version so upgrades to ``agy-mcp``
+    take effect without re-running ``agy-install-skill``. Fall through
+    to the install-time-templated literal otherwise — the placeholder
+    below is the source-of-truth string ``agy_mcp.install`` substitutes
+    on install.
+    """
+
+    try:
+        from importlib.metadata import version  # local import keeps top tidy
+        return f"agy-mcp=={version('agy-mcp')}"
+    except Exception:  # noqa: BLE001 - any failure falls back to literal
+        return "agy-mcp==__AGY_MCP_VERSION__"
+
+
+BRIDGE_PACKAGE_SPEC = _resolve_package_spec()
 
 
 def _has_module(name: str) -> bool:

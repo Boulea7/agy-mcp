@@ -38,11 +38,28 @@ from importlib.resources import files as _pkg_files
 from pathlib import Path
 from typing import Iterable, Literal
 
+from agy_mcp import __version__ as _AGY_MCP_VERSION
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.utils import safe_write_text
 
 SkillTarget = Literal["claude", "codex", "antigravity", "all"]
 SkillScope = Literal["user", "project"]
+
+# Placeholder the packaged skill forwarders carry as a static fallback for the
+# uvx-install path. Resolved to ``_AGY_MCP_VERSION`` at install time so a
+# deployed copy always pins a real release rather than the literal sentinel.
+# See ``src/agy_mcp/_skill_bodies/<target>/scripts/agy_bridge.py``.
+_VERSION_PLACEHOLDER = "__AGY_MCP_VERSION__"
+
+
+def _template_skill_body(body: str) -> str:
+    """Substitute install-time placeholders in a skill body.
+
+    Currently only the version placeholder is templated; kept as a single
+    function so future placeholders can be added in one place.
+    """
+
+    return body.replace(_VERSION_PLACEHOLDER, _AGY_MCP_VERSION)
 
 
 @dataclass(slots=True)
@@ -341,7 +358,7 @@ def install_skills(
         any_failure = False
         for rel_path in files:
             try:
-                body = _read_packaged_file(target, rel_path)
+                body = _template_skill_body(_read_packaged_file(target, rel_path))
             except (FileNotFoundError, OSError) as exc:
                 result.warnings.append(
                     sft.redact(f"missing bundle file {target}/{rel_path}: {exc}"),

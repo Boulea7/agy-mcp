@@ -6,6 +6,105 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-21
+
+### Security
+
+- **`session_id` strict charset validator**. Previously only
+  length-capped, ``session_id`` now must match
+  ``^[A-Za-z0-9._-]{1,96}$``. Hardens against newline / NUL / shell-
+  metacharacter injection into ``ANTIGRAVITY_CONVERSATION_ID`` (env
+  splitting) and ``--conversation=<id>`` (argv parsing). Both the
+  pydantic model (``models.BridgeRequest``) and the server fast-path
+  (``server._validate_session_id``) enforce the same regex.
+- **Extended secret-redaction surface**. ``SafetyPolicy.redact``
+  / ``utils.redact_text`` now strip Slack ``xoxe-`` refresh tokens,
+  ``xoxe.xoxp-`` rotated refreshes, and ``xapp-`` app-level tokens
+  on top of the existing ``xox[abprs]-`` set. New
+  ``_PROVIDER_TOKEN`` rule covers Stripe
+  ``(sk|rk|pk)_(live|test)_`` and ``whsec_``, Anthropic
+  ``sk-ant-``, GitLab ``glpat-``, HuggingFace ``hf_``, Twilio
+  ``AC[0-9a-f]{32}``, and Notion ``secret_``. Closes a class of
+  short-prefix provider tokens that escaped the generic 40-char gate.
+- **Home-path anonymisation broadened**. The trailing anchor now
+  matches end-of-string, path separators, and natural-language
+  punctuation (``" ' . , : ; ! ?`` etc.), so a string like
+  ``cwd="/Users/alice"`` no longer slips through with the username
+  visible. The username class is tightened to ``[A-Za-z0-9._-]+``
+  and a new ``~user/`` explicit-home rule fires on the tilde-prefix
+  form.
+- **Destructive-prompt blocker covers workspace-relative targets**.
+  The original rule only matched ``rm -rf /``, ``~``, or ``$HOME``;
+  the new rule also blocks ``rm -rf .``, ``rm -rf *``, ``rm -rf ./src``,
+  ``rm -rf node_modules``, ``rm -rf .git``, and ``rm -rf $VAR`` —
+  the variants LLM-generated cleanup commands tend to emit.
+
+### Fixed
+
+- **Pipe-reader truncation race**
+  (``adapters/base.py:_drain_stream``). The drain loop no longer
+  consults ``ctx.stop_event``; it runs until EOF. Previously a
+  finalize-block ``stop_event.set()`` could end the loop before the
+  child's buffered output was fully read, silently dropping the
+  tail of long stdout/stderr.
+- **Spool-write failure deadlock**
+  (``adapters/base.py:_drain_stream``). When mid-stream
+  ``spool.write/flush`` raised ``OSError`` / ``ValueError`` the
+  whole drain returned, leaving the pipe unread; a child that
+  produced more than one pipe buffer of output blocked forever on
+  ``write``. Spool failures now close the spool, emit a
+  ``spool_write_failed`` warning event, and keep draining the pipe.
+- **Supervisor slot leak on ``_finalize`` exception**
+  (``supervisor.py``). If session-store I/O or redaction crashed
+  inside ``_finalize``, the next lines that drop the job handle
+  and release the concurrency slot never executed — the supervisor
+  leaked one slot per failure and eventually rejected every new
+  ``start()`` with ``supervisor busy``. Slot release is now in an
+  outer ``finally``.
+
+### Changed
+
+- **CI: GitHub Actions runtimes off Node 20**. Bumped
+  ``actions/checkout`` v4 → v5 and ``astral-sh/setup-uv`` v3 → v8
+  to silence the September 2026 Node 20 deprecation warnings on
+  the runners.
+- **Skill forwarder package spec resolves dynamically**. The
+  ``BRIDGE_PACKAGE_SPEC`` literal in the two skill forwarders
+  (``src/agy_mcp/_skill_bodies/{claude,codex}/scripts/agy_bridge.py``
+  and the canonical mirrors under ``skills/``) now resolves from
+  ``importlib.metadata.version("agy-mcp")`` at import time. The
+  static fallback carries the ``__AGY_MCP_VERSION__`` placeholder
+  which ``agy_mcp.install._template_skill_body`` substitutes at
+  install time, so a deployed copy on a wheel-less host still pins a
+  real version. Removes the per-release manual sync of four files.
+
+### Tested
+
+- New regression tests:
+  - ``test_anonymise_paths_handles_word_boundary_punctuation``
+    pins the punctuation-tail variants.
+  - ``test_redact_text_strips_extended_provider_tokens`` covers
+    every new provider pattern.
+  - ``test_bridge_request_rejects_unsafe_session_id_charset``
+    spans newline, CRLF, NUL, path traversal, and shell-metachar
+    injection attempts.
+  - ``test_skill_forwarder_uvx_spec_prefers_installed_version`` /
+    ``...carries_static_fallback_placeholder`` /
+    ``test_template_skill_body_resolves_placeholder`` verify the
+    dynamic-spec round trip.
+  - ``rm -rf .`` / ``rm -rf *`` / ``rm -rf ./src`` /
+    ``rm -rf node_modules`` / ``rm -rf .git`` /
+    ``rm -rf $WORKSPACE`` added to the destructive-prompt
+    parametrisation.
+- Removed flaky ``time.sleep(1.1)`` in
+  ``test_bridge_response_touch_updates_timestamp`` in favour of a
+  ``monkeypatch`` of ``_iso_now``.
+- ``tests/test_skill_bridge_forwarders.py`` now resolves package
+  paths relative to ``__file__`` so the suite stays hermetic when
+  pytest is invoked outside the repo root.
+- Full suite: 513 tests, hermetic (``env -i`` PATH stripped of
+  ``agy``/``gemini``).
+
 ## [0.1.2] — 2026-05-21
 
 ### Fixed
@@ -123,7 +222,8 @@ First public-ready cut.
   dry-run on three modes, real `agy --print` call with session
   resume.
 
-[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Boulea7/agy-mcp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Boulea7/agy-mcp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Boulea7/agy-mcp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Boulea7/agy-mcp/releases/tag/v0.1.0

@@ -353,6 +353,50 @@ def test_redact_text_anonymises_home_path_alongside_secret():
     assert "~/" in out
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Phase 8 review P1-5/P1-6: home paths must be anonymised even when
+        # followed by natural-language punctuation, not only ``/`` or EOS.
+        'cwd="/Users/alice"',
+        "see /Users/alice's checkout for details",
+        "wrote to /Users/alice.bak/file",
+        "cd /home/bob; ls",
+        "tilde reference ~alice/.config and ~bob",
+    ],
+)
+def test_anonymise_paths_handles_word_boundary_punctuation(raw: str):
+    out = anonymise_paths(raw)
+    # Usernames removed regardless of trailing punctuation. We only assert
+    # the user fragment is gone — the exact replacement ("~/") may carry a
+    # cosmetic extra ``/`` on the punctuation-tail variant; what matters is
+    # no operator-identifying token survives.
+    for needle in ("alice", "bob"):
+        assert needle not in out, f"username leaked: {out!r}"
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        # Phase 8 review P1-2/P1-3: extended provider/Slack patterns.
+        "xox" "e-1-abcdef0123456789",                       # Slack refresh token
+        "xox" "e.xoxp-abcdef0123456789",                    # Slack rotated refresh
+        "xapp" "-1-A12345BCDEF-1234567890123-abcdef0123456789",  # Slack app-level
+        "sk" "_live_4eC39HqLyjWDarjtT1zdp7dc",              # Stripe live secret
+        "sk" "_test_4eC39HqLyjWDarjtT1zdp7dc",              # Stripe test secret
+        "whsec" "_abcdef0123456789ABCDEF0123456789",        # Stripe webhook signing
+        "sk-ant" "-api03-AaBbCcDdEeFfGgHhIiJjKkLlMm",       # Anthropic API key
+        "glpat" "-abcdef0123456789ABCD",                    # GitLab PAT
+        "hf" "_abcdefghijklmnopqrstuvwxyz0123456789AB",     # HuggingFace token
+        "AC" "0123456789abcdef0123456789abcdef",            # Twilio Account SID
+    ],
+)
+def test_redact_text_strips_extended_provider_tokens(secret: str):
+    raw = f"got token {secret} from upstream"
+    out = redact_text(raw)
+    assert secret not in out, f"redactor missed {secret!r}: {out!r}"
+
+
 # ---------------------------------------------------------------------------
 # Windows .cmd/.bat launch parity
 # ---------------------------------------------------------------------------
