@@ -358,6 +358,98 @@ def test_klog_parser_ignores_empty_and_unrelated_lines():
     assert ctx.events == []
 
 
+# ---------------------------------------------------------------------------
+# Upstream API error patterns — agy 1.0.0 swallows these to klog only and
+# exits 0, so the wrapper must promote them to ``upstream_error``. See LLM
+# Wiki [[agy-cli-silent-exit-on-api-error]].
+# ---------------------------------------------------------------------------
+
+
+def test_klog_parser_failed_precondition_marks_upstream_error():
+    """v0.1.6: a FAILED_PRECONDITION line in klog flips
+    ``ctx.had_upstream_error`` and emits a structured error event so the
+    adapter never silently swallows a Google-side rejection (e.g.
+    geographic restriction)."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    line = (
+        "E0521 19:22:00.142664  67582 log.go:398] "
+        "FAILED_PRECONDITION (code 400): "
+        "User location is not supported for the API use.\n"
+    )
+    _handle_klog_line(line, ctx, adapter)
+    [evt] = ctx.events
+    assert evt.type == "error"
+    assert evt.subtype == "upstream_failed_precondition"
+    assert "User location is not supported" in (evt.text or "")
+    assert ctx.had_upstream_error is True
+    assert ctx.first_upstream_error == evt.text
+
+
+def test_klog_parser_agent_executor_error_takes_precedence_over_inner_status():
+    """The composite ``agent executor error: <inner>`` line carries an
+    inner status name (FAILED_PRECONDITION etc.). The matcher must yield
+    the ``agent_executor_error`` subtype, not the inner one — order in
+    ``_UPSTREAM_ERROR_PATTERNS`` enforces that."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    line = (
+        "E0521 19:22:00.142664  67582 log.go:398] "
+        "agent executor error: FAILED_PRECONDITION (code 400): "
+        "User location is not supported for the API use.\n"
+    )
+    _handle_klog_line(line, ctx, adapter)
+    [evt] = ctx.events
+    assert evt.type == "error"
+    assert evt.subtype == "upstream_agent_executor_error"
+    assert ctx.had_upstream_error is True
+
+
+def test_klog_parser_first_upstream_error_only_recorded():
+    """Only the first upstream error wins ``first_upstream_error``; later
+    error lines still emit individual events but do not overwrite the
+    captured message used for the result envelope."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    line_a = (
+        "E0521 19:22:00.142  1 log.go:1] "
+        "agent executor error: FAILED_PRECONDITION (code 400): "
+        "User location is not supported for the API use.\n"
+    )
+    line_b = (
+        "E0521 19:22:00.143  1 log.go:1] "
+        "FAILED_PRECONDITION (code 400): User location is not supported for the API use.\n"
+    )
+    _handle_klog_line(line_a, ctx, adapter)
+    _handle_klog_line(line_b, ctx, adapter)
+    assert len(ctx.events) == 2
+    assert ctx.events[0].subtype == "upstream_agent_executor_error"
+    assert ctx.events[1].subtype == "upstream_failed_precondition"
+    # First error wins — second line's payload does not overwrite.
+    assert "agent executor error" not in (ctx.first_upstream_error or "")
+    assert ctx.first_upstream_error == ctx.events[0].text
+
+
+def test_klog_parser_permission_denied_marks_upstream_error():
+    """PERMISSION_DENIED (auth / authz failures) is the same swallow
+    pattern as FAILED_PRECONDITION. Cover it explicitly so the matcher
+    table is regression-guarded."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    line = (
+        "E0521 19:22:00.142  1 log.go:1] "
+        "PERMISSION_DENIED (code 403): caller lacks permission for resource.\n"
+    )
+    _handle_klog_line(line, ctx, adapter)
+    [evt] = ctx.events
+    assert evt.subtype == "upstream_permission_denied"
+    assert ctx.had_upstream_error is True
+
+
 def test_klog_parser_full_sample_log():
     """Drive the full sample log through the parser and check shape."""
 

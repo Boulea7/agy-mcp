@@ -6,6 +6,48 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-05-21
+
+### Fixed
+
+- **`agy --print` silent-failure detection**. `agy v1.0.0` swallows
+  upstream API errors (`FAILED_PRECONDITION` / `PERMISSION_DENIED` /
+  `UNAUTHENTICATED` / `RESOURCE_EXHAUSTED`, including the geographic-
+  restriction `User location is not supported for the API use` returned
+  to China-region IPs by `daily-cloudcode-pa.googleapis.com`) — they
+  appear only in the klog file with severity `E`, while the process
+  exits 0 with empty stdout. The wrapper would therefore mis-report
+  `success=true` with an empty `agent_messages`. v0.1.6 adds five
+  klog error patterns to `AgyPrintBackend`'s tail reader and a new
+  `_RunContext.had_upstream_error` flag; on detection the result
+  envelope is promoted to `subtype=upstream_error` and the first
+  upstream error message is surfaced via `result.text` so callers
+  see the real failure. The composite `agent executor error: <inner>`
+  pattern matches first so its structured subtype wins over the inner
+  status name. Discovered during the v0.1.5 PyPI smoke test (see
+  `docs/review-followups.md` and the LLM Wiki case
+  `agy-cli-silent-exit-on-api-error`).
+
+### Documentation
+
+- **`docs/installation.md`**. Switched the recommended `uv tool
+  install` command from `--from git+...` to plain `uv tool install
+  agy-mcp` now that v0.1.5+ is on PyPI; git+ stays as an explicit
+  fallback for unreleased branches. Added a *China mirror lag*
+  subsection covering why a freshly published version takes hours
+  to a day to appear on tuna / aliyun / sjtu / tencent mirrors and
+  the one-shot `UV_INDEX_URL=https://pypi.org/simple/` workaround.
+  README.md and docs/README_EN.md Quickstart, plus the bot-install
+  prompt's "install source" step, were synced to the same default.
+
+### Added
+
+- **`tests/test_adapters_agy.py` upstream-error coverage**. Four new
+  klog-parser tests (`failed_precondition`, `agent_executor_error`,
+  `first_upstream_error_only`, `permission_denied`) plus the
+  per-pattern subtype assertions raise the suite from 525 → 529
+  tests.
+
 ## [0.1.5] — 2026-05-21
 
 ### Added

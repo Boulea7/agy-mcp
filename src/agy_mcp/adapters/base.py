@@ -89,6 +89,14 @@ class _RunContext:
     sink: "EventSink | None"
     transcript_seen: set[Path]
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # agy v1.0.0 swallows upstream API errors: writes to klog with severity
+    # "E", but exits 0 and emits no stdout. Reader threads set
+    # ``had_upstream_error`` when a known error pattern appears, and the
+    # adapter promotes ``result.subtype`` to ``upstream_error`` even on
+    # exit 0 so callers see the failure. ``first_upstream_error`` carries
+    # the first redacted message for the result envelope.
+    had_upstream_error: bool = False
+    first_upstream_error: str | None = None
 
 
 def _open_spool(path: Path):

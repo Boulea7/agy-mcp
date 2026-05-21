@@ -105,6 +105,27 @@ _RE_REWIND = re.compile(rf"Rewinding conversation {_UUID_CANON} to step (\d+)")
 _RE_STREAM_START = re.compile(rf"Starting conversation update stream for ({_UUID_CANON})\b")
 _RE_TURN_END = re.compile(r"Stopping conversation stream|Language server shutting down")
 
+# Upstream API errors that agy v1.0.0 swallows: writes to klog with severity
+# "E", but exits 0 with empty stdout. Without explicit detection, the wrapper
+# would mis-report success. See LLM Wiki [[agy-cli-silent-exit-on-api-error]].
+# Order matters in the matcher: ``agent executor error: <inner>`` is matched
+# first because its inner payload is usually one of the gRPC status names,
+# and we want the structured ``agent_executor_error`` subtype, not the raw
+# inner-status one.
+_RE_AGENT_EXECUTOR_ERROR = re.compile(r"agent executor error: (.+)")
+_RE_FAILED_PRECONDITION = re.compile(r"FAILED_PRECONDITION \(code \d+\): (.+)")
+_RE_PERMISSION_DENIED = re.compile(r"PERMISSION_DENIED \(code \d+\): (.+)")
+_RE_UNAUTHENTICATED = re.compile(r"UNAUTHENTICATED \(code \d+\): (.+)")
+_RE_RESOURCE_EXHAUSTED = re.compile(r"RESOURCE_EXHAUSTED \(code \d+\): (.+)")
+
+_UPSTREAM_ERROR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (_RE_AGENT_EXECUTOR_ERROR, "agent_executor_error"),
+    (_RE_FAILED_PRECONDITION, "failed_precondition"),
+    (_RE_PERMISSION_DENIED, "permission_denied"),
+    (_RE_UNAUTHENTICATED, "unauthenticated"),
+    (_RE_RESOURCE_EXHAUSTED, "resource_exhausted"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Adapter
@@ -479,7 +500,12 @@ class AgyPrintBackend(BaseAdapter):
             )
 
         duration_ms = int((time.time() - start) * 1000)
-        if exit_code == 0 and not timed_out and not cancelled:
+        if (
+            exit_code == 0
+            and not timed_out
+            and not cancelled
+            and not ctx.had_upstream_error
+        ):
             self._emit(
                 ctx,
                 CanonicalEvent(
@@ -498,21 +524,32 @@ class AgyPrintBackend(BaseAdapter):
                 subtype = "cancelled"
             elif timed_out:
                 subtype = "wrapper_timeout"
+            elif ctx.had_upstream_error:
+                # agy exited 0 (or non-zero) but klog showed an upstream
+                # API error. Promote to ``upstream_error`` so callers do
+                # not mis-read silence as success.
+                subtype = "upstream_error"
             else:
                 subtype = "error"
+            # Prefer the first upstream error message captured by the klog
+            # tail (already redacted); fall back to stderr otherwise. Keeps
+            # the result envelope's ``text`` field human-readable when agy
+            # itself produced no stderr.
+            error_text = ctx.first_upstream_error or self.safety.redact(stderr_text)
             self._emit(
                 ctx,
                 CanonicalEvent(
                     type="result",
                     subtype=subtype,
                     session_id=ctx.seen_session_id[0],
-                    text=self.safety.redact(stderr_text)[:2000],
+                    text=error_text[:2000],
                     metadata={
                         "duration_ms": duration_ms,
                         "exit_code": exit_code,
                         "conversation_id": ctx.seen_session_id[0],
                         "timed_out": timed_out,
                         "cancelled": cancelled,
+                        "had_upstream_error": ctx.had_upstream_error,
                     },
                 ),
             )
@@ -795,6 +832,28 @@ def _handle_klog_line(line: str, ctx: _RunContext, adapter: AgyPrintBackend) -> 
             CanonicalEvent(type="system", subtype="turn_end", metadata={"raw": safe_msg}),
         )
         return
+    # Upstream API errors that agy 1.0.0 swallows. Match after the more
+    # specific lifecycle patterns so we never shadow a benign event, and
+    # before falling through to the generic klog event so the structured
+    # ``error`` envelope wins. Stop at the first matching pattern so a
+    # single line yields one event, not N.
+    for pattern, subtype in _UPSTREAM_ERROR_PATTERNS:
+        if m := pattern.search(msg):
+            err_msg = adapter.safety.redact(m.group(1))[:1000]
+            with ctx.lock:
+                if not ctx.had_upstream_error:
+                    ctx.had_upstream_error = True
+                    ctx.first_upstream_error = err_msg
+            adapter._emit(
+                ctx,
+                CanonicalEvent(
+                    type="error",
+                    subtype=f"upstream_{subtype}",
+                    text=err_msg,
+                    metadata={"raw_klog_line": safe_msg},
+                ),
+            )
+            return
 
 
 def _tail_transcripts(ctx: _RunContext, adapter: AgyPrintBackend, started_at: float) -> None:
