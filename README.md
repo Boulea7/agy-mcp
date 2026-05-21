@@ -19,8 +19,8 @@
 # 1. 装 uv（已有可跳过）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. 装 agy-mcp
-uv tool install --from git+https://github.com/Boulea7/agy-mcp.git agy-mcp
+# 2. 装 agy-mcp（从 PyPI）
+uv tool install agy-mcp
 
 # 3. 注册 MCP server（以 Claude Code 为例；其它客户端见折叠区）
 claude mcp add agy -s user --transport stdio -- agymcp
@@ -60,8 +60,9 @@ agy-doctor
    预期 `healthy=true`，6 项 check 全部 `ok=true`。如果 `auth` 这项
    显示未登录，告诉我手动跑一次 `agy --version` 触发 OAuth 流程，
    然后再调一次 `agy_doctor`。
-5. 安装来源：`git+https://github.com/Boulea7/agy-mcp.git`（公网安装）
-   或者本地 `--from <项目本地绝对路径>`（如果我提示你用本地仓库）。
+5. 安装来源默认走 PyPI：`uv tool install agy-mcp`。如果我让你装某个
+   未发布分支或本地 clone，再切到 `git+https://github.com/Boulea7/agy-mcp.git`
+   或本地 `--from <项目本地绝对路径>`。
 
 约束：
 - 不要 push 任何东西、不要改我的 .gitconfig。

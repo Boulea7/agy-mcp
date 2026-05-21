@@ -39,14 +39,41 @@ upgrade.
 #   pipx install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install agy-mcp directly from the git repo
+# Install agy-mcp from PyPI (recommended)
+uv tool install agy-mcp
+
+# Or pin to a specific git ref / unreleased branch
 uv tool install --from git+https://github.com/Boulea7/agy-mcp.git agy-mcp
 ```
 
 `pip install` also works:
 
 ```bash
-pip install --user "agy-mcp @ git+https://github.com/Boulea7/agy-mcp.git"
+pip install --user agy-mcp                                                # PyPI
+pip install --user "agy-mcp @ git+https://github.com/Boulea7/agy-mcp.git" # git
+```
+
+### China mirror lag
+
+If `UV_INDEX_URL` / `pip` is configured to a China-region PyPI mirror
+(Tsinghua, Aliyun, SJTU, Tencent, etc.), freshly published versions
+typically lag the official index by a few hours up to a day. If
+`uv tool install agy-mcp` fails with `package was not found in the
+package registry` shortly after a release, force the official PyPI
+index for that one call:
+
+```bash
+UV_INDEX_URL=https://pypi.org/simple/ UV_EXTRA_INDEX_URL= \
+  uv tool install --reinstall agy-mcp
+```
+
+The mirrors catch up automatically; subsequent upgrades can use the
+mirror config again. You can verify the official index has the version
+without installing:
+
+```bash
+curl -s "https://pypi.org/simple/agy-mcp/" \
+  -H "Accept: application/vnd.pypi.simple.v1+json" | jq -r '.versions[]'
 ```
 
 This puts four commands on `PATH`:
@@ -63,13 +90,12 @@ This puts four commands on `PATH`:
 ### Claude Code
 
 ```bash
-claude mcp add agy -s user --transport stdio -- uvx --from git+https://github.com/Boulea7/agy-mcp.git agymcp
-```
-
-Or, if you installed with `uv tool install`:
-
-```bash
+# If you ran `uv tool install agy-mcp` in step 2, just point at the
+# already-on-PATH command:
 claude mcp add agy -s user --transport stdio -- agymcp
+
+# Or, run via `uvx` so it auto-resolves on demand (no prior install):
+claude mcp add agy -s user --transport stdio -- uvx --from agy-mcp agymcp
 ```
 
 Verify it registered:
@@ -85,7 +111,7 @@ Add to your Codex `config.toml` (typically `~/.codex/config.toml`):
 ```toml
 [mcp_servers.agy]
 command = "uvx"
-args = ["--from", "git+https://github.com/Boulea7/agy-mcp.git", "agymcp"]
+args = ["--from", "agy-mcp", "agymcp"]
 ```
 
 Or with a pinned tool install:

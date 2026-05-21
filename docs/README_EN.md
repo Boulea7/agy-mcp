@@ -19,8 +19,8 @@
 # 1. Install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Install agy-mcp
-uv tool install --from git+https://github.com/Boulea7/agy-mcp.git agy-mcp
+# 2. Install agy-mcp (from PyPI)
+uv tool install agy-mcp
 
 # 3. Register the MCP server (Claude Code shown; others below)
 claude mcp add agy -s user --transport stdio -- agymcp
@@ -64,9 +64,10 @@ Please install the open-source MCP `agy-mcp` for me. Concretely:
    `ok=true`. If the `auth` check shows "not logged in", tell me to
    run `agy --version` once manually to trigger the OAuth flow, then
    call `agy_doctor` again.
-5. Install source: `git+https://github.com/Boulea7/agy-mcp.git`
-   (public install) or local `--from <absolute project path>` if I
-   point you at a local clone.
+5. Install source defaults to PyPI: `uv tool install agy-mcp`. Switch
+   to `git+https://github.com/Boulea7/agy-mcp.git` or local
+   `--from <absolute project path>` only if I point you at an
+   unreleased branch or a local clone.
 
 Constraints:
 - Don't push anything, don't edit my .gitconfig.
