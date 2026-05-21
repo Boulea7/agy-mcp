@@ -22,7 +22,7 @@ registered, this project ships an MCP bridge to Google Antigravity
 
 Available MCP tools: `agy`, `agy_start`, `agy_continue`, `agy_status`,
 `agy_read`, `agy_cancel`, `agy_sessions`, `agy_doctor`,
-`agy_install_skill`.
+`agy_install_skill`, `agy_purge`.
 
 ### Tool routing
 

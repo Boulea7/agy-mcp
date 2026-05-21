@@ -16,9 +16,9 @@ others.
                            |
 +--------------------------v-------------------------------------+
 |  MCP server  (src/agy_mcp/server.py)                           |
-|  - 9 tools: agy, agy_start, agy_continue, agy_status,          |
+|  - 10 tools: agy, agy_start, agy_continue, agy_status,         |
 |    agy_read, agy_cancel, agy_sessions, agy_doctor,             |
-|    agy_install_skill                                           |
+|    agy_install_skill, agy_purge                                |
 |  - Singletons: config, safety, session_store, supervisor       |
 |  - Async tools wrap a per-loop CapacityLimiter (8 by default)  |
 +--------------------------+-------------------------------------+
@@ -189,6 +189,7 @@ on canonical events so future agy event types survive without a schema bump).
 | `agy_sessions` | yes | List recent jobs with mtime / status / cwd summary |
 | `agy_doctor` | yes | Environment + auth probe (no secrets); `force_refresh=True` after CLI upgrade |
 | `agy_install_skill` | yes | Install SKILL bundle into Claude / Codex / Antigravity dirs |
+| `agy_purge` | yes | Prune session-store directories older than `days` (refuses `days<=0`) |
 
 Sync tools are declared `async def` so they yield the FastMCP stdio loop
 while doing blocking I/O, but they internally run the bridge in a worker

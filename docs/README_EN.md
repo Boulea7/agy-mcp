@@ -6,20 +6,34 @@
 [![Tests](https://img.shields.io/badge/tests-525%20passed-brightgreen.svg)](#)
 [![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-README-red.svg)](../README.md)
 
-> **Skill-first, MCP-second** bridge from Claude Code / OpenAI Codex
-> to **Google Antigravity CLI** (`agy`).
-> Ships with capability detection, async long-task supervision,
-> dual-backend routing (`agy` + `gemini-cli` compatibility fallback),
-> safe-by-default execution, Codex / Antigravity skills, cross-platform
-> doctor, and a stable stream-json-compatible event schema.
+> Wraps Google **Antigravity CLI** (`agy`) as 10 typed MCP tools any MCP
+> client (Claude Code / OpenAI Codex / Cursor / Cline / Continue …) can
+> call directly. Ships with optional Skill bundles that teach
+> skill-aware platforms *when* to delegate and *which mode* to use.
 
 ---
 
-## One-shot install (recommended: let your local agent do it)
+## Quickstart
 
-Copy the block below and paste it into your local **Claude Code** or
-**OpenAI Codex CLI**. It will read, execute, and verify the install
-on its own — no manual command typing required.
+```bash
+# 1. Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Install agy-mcp
+uv tool install --from git+https://github.com/Boulea7/agy-mcp.git agy-mcp
+
+# 3. Register the MCP server (Claude Code shown; others below)
+claude mcp add agy -s user --transport stdio -- agymcp
+
+# 4. (Optional) install SKILLs so Claude / Codex / Antigravity learn when to call
+agy-install-skill --target all
+
+# 5. Verify (no real agy API calls)
+agy-doctor
+```
+
+<details>
+<summary><strong>Let your local agent install it</strong> (recommended: paste the prompt below into Claude Code / Codex — it will read, execute, and verify)</summary>
 
 ````text
 Please install the open-source MCP `agy-mcp` for me. Concretely:
@@ -67,103 +81,89 @@ Report a one-liner per step. After everything is done, give me a
 exposed, where the SKILL files live, and what remains optional.
 ````
 
-> Already comfortable with manual installs? The
-> [5-minute quickstart](#5-minute-quickstart) below still works.
+</details>
+
+<details>
+<summary><strong>Other MCP clients</strong></summary>
+
+- **OpenAI Codex CLI** — append to `~/.codex/config.toml`:
+  ```toml
+  [mcp_servers.agy]
+  command = "agymcp"
+  args = []
+  ```
+  Restart the Codex session.
+- **Cursor / Cline / Continue / other MCP clients** — add a server
+  with name=`agy`, command=`agymcp`, transport=stdio in the client's
+  MCP config. Each client's exact syntax differs; see its docs.
+
+</details>
+
+Full install + troubleshooting → [`installation.md`](installation.md).
 
 ---
 
 ## What it is
 
-A wrapper that turns Google's new Antigravity CLI (`agy`) into an
-**agent backend Claude Code or OpenAI Codex can call directly**:
+A wrapper that turns Google's new Antigravity CLI (`agy`) into a
+collaboration backend any MCP client can call. Two equivalent paths:
 
-- **Skill-first**: SKILL bundles in `~/.claude/skills/` /
-  `~/.agents/skills/` teach the agent **when** to delegate to `agy`
-  and **how** to call it.
-- **MCP-second**: the `agymcp` FastMCP server exposes 9 stable JSON
-  tools, so the caller always gets a structured envelope.
-- **Safe by default**: every error, log line, and response field is
-  routed through `SafetyPolicy.redact`; write-enabled runs are
-  isolated in a disposable git worktree; argv injection, path
-  traversal, and parent-symlink swaps have targeted defences.
+- **MCP server**: `agymcp` exposes 10 typed JSON tools over FastMCP
+  stdio with stable pydantic envelopes. **Any MCP client.**
+- **Skill bundles**: install into `~/.claude/skills/`,
+  `~/.agents/skills/`, `~/.agy/skills/`. Teach the agent *when* to
+  delegate, *which mode* to use, and which safety rules to follow.
+  **Only Claude Code / OpenAI Codex / Antigravity.**
+- **Shared backend**: both paths share the same `bridge.py` → adapter
+  → safety policy → worktree pipeline, so behaviour is identical.
 
-Outside `agy-doctor` and `--dry-run` verification paths, normal `agy`
-/ `agy_start` calls spawn `agy --print` and may consume real
-Antigravity requests. The project wraps, routes, isolates, and audits
-the CLI; it does not reimplement the `agy` API.
-
-## 5-minute quickstart
-
-```bash
-# 1. Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install agy-mcp
-uv tool install --from git+https://github.com/Boulea7/agy-mcp.git agy-mcp
-
-# 3. Register the MCP server with Claude Code
-claude mcp add agy -s user --transport stdio -- agymcp
-
-# 4. Install the collaboration SKILL (Claude / Codex / Antigravity)
-agy-install-skill --target all
-
-# 5. Verify (no real agy API calls)
-agy-doctor
-agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
-```
-
-Full installation and Codex setup in
-[`docs/installation.md`](installation.md).
+> Outside `agy_doctor` and `--dry-run` paths, `agy` / `agy_start`
+> spawn real `agy --print` and may consume Antigravity request quota.
+> The project wraps, routes, isolates, and audits the CLI; it does
+> not reimplement the `agy` API.
 
 ## 10 MCP tools
 
 | Tool | Purpose |
 |---|---|
-| `agy` | Synchronous one-shot call (standard PROMPT / cd / sandbox / SESSION_ID arg set + `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`) |
+| `agy` | Synchronous one-shot call (PROMPT / cd / sandbox / SESSION_ID + `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`) |
 | `agy_continue` | Resume a prior `SESSION_ID` |
-| `agy_start` | Background job; returns `job_id` immediately |
-| `agy_status` | running / completed / failed / cancelled |
-| `agy_read` | Read event stream (raw / claude / codex protocols) |
-| `agy_cancel` | Cross-platform process-group cancel (POSIX `killpg` / Windows `CTRL_BREAK_EVENT`) |
-| `agy_sessions` | List recent sessions with mtime / status / cwd summary |
-| `agy_doctor` | Environment + auth + capability probe (no secrets) |
-| `agy_install_skill` | Install SKILL bundle into Claude / Codex / Antigravity skill dirs |
-| `agy_purge` | Prune session-store directories older than `days` (refuses `days<=0`) |
+| `agy_start` | Background long job; returns `job_id` immediately |
+| `agy_status` | Poll job state: running / completed / failed / cancelled |
+| `agy_read` | Read job event stream (raw / claude / codex protocols) |
+| `agy_cancel` | Cross-platform process-group cancel |
+| `agy_sessions` | List recent sessions |
+| `agy_doctor` | Env + auth + capability probe (no secrets) |
+| `agy_install_skill` | Install SKILL bundles into Claude / Codex / Antigravity dirs |
+| `agy_purge` | Prune local session-store directories (refuses `days <= 0`) |
 
-## When to use
+## When to use / When NOT to use
 
-| Task type | Path |
+| Situation | Path |
 |---|---|
-| Q&A you can answer from the open context | Don't delegate, just answer |
+| Q&A answerable from open context | Don't delegate, just answer |
 | Second opinion on a bug hypothesis | `agy(..., mode="review")` |
-| Generate a diff for review | `agy(..., mode="prototype")` (no `allow_write`) |
+| Diff for review | `agy(..., mode="prototype")` (no `allow_write`) |
 | Apply a reviewed diff | `agy(..., mode="execute", allow_write=True)` (auto worktree) |
 | Multi-hour refactor | `agy_start(..., mode="long")` then poll |
-
-## When NOT to use
-
-- Trivial questions you can answer directly: the round-trip isn't
-  worth it.
-- Anything that needs the actual Anthropic / OpenAI conversation
-  state: `agy` is a separate model with its own context.
+| Anything needing the Anthropic / OpenAI conversation state | Don't delegate — `agy` is a separate model with its own context |
 
 ## Safety floor
 
-- Every error / log / response is run through
+- Every error / log / response field passes through
   `SafetyPolicy.redact`: `/Users/<u>/` → `~/`; PEM / JWT / AKID /
   Bearer / Authz are all scrubbed.
 - `mode=execute` mutations require explicit `allow_write=True`;
-  destructive prompts are refused even with the flag set.
+  destructive prompts are refused even with the flag.
 - `execute` mode refuses prompts that read or mention `~/.ssh`,
   `~/.aws/credentials`, browser cookie stores, OS keychain.
-- `mode=execute --allow-write` defaults to `worktree=True`
+- `mode=execute + allow_write` defaults to `worktree=True`
   (overridable via `~/.config/agy-mcp/config.toml` or
   `AGY_MCP_WORKTREE_DEFAULT=0`).
-- We never write under `~/.gemini/` (Antigravity's own state dir);
-  the user-scope antigravity SKILL lands under the wrapper-owned
-  `~/.agy/skills/`.
+- Never writes under `~/.gemini/` (Antigravity's own state dir);
+  the user-scope antigravity SKILL lands under `~/.agy/skills/`.
 
-Full threat model and the explicit "what is NOT defended" list:
+Full threat model and the explicit "what is NOT defended" list →
 [`security.md`](security.md).
 
 ## Project-side snippets
@@ -173,20 +173,19 @@ that repo knows when to call `agy`:
 
 - [`prompts/CLAUDE.md`](../prompts/CLAUDE.md) — Claude Code collaboration protocol
 - [`prompts/AGENTS.md`](../prompts/AGENTS.md) — OpenAI Codex collaboration protocol
-- [`prompts/antigravity-system.md`](../prompts/antigravity-system.md) — system prompt
-  suggestion for the `agy` side
+- [`prompts/antigravity-system.md`](../prompts/antigravity-system.md) — system prompt suggestion for the `agy` side
 
 ## Documentation
 
 | File | Contents |
 |---|---|
-| [`installation.md`](installation.md) | Install + Claude Code / Codex registration + SKILL install + verification |
+| [`installation.md`](installation.md) | Install + Claude Code / Codex registration + SKILL + verification |
 | [`architecture.md`](architecture.md) | Module map (caller / MCP server / bridge / supervisor / adapter / safety) |
 | [`output-strategy.md`](output-strategy.md) | Hybrid backend: stdout + klog + transcript.jsonl + protocol translator |
 | [`security.md`](security.md) | Threat model, defence catalogue, explicit non-defences |
-| [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix (refresh when CLI is upgraded) |
-| [`examples.md`](examples.md) | 6 scenarios: review, prototype, long, continue, doctor, install |
-| [`../CHANGELOG.md`](../CHANGELOG.md) | Version history (Keep a Changelog format) |
+| [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix |
+| [`examples.md`](examples.md) | 6 end-to-end scenarios |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | Version history (Keep a Changelog) |
 
 ## Development
 

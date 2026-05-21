@@ -20,7 +20,7 @@ CLI) via `agy-mcp`. Use it when you need:
 
 Available MCP tools (registered as `agy`, `agy_start`, `agy_continue`,
 `agy_status`, `agy_read`, `agy_cancel`, `agy_sessions`, `agy_doctor`,
-`agy_install_skill`):
+`agy_install_skill`, `agy_purge`):
 
 - `agy(PROMPT, cd, mode, …)` — synchronous one-shot call.
 - `agy_continue(SESSION_ID, PROMPT, cd, …)` — resume a prior session.
@@ -31,6 +31,8 @@ Available MCP tools (registered as `agy`, `agy_start`, `agy_continue`,
 - `agy_doctor()` — environment + auth probe (no secrets).
 - `agy_install_skill(targets, scope, project_root)` — install the
   collaboration skill into Claude / Codex / Antigravity skill dirs.
+- `agy_purge(days)` — drop session-store directories older than `days`
+  (refuses `days<=0`).
 
 ### When to use
 
