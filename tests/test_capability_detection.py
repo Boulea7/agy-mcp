@@ -15,6 +15,7 @@ from agy_mcp.adapters.agy import (
     AgyPrintBackend,
     _parse_version,
     _parse_version_from_help,
+    detect_agy_auth_source,
 )
 from agy_mcp.adapters.base import detect_flags, has_flag
 from agy_mcp.adapters.gemini import GeminiCliBackend
@@ -82,6 +83,7 @@ def test_agy_probe_against_fake_help(tmp_path, monkeypatch):
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_SETTINGS_PATH", tmp_path / "no-settings.json")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_GEMINI_SETTINGS_PATH", tmp_path / "no-gemini.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
 
     cap = backend.detect()
     assert cap.bin_path == str(wrapper)
@@ -98,7 +100,7 @@ def test_agy_probe_against_fake_help(tmp_path, monkeypatch):
     assert cap.supports_tool_events is False
     # No oauth creds file → must surface auth warning.
     assert cap.authenticated is False
-    assert any("OAuth credentials missing" in w for w in cap.warnings)
+    assert any("auth state not detected" in w for w in cap.warnings)
 
 
 def test_agy_probe_auth_requires_regular_file(tmp_path, monkeypatch):
@@ -115,19 +117,72 @@ def test_agy_probe_auth_requires_regular_file(tmp_path, monkeypatch):
 
     backend = AgyPrintBackend(bin_override=str(wrapper))
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", link)
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
     cap = backend.detect()
     assert cap.authenticated is False
 
     real = tmp_path / "oauth-real.json"
     real.write_text("{}", encoding="utf-8")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", real)
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
     cap = backend.detect(refresh=True)
     assert cap.authenticated is True
+
+
+def test_agy_probe_accepts_recent_keyring_auth_log(tmp_path, monkeypatch):
+    wrapper = tmp_path / "fake_agy"
+    wrapper.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_AGY_PRINT}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_file = log_dir / "cli-20260526_165607.log"
+    log_file.write_text(
+        "I0526 16:56:08.832422 47678 auth.go:114] ChainedAuth: authenticated via keyring "
+        "(effective: keyring)\n"
+        "I0526 16:56:08.832561 47678 server_oauth.go:212] applyAuthResult: "
+        "email=user@example.com, authMethod=consumer, quotaProject=\n"
+        "I0526 16:56:08.832590 47678 server_oauth.go:217] OAuth: authenticated "
+        "successfully as user@example.com\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
+    backend = AgyPrintBackend(bin_override=str(wrapper))
+
+    cap = backend.detect()
+    assert cap.authenticated is True
+    assert detect_agy_auth_source() == str(log_dir)
+
+
+def test_agy_probe_surfaces_account_eligibility_warning(tmp_path, monkeypatch):
+    wrapper = tmp_path / "fake_agy"
+    wrapper.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_AGY_PRINT}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "cli-20260526_165607.log").write_text(
+        "W0526 16:56:14.463557 47678 server_oauth.go:99] Account ineligible: "
+        "Your current account is not eligible for Antigravity.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
+
+    cap = AgyPrintBackend(bin_override=str(wrapper)).detect()
+    assert any("account eligibility warning" in warning for warning in cap.warnings)
 
 
 def test_agy_probe_missing_binary_returns_warning(tmp_path, monkeypatch):
     backend = AgyPrintBackend(bin_override=str(tmp_path / "definitely-not-there"))
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
     cap = backend.detect()
     # Empty path + a "not found" warning so the caller can surface a clear
     # remediation hint without the user having to read the failure trace.
@@ -145,6 +200,7 @@ def test_agy_probe_reads_model_from_antigravity_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_SETTINGS_PATH", settings)
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_GEMINI_SETTINGS_PATH", tmp_path / "no-gemini.json")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
     backend = AgyPrintBackend(bin_override=None)
     cap = backend.detect()
     assert cap.model == "gemini-3-pro-preview-12-2025"
@@ -156,6 +212,7 @@ def test_agy_probe_reads_nested_model_object(tmp_path, monkeypatch):
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_SETTINGS_PATH", settings)
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_GEMINI_SETTINGS_PATH", tmp_path / "no-gemini.json")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
     backend = AgyPrintBackend(bin_override=None)
     cap = backend.detect()
     assert cap.model == "from-nested"
@@ -167,6 +224,7 @@ def test_agy_probe_ignores_malformed_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_SETTINGS_PATH", settings)
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_GEMINI_SETTINGS_PATH", tmp_path / "no-gemini.json")
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
     backend = AgyPrintBackend(bin_override=None)
     cap = backend.detect()
     assert cap.model is None

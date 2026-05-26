@@ -20,7 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agy_mcp.adapters.agy import AGY_OAUTH_CREDS_PATH, AgyPrintBackend
+from agy_mcp.adapters.agy import (
+    AGY_OAUTH_CREDS_PATH,
+    AgyPrintBackend,
+    detect_agy_auth_source,
+)
 from agy_mcp.adapters.gemini import GeminiCliBackend
 from agy_mcp.config import Config, get_config
 from agy_mcp.safety import SafetyPolicy
@@ -184,6 +188,18 @@ def _check_backend(adapter, safety: SafetyPolicy, *, label: str) -> list[DoctorC
 
 
 def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
+    auth_source = detect_agy_auth_source()
+    if auth_source is not None:
+        detail = (
+            f"Antigravity auth state detected via {auth_source}"
+            if auth_source != str(AGY_OAUTH_CREDS_PATH)
+            else f"Google OAuth credentials present at {AGY_OAUTH_CREDS_PATH}"
+        )
+        return DoctorCheck(
+            name="auth",
+            ok=True,
+            detail=safety.redact(detail),
+        )
     # Use ``os.lstat`` so a symlink-pointing credentials file is detected
     # rather than silently followed: an attacker who can swap the file
     # for a symlink to e.g. ``/dev/zero`` would otherwise be reported as

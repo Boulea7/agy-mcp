@@ -60,6 +60,9 @@ AGY_OAUTH_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
 AGY_LOG_DIR = Path.home() / ".gemini" / "antigravity-cli" / "log"
 AGY_HELP_TIMEOUT_S = 10
 AGY_VERSION_TIMEOUT_S = 10
+AGY_AUTH_LOG_LOOKBACK_S = 30 * 24 * 60 * 60
+AGY_AUTH_LOG_MAX_FILES = 5
+AGY_AUTH_LOG_TAIL_BYTES = 256 * 1024
 # Polling cadence for klog / transcript tails. Tuned for CLI responsiveness
 # (klog flushes per line, so 50ms keeps us within a single human RTT) while
 # keeping idle CPU near zero.
@@ -101,6 +104,9 @@ _RE_AUTO_FLUSH = re.compile(
 _RE_SEND_FAILED = re.compile(r"Print mode: SendUserMessage failed: (.+)")
 _RE_AUTH_TIMEOUT = re.compile(r"Print mode: auth timed out")
 _RE_AUTH_ERROR = re.compile(r"Print mode: auth error: (.+)")
+_RE_AUTH_SUCCESS = re.compile(r"authenticated successfully as\s+\S+", re.IGNORECASE)
+_RE_AUTH_KEYRING = re.compile(r"authenticated via keyring", re.IGNORECASE)
+_RE_ACCOUNT_INELIGIBLE = re.compile(r"Account ineligible:\s+(.+)", re.IGNORECASE)
 _RE_REWIND = re.compile(rf"Rewinding conversation {_UUID_CANON} to step (\d+)")
 _RE_STREAM_START = re.compile(rf"Starting conversation update stream for ({_UUID_CANON})\b")
 _RE_TURN_END = re.compile(r"Stopping conversation stream|Language server shutting down")
@@ -141,11 +147,12 @@ class AgyPrintBackend(BaseAdapter):
 
     def _probe(self) -> Capability:
         bin_path = self.locate_binary(AGY_BINARY_NAME)
+        auth_source = detect_agy_auth_source()
         cap = Capability(
             bin_path=bin_path or "",
             backend="agy",
             version=None,
-            authenticated=_is_regular_file(AGY_OAUTH_CREDS_PATH),
+            authenticated=auth_source is not None,
             model=self._discover_model(),
             warnings=[],
         )
@@ -178,14 +185,17 @@ class AgyPrintBackend(BaseAdapter):
 
         if not cap.authenticated:
             cap.warnings.append(
-                f"OAuth credentials missing at {AGY_OAUTH_CREDS_PATH}; "
-                "`agy --print` will hang silently. Run `agy` once and log in."
+                f"Antigravity auth state not detected via {AGY_OAUTH_CREDS_PATH} "
+                "or recent agy keyring-auth logs; `agy --print` will hang silently. "
+                "Run `agy` once and log in."
             )
         if not cap.supports_print:
             cap.warnings.append(
                 "`agy --print` not detected in --help; this build of agy may not "
                 "support non-interactive mode."
             )
+        if account_issue := detect_agy_account_issue():
+            cap.warnings.append(account_issue)
         return cap
 
     @staticmethod
@@ -1018,6 +1028,77 @@ def _scrub_probe_env() -> dict[str, str]:
     return scrub_env(dict(os.environ))
 
 
+def detect_agy_auth_source() -> str | None:
+    """Return a stable local signal that agy is authenticated, if any.
+
+    Older agy builds persist OAuth material in ``~/.gemini/oauth_creds.json``.
+    Newer builds can authenticate via the OS keyring and only leave evidence
+    in the Antigravity CLI logs. Treat either as sufficient for backend
+    capability detection so the wrapper does not fail closed on newer CLIs.
+    """
+
+    if _is_regular_file(AGY_OAUTH_CREDS_PATH):
+        return str(AGY_OAUTH_CREDS_PATH)
+    if _recent_agy_auth_success():
+        return str(AGY_LOG_DIR)
+    return None
+
+
+def detect_agy_account_issue() -> str | None:
+    """Return the most recent account-eligibility warning, if present."""
+
+    for tail in _iter_recent_agy_log_tails():
+        if match := _RE_ACCOUNT_INELIGIBLE.search(tail):
+            return f"agy reported account eligibility warning: {match.group(1)}"
+    return None
+
+
+def _recent_agy_auth_success() -> bool:
+    for tail in _iter_recent_agy_log_tails():
+        if _RE_AUTH_SUCCESS.search(tail) or _RE_AUTH_KEYRING.search(tail):
+            return True
+    return False
+
+
+def _iter_recent_agy_log_tails() -> list[str]:
+    try:
+        if not AGY_LOG_DIR.exists():
+            return []
+        now = time.time()
+        recent_logs: list[tuple[float, Path]] = []
+        for candidate in AGY_LOG_DIR.glob("cli-*.log"):
+            if not _is_regular_file(candidate):
+                continue
+            try:
+                st = candidate.stat()
+            except OSError:
+                continue
+            if now - st.st_mtime > AGY_AUTH_LOG_LOOKBACK_S:
+                continue
+            recent_logs.append((st.st_mtime, candidate))
+    except OSError:
+        return []
+
+    recent_logs.sort(reverse=True)
+    tails: list[str] = []
+    for _mtime, candidate in recent_logs[:AGY_AUTH_LOG_MAX_FILES]:
+        tail = _read_log_tail(candidate, AGY_AUTH_LOG_TAIL_BYTES)
+        if tail:
+            tails.append(tail)
+    return tails
+
+
+def _read_log_tail(path: Path, max_bytes: int) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes), os.SEEK_SET)
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _is_regular_file(path: Path) -> bool:
     try:
         st = os.lstat(path)
@@ -1028,7 +1109,10 @@ def _is_regular_file(path: Path) -> bool:
 
 __all__ = [
     "AGY_BINARY_NAME",
+    "AGY_LOG_DIR",
     "AGY_OAUTH_CREDS_PATH",
     "AGY_SETTINGS_PATH",
     "AgyPrintBackend",
+    "detect_agy_account_issue",
+    "detect_agy_auth_source",
 ]
