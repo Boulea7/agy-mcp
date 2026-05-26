@@ -8,10 +8,13 @@ internal probe helper so we exercise the pattern surface deterministically.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 from agy_mcp.adapters.agy import (
+    AGY_AUTH_LOG_LOOKBACK_S,
     AgyPrintBackend,
     _parse_version,
     _parse_version_from_help,
@@ -155,7 +158,92 @@ def test_agy_probe_accepts_recent_keyring_auth_log(tmp_path, monkeypatch):
 
     cap = backend.detect()
     assert cap.authenticated is True
-    assert detect_agy_auth_source() == str(log_dir)
+    auth_source = detect_agy_auth_source()
+    assert auth_source is not None
+    assert auth_source.kind == "keyring_log"
+    assert auth_source.path == log_dir
+
+
+def test_agy_probe_rejects_keyring_log_after_newer_auth_failure(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "cli-20260526_165607.log").write_text(
+        "I0526 16:56:08.832422 47678 auth.go:114] ChainedAuth: authenticated via keyring "
+        "(effective: keyring)\n"
+        "E0526 16:56:09.000000 47678 print.go:88] Print mode: auth error: token expired\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
+
+    assert detect_agy_auth_source() is None
+
+
+def test_agy_probe_ignores_stale_keyring_log(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_file = log_dir / "cli-20260526_165607.log"
+    log_file.write_text(
+        "I0526 16:56:08.832422 47678 auth.go:114] ChainedAuth: authenticated via keyring "
+        "(effective: keyring)\n",
+        encoding="utf-8",
+    )
+    stale = time.time() - AGY_AUTH_LOG_LOOKBACK_S - 60
+    os.utime(log_file, (stale, stale))
+
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
+
+    assert detect_agy_auth_source() is None
+
+
+def test_agy_probe_ignores_non_cli_auth_log(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "server-20260526.log").write_text(
+        "OAuth: authenticated successfully as user@example.com\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
+
+    assert detect_agy_auth_source() is None
+
+
+def test_agy_probe_ignores_account_warning_without_auth_success(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "cli-20260526_165607.log").write_text(
+        "W0526 16:56:14.463557 47678 server_oauth.go:99] Account ineligible: "
+        "Your current account is not eligible for Antigravity.\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
+
+    assert detect_agy_auth_source() is None
+
+
+def test_agy_probe_rejects_keyring_log_when_oauth_path_is_unsafe(tmp_path, monkeypatch):
+    target = tmp_path / "real-creds.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "oauth-link.json"
+    link.symlink_to(target)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "cli-20260526_165607.log").write_text(
+        "I0526 16:56:08.832422 47678 auth.go:114] ChainedAuth: authenticated via keyring "
+        "(effective: keyring)\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", link)
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
+
+    assert detect_agy_auth_source() is None
 
 
 def test_agy_probe_surfaces_account_eligibility_warning(tmp_path, monkeypatch):

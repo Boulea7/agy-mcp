@@ -138,6 +138,18 @@ def test_bridge_request_rejects_runtime_control_extra_env():
         assert "controls wrapper runtime" in str(excinfo.value)
 
 
+def test_bridge_request_allows_proxy_extra_env():
+    req = BridgeRequest(
+        prompt="x",
+        extra_env={
+            "HTTPS_PROXY": "http://127.0.0.1:7890",
+            "ALL_PROXY": "socks5://127.0.0.1:7891",
+            "NO_PROXY": "localhost,127.0.0.1",
+        },
+    )
+    assert req.extra_env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+
+
 # ---------------------------------------------------------------------------
 # BridgeResponse
 # ---------------------------------------------------------------------------

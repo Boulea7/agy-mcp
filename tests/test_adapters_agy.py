@@ -601,6 +601,21 @@ def test_subprocess_env_scrubs_host_secrets(tmp_path, monkeypatch, isolated_agy)
     assert env["HARMLESS_VAR"] == "keep-me"
 
 
+def test_subprocess_env_preserves_proxy_and_locale(tmp_path, monkeypatch, isolated_agy):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:7891")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    backend = AgyPrintBackend(bin_override=None)
+
+    env = backend._build_subprocess_env(BridgeRequest(prompt="x", cwd=str(tmp_path)))
+
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert env["ALL_PROXY"] == "socks5://127.0.0.1:7891"
+    assert env["NO_PROXY"] == "localhost,127.0.0.1"
+    assert env["LANG"] == "en_US.UTF-8"
+
+
 def test_subprocess_env_scrubs_extra_env_too(tmp_path, monkeypatch, isolated_agy):
     """Caller cannot smuggle a secret into the child via extra_env naming."""
 
@@ -612,6 +627,19 @@ def test_subprocess_env_scrubs_extra_env_too(tmp_path, monkeypatch, isolated_agy
     )
     env = backend._build_subprocess_env(req)
     assert env["OPENAI_API_KEY"] == "***"
+
+
+def test_subprocess_env_accepts_proxy_from_extra_env(tmp_path, isolated_agy):
+    backend = AgyPrintBackend(bin_override=None)
+    req = BridgeRequest(
+        prompt="x",
+        cwd=str(tmp_path),
+        extra_env={"HTTPS_PROXY": "http://127.0.0.1:7890"},
+    )
+
+    env = backend._build_subprocess_env(req)
+
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
 
 
 def test_subprocess_env_keeps_wrapper_controls_immutable(

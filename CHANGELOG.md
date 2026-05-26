@@ -6,6 +6,45 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `agy_doctor` now reports a redacted `network_env` check so users can
+  compare MCP/bridge proxy and locale inheritance with an interactive shell.
+- Added full Traditional Chinese and Japanese READMEs alongside the existing
+  Simplified Chinese and English versions; all four language entries carry the
+  same install, tool, safety, docs, and development content.
+- Added regression tests for keyring-auth log inference, proxy `extra_env`,
+  event-log read hardening, Claude `upstream_error` translation, supervisor
+  upstream-error finalization, and warning redaction.
+
+### Fixed
+
+- Newer Antigravity CLI keyring authentication is now accepted only when the
+  legacy OAuth path is missing. A symlink or non-regular OAuth path remains an
+  unsafe auth state and cannot be masked by a successful keyring log line.
+- Recent auth logs are scanned newest-line first, so a later auth error or
+  timeout wins over an older keyring success marker.
+- Background `agy_start` jobs now persist `status="upstream_error"` when the
+  adapter detects a swallowed upstream API error despite `exit_code == 0`.
+- `SessionStore.read_events` no longer follows a planted `events.jsonl`
+  symlink and redacts malformed event-log lines before returning synthetic
+  decode errors.
+- Synchronous bridge warnings from routing and capability probes now pass
+  through `SafetyPolicy.redact` before reaching the public response.
+
+### CI
+
+- Simplified GitHub Actions to a single `required-ci` check that runs ruff,
+  pytest, package build, and release-artifact audit on Python 3.12.
+
+### Documentation
+
+- Updated auth and CLI capability docs for the current official Antigravity
+  CLI keyring-auth model and latest public changelog entry `1.0.2`.
+- Added troubleshooting guidance for `FAILED_PRECONDITION` /
+  `User location is not supported` when MCP-launched `agy` lacks the proxy or
+  VPN environment inherited by direct terminal runs.
+
 ## [0.1.7] — 2026-05-21
 
 ### Fixed

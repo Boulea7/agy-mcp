@@ -150,7 +150,9 @@ report = out["report"]
 #       # an explicit `backend="gemini"` call needs the binary, and
 #       # then the doctor warning becomes the prerequisite check.
 #   {"name": "auth",          "ok": True,
-#    "detail": "Google OAuth credentials present at ~/.gemini/oauth_creds.json"}
+#    "detail": "Antigravity auth state detected via ~/.gemini/antigravity-cli/log"}
+#   {"name": "network_env",   "ok": True,
+#    "detail": "HTTPS_PROXY=set(http://proxy.example:7890, auth=no); ..."}
 #   {"name": "session_store", "ok": True,
 #    "detail": "session store at ~/.agy-mcp/sessions"}
 #
@@ -163,8 +165,11 @@ report = out["report"]
 out = agy_doctor(force_refresh=True)  # re-probes capabilities, no stale cache
 ```
 
-The doctor never leaks secrets — `auth` reports presence, never the
-file contents.
+The doctor never leaks secrets — `auth` reports presence, never token
+contents, and `network_env` reports only proxy presence plus a redacted
+host/port summary. If terminal `agy` works but MCP calls hit
+`User location is not supported`, compare this row against the shell
+where direct `agy` works.
 
 ---
 

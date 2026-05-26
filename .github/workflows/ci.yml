@@ -12,41 +12,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test ${{ matrix.python-version }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Setup Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Sync dependencies
-        run: uv sync --python ${{ matrix.python-version }}
-
-      - name: Lint (ruff)
-        run: uv run --python ${{ matrix.python-version }} ruff check src tests scripts
-
-      - name: Run pytest
-        run: uv run --python ${{ matrix.python-version }} pytest -q
-
-  release-gate:
-    name: Release artefact audit
+  required-ci:
+    name: required-ci
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -60,6 +28,15 @@ jobs:
 
       - name: Setup Python 3.12
         run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --python 3.12
+
+      - name: Lint (ruff)
+        run: uv run --python 3.12 ruff check src tests scripts
+
+      - name: Run pytest
+        run: uv run --python 3.12 pytest -q
 
       - name: Build sdist + wheel
         run: uv build

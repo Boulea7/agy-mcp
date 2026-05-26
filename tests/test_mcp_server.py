@@ -431,6 +431,24 @@ def test_agy_doctor_returns_structured_report(reset_state):
         assert "/Users/" not in c["detail"]
 
 
+def test_doctor_network_env_summarises_proxy_without_credentials(
+    reset_state, monkeypatch, tmp_path,
+):
+    from agy_mcp import doctor as doc_mod
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:pass@proxy.example:7890")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    check = doc_mod._check_network_env(SafetyPolicy())
+
+    assert check.name == "network_env"
+    assert check.ok is True
+    assert "HTTPS_PROXY=set(http://proxy.example:7890, auth=yes)" in check.detail
+    assert "NO_PROXY=set(len=" in check.detail
+    assert "user" not in check.detail
+    assert "pass" not in check.detail
+
+
 def test_agy_install_skill_writes_scaffold(reset_state, tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
@@ -1098,8 +1116,15 @@ def test_doctor_check_auth_handles_symlink_credentials(reset_state, tmp_path, mo
     target.write_text("{}", encoding="utf-8")
     link = tmp_path / "oauth_creds.json"
     link.symlink_to(target)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "cli-20260526_165607.log").write_text(
+        "I0526 16:56:08.832422 47678 auth.go:114] ChainedAuth: authenticated via keyring "
+        "(effective: keyring)\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(doc_mod, "AGY_OAUTH_CREDS_PATH", link)
-    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", tmp_path / "no-log-dir")
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
     safety = SafetyPolicy()
     check = doc_mod._check_auth(safety)
     assert check.ok is False
@@ -1143,7 +1168,9 @@ def test_doctor_check_auth_accepts_keyring_log_signal(reset_state, tmp_path, mon
         "successfully as user@example.com\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", tmp_path / "missing-creds.json")
+    missing_creds = tmp_path / "missing-creds.json"
+    monkeypatch.setattr(doc_mod, "AGY_OAUTH_CREDS_PATH", missing_creds)
+    monkeypatch.setattr("agy_mcp.adapters.agy.AGY_OAUTH_CREDS_PATH", missing_creds)
     monkeypatch.setattr("agy_mcp.adapters.agy.AGY_LOG_DIR", log_dir)
     safety = SafetyPolicy()
     check = doc_mod._check_auth(safety)

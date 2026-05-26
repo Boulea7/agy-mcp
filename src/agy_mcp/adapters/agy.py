@@ -24,6 +24,7 @@ import stat
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agy_mcp.adapters.base import (
@@ -131,6 +132,14 @@ _UPSTREAM_ERROR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (_RE_UNAUTHENTICATED, "unauthenticated"),
     (_RE_RESOURCE_EXHAUSTED, "resource_exhausted"),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AgyAuthSource:
+    """Local evidence that the agy CLI is authenticated."""
+
+    kind: str
+    path: Path
 
 
 # ---------------------------------------------------------------------------
@@ -1028,7 +1037,11 @@ def _scrub_probe_env() -> dict[str, str]:
     return scrub_env(dict(os.environ))
 
 
-def detect_agy_auth_source() -> str | None:
+def detect_agy_auth_source(
+    *,
+    oauth_path: Path | None = None,
+    log_dir: Path | None = None,
+) -> AgyAuthSource | None:
     """Return a stable local signal that agy is authenticated, if any.
 
     Older agy builds persist OAuth material in ``~/.gemini/oauth_creds.json``.
@@ -1037,10 +1050,15 @@ def detect_agy_auth_source() -> str | None:
     capability detection so the wrapper does not fail closed on newer CLIs.
     """
 
-    if _is_regular_file(AGY_OAUTH_CREDS_PATH):
-        return str(AGY_OAUTH_CREDS_PATH)
-    if _recent_agy_auth_success():
-        return str(AGY_LOG_DIR)
+    oauth_path = oauth_path or AGY_OAUTH_CREDS_PATH
+    log_dir = log_dir or AGY_LOG_DIR
+
+    if _is_regular_file(oauth_path):
+        return AgyAuthSource(kind="oauth_creds", path=oauth_path)
+    if not _path_is_missing(oauth_path):
+        return None
+    if _recent_agy_auth_success(log_dir=log_dir):
+        return AgyAuthSource(kind="keyring_log", path=log_dir)
     return None
 
 
@@ -1048,25 +1066,30 @@ def detect_agy_account_issue() -> str | None:
     """Return the most recent account-eligibility warning, if present."""
 
     for tail in _iter_recent_agy_log_tails():
-        if match := _RE_ACCOUNT_INELIGIBLE.search(tail):
-            return f"agy reported account eligibility warning: {match.group(1)}"
+        for line in reversed(tail.splitlines()):
+            if match := _RE_ACCOUNT_INELIGIBLE.search(line):
+                return f"agy reported account eligibility warning: {match.group(1)}"
     return None
 
 
-def _recent_agy_auth_success() -> bool:
-    for tail in _iter_recent_agy_log_tails():
-        if _RE_AUTH_SUCCESS.search(tail) or _RE_AUTH_KEYRING.search(tail):
-            return True
+def _recent_agy_auth_success(*, log_dir: Path | None = None) -> bool:
+    for tail in _iter_recent_agy_log_tails(log_dir=log_dir):
+        for line in reversed(tail.splitlines()):
+            if _RE_AUTH_TIMEOUT.search(line) or _RE_AUTH_ERROR.search(line):
+                return False
+            if _RE_AUTH_SUCCESS.search(line) or _RE_AUTH_KEYRING.search(line):
+                return True
     return False
 
 
-def _iter_recent_agy_log_tails() -> list[str]:
+def _iter_recent_agy_log_tails(*, log_dir: Path | None = None) -> list[str]:
+    log_dir = log_dir or AGY_LOG_DIR
     try:
-        if not AGY_LOG_DIR.exists():
+        if not log_dir.exists():
             return []
         now = time.time()
         recent_logs: list[tuple[float, Path]] = []
-        for candidate in AGY_LOG_DIR.glob("cli-*.log"):
+        for candidate in log_dir.glob("cli-*.log"):
             if not _is_regular_file(candidate):
                 continue
             try:
@@ -1107,11 +1130,22 @@ def _is_regular_file(path: Path) -> bool:
     return stat.S_ISREG(st.st_mode)
 
 
+def _path_is_missing(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 __all__ = [
     "AGY_BINARY_NAME",
     "AGY_LOG_DIR",
     "AGY_OAUTH_CREDS_PATH",
     "AGY_SETTINGS_PATH",
+    "AgyAuthSource",
     "AgyPrintBackend",
     "detect_agy_account_issue",
     "detect_agy_auth_source",
