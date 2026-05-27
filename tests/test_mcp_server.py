@@ -417,6 +417,28 @@ def test_agy_result_treats_upstream_error_as_finished(reset_state):
     assert out["result_text"] == "user location is not supported"
 
 
+def test_agy_result_prefers_upstream_error_result_over_completed_assistant(reset_state):
+    record = reset_state.store.create_job(job_id="job_completed_upstream_error")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="assistant", text="partial assistant output"),
+    )
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(
+            type="result",
+            subtype="upstream_error",
+            text="user location is not supported",
+        ),
+    )
+    reset_state.store.finalize_job(record.job_id, status="completed", exit_code=0)
+
+    out = server.agy_result_tool(record.job_id)
+    assert out["success"] is True
+    assert out["record"]["status"] == "completed"
+    assert out["result_text"] == "user location is not supported"
+
+
 def test_agy_result_without_finished_jobs_returns_structured_failure(reset_state):
     out = server.agy_result_tool()
     assert out["success"] is False

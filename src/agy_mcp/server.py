@@ -351,6 +351,15 @@ def _result_text_from_events(
 ) -> str:
     """Return the best human-readable result text from stored events."""
 
+    for event in reversed(events):
+        text = getattr(event, "text", None)
+        if (
+            getattr(event, "type", None) == "result"
+            and getattr(event, "subtype", None) not in {None, "success"}
+            and text
+        ):
+            return safety.redact(text)
+
     if status != "completed":
         for event_type in ("result", "error"):
             for event in reversed(events):
