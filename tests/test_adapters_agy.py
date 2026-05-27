@@ -8,6 +8,7 @@ the slice of surface AgyPrintBackend cares about. We bind them via
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -448,6 +449,23 @@ def test_klog_parser_permission_denied_marks_upstream_error():
     [evt] = ctx.events
     assert evt.subtype == "upstream_permission_denied"
     assert ctx.had_upstream_error is True
+
+
+def test_klog_parser_captureless_upstream_pattern_uses_full_match(monkeypatch):
+    """Future upstream patterns without capture groups should not crash."""
+
+    monkeypatch.setattr(
+        "agy_mcp.adapters.agy._UPSTREAM_ERROR_PATTERNS",
+        ((re.compile(r"API_UNAVAILABLE"), "api_unavailable"),),
+    )
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    line = "E0527 12:00:00.000  1 log.go:1] API_UNAVAILABLE\n"
+    _handle_klog_line(line, ctx, adapter)
+    [evt] = ctx.events
+    assert evt.subtype == "upstream_api_unavailable"
+    assert evt.text == "API_UNAVAILABLE"
+    assert ctx.first_upstream_error == "API_UNAVAILABLE"
 
 
 def test_klog_parser_full_sample_log():

@@ -860,7 +860,8 @@ def _handle_klog_line(line: str, ctx: _RunContext, adapter: AgyPrintBackend) -> 
     # single line yields one event, not N.
     for pattern, subtype in _UPSTREAM_ERROR_PATTERNS:
         if m := pattern.search(msg):
-            err_msg = adapter.safety.redact(m.group(1))[:1000]
+            raw_error = next((group for group in m.groups() if group), m.group(0))
+            err_msg = adapter.safety.redact(raw_error)[:1000]
             with ctx.lock:
                 if not ctx.had_upstream_error:
                     ctx.had_upstream_error = True

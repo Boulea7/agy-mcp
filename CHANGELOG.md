@@ -6,10 +6,15 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-05-27
+
 ### Added
 
 - `agy_doctor` now reports a redacted `network_env` check so users can
   compare MCP/bridge proxy and locale inheritance with an interactive shell.
+- Added `agy_result`, the eleventh MCP tool, to fetch the human-readable
+  result for a finished background job. Omitting `job_id` selects the latest
+  finished job, while `include_events` and `since` keep event replay explicit.
 - Added full Traditional Chinese and Japanese READMEs alongside the existing
   Simplified Chinese and English versions; all four language entries carry the
   same install, tool, safety, docs, and development content.
@@ -37,6 +42,8 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
   bypass rules are set.
 - Synchronous bridge warnings from routing and capability probes now pass
   through `SafetyPolicy.redact` before reaching the public response.
+- Upstream-error klog parsing now tolerates future matcher patterns without
+  capture groups, using the full matched text instead of raising at runtime.
 
 ### CI
 
@@ -480,7 +487,10 @@ First public-ready cut.
   dry-run on three modes, real `agy --print` call with session
   resume.
 
-[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/Boulea7/agy-mcp/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/Boulea7/agy-mcp/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/Boulea7/agy-mcp/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Boulea7/agy-mcp/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Boulea7/agy-mcp/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Boulea7/agy-mcp/compare/v0.1.2...v0.1.3
