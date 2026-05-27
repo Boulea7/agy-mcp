@@ -36,7 +36,9 @@ Phase 4 review invariants from R3 hand-off:
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -166,6 +168,8 @@ class Supervisor:
         self._adapter_factory = adapter_factory or self._default_adapter_factory
         self._jobs: dict[str, _JobHandle] = {}
         self._lock = threading.RLock()
+        self._instance_id = secrets.token_hex(8)
+        self._process_start_signature = _process_start_signature(os.getpid())
         # Cap concurrent worker threads so a flood of ``agy_start`` calls
         # can't spin up an unbounded number of subprocesses + reader
         # threads. (Phase 5 R2 security P1-3.)
@@ -339,12 +343,22 @@ class Supervisor:
                 ).touch()
 
         try:
+            owner = {
+                "pid": os.getpid(),
+                "instance_id": self._instance_id,
+            }
+            if self._process_start_signature is not None:
+                owner["process_start_signature"] = self._process_start_signature
             record = self.store.create_job(
                 job_id=resolved_job_id,
                 session_id=effective_request.session_id,
                 cwd=self._response_cwd(effective_request.cwd),
                 request=_serialise_request(effective_request, self.safety),
                 backend=backend_name,
+                # Jobs execute in worker threads owned by this supervisor
+                # process, so pid intentionally identifies the owner process.
+                pid=os.getpid(),
+                extra={"supervisor": owner},
             )
         except (FileExistsError, TypeError, ValueError) as exc:
             self._job_slots.release()  # release the slot we just took
@@ -466,6 +480,8 @@ class Supervisor:
             if fresh is None:
                 return self._public_record(record)
             if fresh.status != "running":
+                return self._public_record(fresh)
+            if _owned_by_foreign_live_supervisor(fresh, self._instance_id):
                 return self._public_record(fresh)
             finalised = self.store.finalize_job(
                 job_id,
@@ -709,6 +725,128 @@ def _utc_now() -> str:
     from agy_mcp.utils import utc_now_iso
 
     return utc_now_iso()
+
+
+def _owned_by_foreign_live_supervisor(
+    record: JobRecord,
+    current_instance_id: str,
+) -> bool:
+    """Return True when another live supervisor owns the running record."""
+
+    owner = record.extra.get("supervisor")
+    if not isinstance(owner, dict):
+        return False
+    if owner.get("instance_id") == current_instance_id:
+        return False
+    pid = owner.get("pid")
+    if not isinstance(pid, int):
+        return False
+    signature = owner.get("process_start_signature")
+    if isinstance(signature, str) and signature:
+        return _pid_matches_start_signature(pid, signature)
+    return _pid_exists(pid)
+
+
+def _pid_matches_start_signature(pid: int, expected: str) -> bool:
+    """Return whether ``pid`` still has the recorded process identity."""
+
+    current = _process_start_signature(pid)
+    if current is None:
+        return _pid_exists(pid)
+    return current == expected
+
+
+def _process_start_signature(pid: int) -> str | None:
+    """Return a best-effort non-reusable process start signature."""
+
+    if pid <= 0:
+        return None
+    linux_signature = _linux_process_start_signature(pid)
+    if linux_signature is not None:
+        return linux_signature
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    started_at = result.stdout.strip()
+    return f"ps-lstart:{started_at}" if started_at else None
+
+
+def _linux_process_start_signature(
+    pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+) -> str | None:
+    """Return Linux boot-id + process start ticks when procfs is available."""
+
+    try:
+        stat_text = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        boot_id = (
+            proc_root / "sys" / "kernel" / "random" / "boot_id"
+        ).read_text(encoding="utf-8").strip()
+        fields_after_comm = stat_text.rsplit(")", 1)[1].strip().split()
+        start_ticks = fields_after_comm[19]
+    except (IndexError, OSError):
+        return None
+    if not boot_id or not start_ticks:
+        return None
+    return f"proc-stat:{boot_id}:{start_ticks}"
+
+
+def _pid_exists(pid: int) -> bool:
+    """Return whether ``pid`` appears alive on this host."""
+
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_pid_exists(pid)
+    return _posix_pid_exists(pid)
+
+
+def _posix_pid_exists(pid: int) -> bool:
+    """Return whether ``pid`` exists using POSIX signal-0 semantics."""
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _windows_pid_exists(pid: int) -> bool:
+    """Return whether ``pid`` exists on Windows without signalling it."""
+
+    try:
+        import ctypes
+    except ImportError:
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        return False
 
 
 def _migrate_if_present(src: Path, dst: Path) -> None:

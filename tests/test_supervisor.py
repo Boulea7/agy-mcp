@@ -19,7 +19,16 @@ from agy_mcp.models import (
 )
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
-from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present, _worktree_slug
+from agy_mcp.supervisor import (
+    _RECONCILE_ERROR,
+    StoreEventSink,
+    Supervisor,
+    _linux_process_start_signature,
+    _migrate_if_present,
+    _pid_exists,
+    _process_start_signature,
+    _worktree_slug,
+)
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
 
 # ---------------------------------------------------------------------------
@@ -298,6 +307,26 @@ def test_start_returns_running_envelope_and_completes(tmp_path: Path):
     assert [e.type for e in persisted] == ["system", "assistant", "result"]
 
 
+def test_start_records_supervisor_owner_signature(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "current-owner" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="hello", cwd=str(tmp_path)))
+
+    assert response.success is True
+    record = supervisor.store.get_job(response.job_id)
+    assert record is not None
+    assert record.pid == os.getpid()
+    assert record.extra["supervisor"] == {
+        "pid": os.getpid(),
+        "instance_id": supervisor._instance_id,
+        "process_start_signature": "current-owner",
+    }
+
+
 def test_start_redacts_request_snapshot(tmp_path: Path):
     events = [
         CanonicalEvent(type="assistant", text="ok"),
@@ -481,6 +510,168 @@ def test_status_marks_crashed_worker_as_failed(tmp_path: Path):
     record = supervisor.status(response.job_id)
     assert record.status == "failed"
     assert "simulated crash" in (record.error or "")
+
+
+def test_status_keeps_foreign_live_supervisor_job_running(tmp_path: Path):
+    """A second process must not mark another live supervisor's job failed."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_live",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={"supervisor": {"pid": os.getpid(), "instance_id": "foreign"}},
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "running"
+    assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_keeps_foreign_live_supervisor_with_matching_signature(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A matching process signature prevents PID-reuse false positives."""
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "current-owner" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_live_signed",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={
+            "supervisor": {
+                "pid": os.getpid(),
+                "instance_id": "foreign",
+                "process_start_signature": "current-owner",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "running"
+    assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_reconciles_foreign_reused_pid(tmp_path: Path, monkeypatch):
+    """A reused PID must not keep a stale foreign job running forever."""
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "current-owner" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_reused_pid",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={
+            "supervisor": {
+                "pid": os.getpid(),
+                "instance_id": "foreign",
+                "process_start_signature": "previous-owner",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
+
+
+def test_process_start_signature_uses_timezone_stable_ps_env(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="Mon Jan  1 00:00:00 2024\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("agy_mcp.supervisor.subprocess.run", _fake_run)
+
+    assert (
+        _process_start_signature(123_456_789)
+        == "ps-lstart:Mon Jan  1 00:00:00 2024"
+    )
+    assert captured["cmd"] == ["ps", "-o", "lstart=", "-p", "123456789"]
+    assert isinstance(captured["env"], dict)
+    assert captured["env"]["TZ"] == "UTC"
+    assert captured["env"]["LC_ALL"] == "C"
+
+
+def test_linux_process_start_signature_uses_boot_id_and_start_ticks(tmp_path: Path):
+    proc_root = tmp_path / "proc"
+    proc_pid = proc_root / "123"
+    proc_boot = proc_root / "sys" / "kernel" / "random"
+    proc_pid.mkdir(parents=True)
+    proc_boot.mkdir(parents=True)
+    fields_after_comm = ["S"] + ["0"] * 19
+    fields_after_comm[19] = "42424242"
+    (proc_pid / "stat").write_text(
+        f"123 (python worker) {' '.join(fields_after_comm)}\n",
+        encoding="utf-8",
+    )
+    (proc_boot / "boot_id").write_text("boot-id-123\n", encoding="utf-8")
+
+    assert _linux_process_start_signature(123, proc_root=proc_root) == (
+        "proc-stat:boot-id-123:42424242"
+    )
+
+
+def test_pid_exists_uses_non_destructive_windows_probe(monkeypatch):
+    calls: list[int] = []
+
+    def _forbid_signal_probe(pid: int, signal: int) -> None:
+        raise AssertionError("os.kill must not be used for Windows PID probes")
+
+    def _fake_windows_pid_exists(pid: int) -> bool:
+        calls.append(pid)
+        return True
+
+    monkeypatch.setattr("agy_mcp.supervisor.os.name", "nt")
+    monkeypatch.setattr("agy_mcp.supervisor.os.kill", _forbid_signal_probe)
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_pid_exists",
+        _fake_windows_pid_exists,
+    )
+
+    assert _pid_exists(123) is True
+    assert calls == [123]
+
+
+def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):
+    """A dead foreign owner is still reconciled as a stale running job."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_dead",
+        cwd=str(tmp_path),
+        pid=999_999_999,
+        extra={"supervisor": {"pid": 999_999_999, "instance_id": "foreign"}},
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
 
 
 # ---------------------------------------------------------------------------

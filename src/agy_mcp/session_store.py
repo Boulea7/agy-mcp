@@ -122,6 +122,8 @@ class SessionStore:
         cwd: str = "",
         request: dict | None = None,
         backend: BackendName | None = None,
+        pid: int | None = None,
+        extra: dict | None = None,
     ) -> JobRecord:
         job_id = _validate_job_id(job_id) if job_id is not None else generate_job_id()
         paths = JobPaths.for_job(self.root, job_id)
@@ -145,11 +147,13 @@ class SessionStore:
             status="running",
             backend=backend,
             cwd=cwd,
+            pid=pid,
             log_path=str(paths.agy_log),
             stdout_path=str(paths.stdout),
             stderr_path=str(paths.stderr),
             events_path=str(paths.events),
             request=request or {},
+            extra=extra or {},
         )
         self._write_meta(paths.meta, record)
         # Touch event log so subsequent appends never need to mkdir again.
