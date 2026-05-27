@@ -170,10 +170,10 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def test_nine_tools_registered():
+def test_eleven_tools_registered():
     """The documented agy tool set must all live on the FastMCP instance.
 
-    Historically nine tools; v0.1.5 added ``agy_purge`` as the tenth.
+    The metadata surface currently includes ``agy_result`` as the eleventh tool.
     """
 
     expected = {
@@ -182,6 +182,7 @@ def test_nine_tools_registered():
         "agy_start",
         "agy_status",
         "agy_read",
+        "agy_result",
         "agy_cancel",
         "agy_sessions",
         "agy_doctor",
@@ -319,6 +320,18 @@ def test_agy_start_status_read_cycle(reset_state, tmp_path: Path):
     assert isinstance(translated["events"], list)
     assert all(isinstance(e, dict) for e in translated["events"])
 
+    result = server.agy_result_tool(job_id)
+    assert result["success"] is True
+    assert result["job_id"] == job_id
+    assert result["record"]["status"] == "completed"
+    assert result["result_text"] == "hi from mcp"
+    assert result["count"] == 0
+    assert result["events"] == []
+
+    result_with_events = server.agy_result_tool(job_id, include_events=True)
+    assert result_with_events["success"] is True
+    assert result_with_events["count"] == 3
+
 
 def test_agy_status_unknown_returns_structured_failure(reset_state):
     out = server.agy_status_tool("job_does_not_exist_12345")
@@ -330,6 +343,112 @@ def test_agy_read_unknown_returns_structured_failure(reset_state):
     out = server.agy_read_tool("job_does_not_exist_12345")
     assert out["success"] is False
     assert "not found" in (out["error"] or "")
+
+
+def test_agy_result_unknown_returns_structured_failure(reset_state):
+    out = server.agy_result_tool("job_does_not_exist_12345")
+    assert out["success"] is False
+    assert "not found" in (out["error"] or "")
+
+
+def test_agy_result_without_job_id_uses_latest_finished_job(reset_state, tmp_path: Path):
+    first = server.agy_start_tool(PROMPT="first", cd=str(tmp_path))
+    assert _wait_until(
+        lambda: server.agy_status_tool(first["job_id"])["record"]["status"] == "completed",
+    )
+    time.sleep(0.02)
+    second = server.agy_start_tool(PROMPT="second", cd=str(tmp_path))
+    assert _wait_until(
+        lambda: server.agy_status_tool(second["job_id"])["record"]["status"] == "completed",
+    )
+
+    out = server.agy_result_tool()
+    assert out["success"] is True
+    assert out["job_id"] == second["job_id"]
+    assert out["result_text"] == "hi from mcp"
+
+
+def test_agy_result_without_job_id_reconciles_stale_running_record(reset_state):
+    record = reset_state.store.create_job(job_id="job_stale_running")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="result", subtype="failed", text="worker stopped before finalize"),
+    )
+
+    out = server.agy_result_tool()
+    assert out["success"] is True
+    assert out["job_id"] == record.job_id
+    assert out["record"]["status"] == "failed"
+    assert out["result_text"] == "worker stopped before finalize"
+
+
+def test_agy_result_uses_terminal_result_text_for_cancelled_jobs(reset_state):
+    record = reset_state.store.create_job(job_id="job_cancelled")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="assistant", text="partial assistant output"),
+    )
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="result", subtype="cancelled", text="cancelled by user"),
+    )
+    reset_state.store.finalize_job(record.job_id, status="cancelled", exit_code=-15)
+
+    out = server.agy_result_tool(record.job_id)
+    assert out["success"] is True
+    assert out["result_text"] == "cancelled by user"
+
+
+def test_agy_result_treats_upstream_error_as_finished(reset_state):
+    record = reset_state.store.create_job(job_id="job_upstream_error")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(
+            type="result",
+            subtype="upstream_error",
+            text="user location is not supported",
+        ),
+    )
+    reset_state.store.finalize_job(record.job_id, status="upstream_error", exit_code=0)
+
+    out = server.agy_result_tool(record.job_id)
+    assert out["success"] is True
+    assert out["record"]["status"] == "upstream_error"
+    assert out["result_text"] == "user location is not supported"
+
+
+def test_agy_result_prefers_upstream_error_result_over_completed_assistant(reset_state):
+    record = reset_state.store.create_job(job_id="job_completed_upstream_error")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="assistant", text="partial assistant output"),
+    )
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(
+            type="result",
+            subtype="upstream_error",
+            text="user location is not supported",
+        ),
+    )
+    reset_state.store.finalize_job(record.job_id, status="completed", exit_code=0)
+
+    out = server.agy_result_tool(record.job_id)
+    assert out["success"] is True
+    assert out["record"]["status"] == "completed"
+    assert out["result_text"] == "user location is not supported"
+
+
+def test_agy_result_without_finished_jobs_returns_structured_failure(reset_state):
+    out = server.agy_result_tool()
+    assert out["success"] is False
+    assert "no finished jobs" in (out["error"] or "")
+
+
+def test_agy_result_rejects_negative_since(reset_state):
+    out = server.agy_result_tool("job_does_not_exist_12345", since=-1)
+    assert out["success"] is False
+    assert "since" in (out["error"] or "")
 
 
 def test_agy_read_rejects_invalid_job_id_without_echo(reset_state):
@@ -344,7 +463,7 @@ def test_agy_read_rejects_invalid_job_id_without_echo(reset_state):
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["agy_start", "agy_status", "agy_read", "agy_cancel"],
+    ["agy_start", "agy_status", "agy_read", "agy_result", "agy_cancel"],
 )
 def test_job_id_rejects_secret_shaped_value_without_echo(
     reset_state, tmp_path: Path, tool_name: str
@@ -361,6 +480,8 @@ def test_job_id_rejects_secret_shaped_value_without_echo(
         out = server.agy_status_tool(secret_job_id)
     elif tool_name == "agy_read":
         out = server.agy_read_tool(secret_job_id)
+    elif tool_name == "agy_result":
+        out = server.agy_result_tool(secret_job_id)
     else:
         out = server.agy_cancel_tool(secret_job_id)
 
@@ -1277,6 +1398,7 @@ def test_all_tools_advertise_output_schema(reset_state):
         "agy_start",
         "agy_status",
         "agy_read",
+        "agy_result",
         "agy_cancel",
         "agy_sessions",
         "agy_doctor",
@@ -1355,6 +1477,7 @@ def test_all_tool_output_models_round_trip_json(reset_state):
         JobRecord,
         PurgeToolResponse,
         ReadToolResponse,
+        ResultToolResponse,
         SessionsToolResponse,
         StatusToolResponse,
     )
@@ -1378,6 +1501,16 @@ def test_all_tool_output_models_round_trip_json(reset_state):
         "agy_read": ReadToolResponse(
             success=True,
             job_id="job_roundtrip",
+            events=[{"type": "assistant", "text": "ok"}],
+            count=1,
+        ),
+        "agy_result": ResultToolResponse(
+            success=True,
+            job_id="job_roundtrip",
+            record=JobRecord(job_id="job_roundtrip", status="completed"),
+            result_text="ok",
+            include_events=True,
+            since=0,
             events=[{"type": "assistant", "text": "ok"}],
             count=1,
         ),

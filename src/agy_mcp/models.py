@@ -473,6 +473,22 @@ class ReadToolResponse(_DictLikeEnvelope):
     count: int = 0
 
 
+class ResultToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_result``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    job_id: str | None = None
+    record: JobRecord | None = None
+    result_text: str = ""
+    include_events: bool = False
+    since: int | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+
+
 class CancelToolResponse(_DictLikeEnvelope):
     """Envelope returned by ``agy_cancel``."""
 
@@ -560,6 +576,7 @@ __all__ = [
     "OutputProtocol",
     "PurgeToolResponse",
     "ReadToolResponse",
+    "ResultToolResponse",
     "SessionsToolResponse",
     "StatusToolResponse",
 ]

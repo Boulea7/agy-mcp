@@ -33,10 +33,10 @@ Notable defaults:
   field (default `60000`); the bridge truncates with a marker rather
   than returning the full buffer.
 
-## Long jobs (start / status / read / cancel)
+## Long jobs (start / status / result / read / cancel)
 
 The CLI bridges to an MCP tool surface. The skill should prefer the MCP
-tools (`agy_start`, `agy_status`, `agy_read`, `agy_cancel`,
+tools (`agy_start`, `agy_status`, `agy_result`, `agy_read`, `agy_cancel`,
 `agy_sessions`) over polling the CLI because the supervisor handles
 worker thread lifecycle, log spooling, and cross-platform process group
 cleanup.
@@ -49,8 +49,11 @@ job_id = start["job_id"]
 # Poll status until completion:
 while True:
     st = agy_status(job_id)
-    if st["record"]["status"] in {"completed", "failed", "cancelled"}:
+    if st["record"]["status"] in {"completed", "failed", "cancelled", "upstream_error"}:
         break
+
+# Fetch the human-readable final output:
+result = agy_result(job_id)
 
 # Read events (raw canonical envelope by default):
 events = agy_read(job_id)

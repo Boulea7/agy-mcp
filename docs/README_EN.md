@@ -3,11 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-560%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 
 Languages: [`简体中文`](../README.md) · [`繁體中文`](README_ZH-TW.md) · [`日本語`](README_JA.md)
 
-> Wraps Google **Antigravity CLI** (`agy`) as 10 typed MCP tools any MCP
+> Wraps Google **Antigravity CLI** (`agy`) as 11 typed MCP tools any MCP
 > client (Claude Code / OpenAI Codex / Cursor / Cline / Continue …) can
 > call directly. Ships with optional Skill bundles that teach
 > skill-aware platforms *when* to delegate and *which mode* to use.
@@ -79,7 +79,7 @@ Constraints:
   proceed.
 
 Report a one-liner per step. After everything is done, give me a
-4-line summary: where it landed, whether all 10 MCP tools are
+4-line summary: where it landed, whether all 11 MCP tools are
 exposed, where the SKILL files live, and what remains optional.
 ````
 
@@ -110,7 +110,7 @@ Full install + troubleshooting → [`installation.md`](installation.md).
 A wrapper that turns Google's new Antigravity CLI (`agy`) into a
 collaboration backend any MCP client can call. Two equivalent paths:
 
-- **MCP server**: `agymcp` exposes 10 typed JSON tools over FastMCP
+- **MCP server**: `agymcp` exposes 11 typed JSON tools over FastMCP
   stdio with stable pydantic envelopes. **Any MCP client.**
 - **Skill bundles**: install into `~/.claude/skills/`,
   `~/.agents/skills/`, `~/.agy/skills/`. Teach the agent *when* to
@@ -124,7 +124,7 @@ collaboration backend any MCP client can call. Two equivalent paths:
 > The project wraps, routes, isolates, and audits the CLI; it does
 > not reimplement the `agy` API.
 
-## 10 MCP tools
+## 11 MCP tools
 
 | Tool | Purpose |
 |---|---|
@@ -133,6 +133,7 @@ collaboration backend any MCP client can call. Two equivalent paths:
 | `agy_start` | Background long job; returns `job_id` immediately |
 | `agy_status` | Poll job state: running / completed / failed / cancelled / upstream_error |
 | `agy_read` | Read job event stream (raw / claude / codex protocols) |
+| `agy_result` | Fetch a finished job result; omitting `job_id` returns the latest finished job |
 | `agy_cancel` | Cross-platform process-group cancel |
 | `agy_sessions` | List recent sessions |
 | `agy_doctor` | Env + auth + capability probe (no secrets) |

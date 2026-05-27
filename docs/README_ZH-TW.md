@@ -3,11 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-560%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 
 語言：[`简体中文`](../README.md) · [`English`](README_EN.md) · [`日本語`](README_JA.md)
 
-> 將 Google **Antigravity CLI**（`agy`）包裝成 10 個 typed MCP 工具，
+> 將 Google **Antigravity CLI**（`agy`）包裝成 11 個 typed MCP 工具，
 > 任何 MCP client（Claude Code / OpenAI Codex / Cursor / Cline /
 > Continue …）都能直接呼叫。專案也提供可選的 Skill bundle，讓支援
 > skill 的平台知道*何時*委派、*使用哪個 mode*。
@@ -72,7 +72,7 @@ agy-doctor
 - 任何寫入操作做之前先簡短說明要做什麼，等我同意再執行；如果你目前
   的權限模式允許 acceptEdits，就直接執行。
 
-每完成一步給我一行回報。全部完成後給出 4 行總結：安裝位置、10 個
+每完成一步給我一行回報。全部完成後給出 4 行總結：安裝位置、11 個
 MCP 工具是否齊全、SKILL 落地路徑、剩餘可選項。
 ````
 
@@ -103,7 +103,7 @@ MCP 工具是否齊全、SKILL 落地路徑、剩餘可選項。
 這是一個 wrapper，將 Google 新推出的 Antigravity CLI（`agy`）變成任意
 MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 
-- **MCP server**：`agymcp` 透過 FastMCP stdio 暴露 10 個 typed JSON
+- **MCP server**：`agymcp` 透過 FastMCP stdio 暴露 11 個 typed JSON
   工具，pydantic envelope 穩定可解析。**任何 MCP client 都可使用**。
 - **Skill bundles**：安裝到 `~/.claude/skills/`、`~/.agents/skills/`、
   `~/.agy/skills/`，教 agent *何時*呼叫 agy、*使用哪個 mode*、遵守
@@ -115,7 +115,7 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 > `agy --print`，可能消耗 Antigravity 請求額度。本專案只負責包裝、
 > 路由、隔離與審計，不重新實作 `agy` API。
 
-## 10 個 MCP 工具
+## 11 個 MCP 工具
 
 | 工具 | 用途 |
 |---|---|
@@ -124,6 +124,7 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 | `agy_start` | 啟動背景長任務，立即回傳 `job_id` |
 | `agy_status` | 查詢 job 狀態：running / completed / failed / cancelled / upstream_error |
 | `agy_read` | 讀取 job 事件流（raw / claude / codex 三種協定） |
+| `agy_result` | 取得已完成 job 的結果；不傳 `job_id` 時回傳最近完成任務 |
 | `agy_cancel` | 跨平台 process group 終止 |
 | `agy_sessions` | 列出最近 session |
 | `agy_doctor` | 環境 + 鑑權 + capability 探測（不洩漏 secrets） |
