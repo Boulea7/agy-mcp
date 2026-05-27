@@ -19,8 +19,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from agy_mcp.adapters.agy import AGY_OAUTH_CREDS_PATH, AgyPrintBackend
+from agy_mcp.adapters.agy import (
+    AGY_OAUTH_CREDS_PATH,
+    AgyPrintBackend,
+    detect_agy_auth_source,
+)
 from agy_mcp.adapters.gemini import GeminiCliBackend
 from agy_mcp.config import Config, get_config
 from agy_mcp.safety import SafetyPolicy
@@ -88,6 +93,7 @@ def run_doctor(
     checks.extend(_check_backend(agy_adapter or AgyPrintBackend(safety=sft), sft, label="agy"))
     checks.extend(_check_backend(gemini_adapter or GeminiCliBackend(safety=sft), sft, label="gemini"))
     checks.append(_check_auth(sft))
+    checks.append(_check_network_env(sft))
     checks.append(_check_session_store(cfg, sft, store=session_store))
 
     healthy = all(c.ok or c.severity != "error" for c in checks)
@@ -191,6 +197,15 @@ def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
     try:
         st = os.lstat(AGY_OAUTH_CREDS_PATH)
     except FileNotFoundError:
+        auth_source = detect_agy_auth_source(oauth_path=AGY_OAUTH_CREDS_PATH)
+        if auth_source is not None:
+            return DoctorCheck(
+                name="auth",
+                ok=True,
+                detail=safety.redact(
+                    f"Antigravity auth state detected via {auth_source.path}"
+                ),
+            )
         return DoctorCheck(
             name="auth",
             ok=False,
@@ -237,6 +252,72 @@ def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
             f"Google OAuth credentials present at {AGY_OAUTH_CREDS_PATH}",
         ),
     )
+
+
+def _check_network_env(safety: SafetyPolicy) -> DoctorCheck:
+    """Summarise network-relevant env without exposing proxy credentials."""
+
+    outbound_proxy_names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+    no_proxy_names = ("NO_PROXY",)
+    locale_names = ("LANG", "LC_ALL", "LC_CTYPE")
+    parts: list[str] = []
+    proxy_present = False
+
+    for name in outbound_proxy_names:
+        value = os.environ.get(name) or os.environ.get(name.lower())
+        if not value:
+            continue
+        proxy_present = True
+        parts.append(f"{name}={_summarise_proxy_value(value, safety)}")
+
+    for name in no_proxy_names:
+        value = os.environ.get(name) or os.environ.get(name.lower())
+        if value:
+            parts.append(f"{name}=set(len={len(value)})")
+
+    if not proxy_present:
+        parts.append("proxy_env=none")
+
+    locale_parts = [
+        f"{name}={safety.redact(os.environ[name])}"
+        for name in locale_names
+        if os.environ.get(name)
+    ]
+    if locale_parts:
+        parts.append("locale=" + ",".join(locale_parts))
+
+    home = os.environ.get("HOME")
+    if home:
+        parts.append(f"HOME={safety.redact(home)}")
+    path = os.environ.get("PATH")
+    if path:
+        parts.append(f"PATH_entries={len([p for p in path.split(os.pathsep) if p])}")
+    if not proxy_present:
+        parts.append(
+            "note=MCP process may not inherit shell-only proxy/VPN variables"
+        )
+
+    return DoctorCheck(
+        name="network_env",
+        ok=True,
+        detail="; ".join(parts),
+    )
+
+
+def _summarise_proxy_value(value: str, safety: SafetyPolicy) -> str:
+    if not value:
+        return "empty"
+    parsed = urlsplit(value)
+    if parsed.scheme and parsed.hostname:
+        host = safety.redact(parsed.hostname)
+        try:
+            parsed_port = parsed.port
+        except ValueError:
+            parsed_port = None
+        port = f":{parsed_port}" if parsed_port is not None else ""
+        auth = "yes" if parsed.username or parsed.password else "no"
+        return f"set({parsed.scheme}://{host}{port}, auth={auth})"
+    return f"set(len={len(value)})"
 
 
 def _check_session_store(

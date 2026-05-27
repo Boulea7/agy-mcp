@@ -305,3 +305,9 @@ def test_claude_result_wrapper_timeout_is_error():
     evt = CanonicalEvent(type="result", subtype="wrapper_timeout", session_id="s")
     out = ProtocolTranslator("claude").translate(evt)
     assert out["is_error"] is True
+
+
+def test_claude_result_upstream_error_is_error():
+    evt = CanonicalEvent(type="result", subtype="upstream_error", session_id="s")
+    out = ProtocolTranslator("claude").translate(evt)
+    assert out["is_error"] is True

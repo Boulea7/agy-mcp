@@ -1185,13 +1185,20 @@ def test_run_unsafe_no_backend_short_circuits(monkeypatch, tmp_path: Path):
 
 
 def test_run_unsafe_agy_unauthenticated_short_circuits(monkeypatch, tmp_path: Path):
-    cap = _capability("agy", authenticated=False, warnings=["OAuth credentials missing"])
+    raw_home_path = str(Path.home() / ".gemini" / "oauth_creds.json")
+    cap = _capability(
+        "agy",
+        authenticated=False,
+        warnings=[f"OAuth credentials missing at {raw_home_path}"],
+    )
     fake = _FakeAdapter(capability=cap, run_result=_result())
     monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
     request = BridgeRequest(prompt="x", cwd=str(tmp_path), backend="agy")
     resp = _run(request, _default_config(worktree_default=False), _safety())
     assert resp.success is False
     assert "not authenticated" in (resp.error or "")
+    assert raw_home_path not in " ".join(resp.warnings)
+    assert "~/.gemini/oauth_creds.json" in " ".join(resp.warnings)
     assert fake.run_calls == []
 
 
@@ -1245,6 +1252,31 @@ def test_run_unsafe_warnings_field_is_populated_on_success(
     assert resp.success is True
     assert resp.error is None  # never carries warnings on success
     assert "a capability warning" in resp.warnings
+
+
+def test_run_unsafe_redacts_success_warnings(monkeypatch, tmp_path: Path):
+    raw_home_path = str(Path.home() / ".local" / "bin" / "agy")
+    cap = _capability("agy", warnings=[f"resolved binary at {raw_home_path}"])
+    fake = _FakeAdapter(
+        capability=cap,
+        run_result=_result(
+            events=[
+                CanonicalEvent(type="assistant", text="done"),
+                CanonicalEvent(type="result", subtype="success"),
+            ],
+        ),
+    )
+    monkeypatch.setattr("agy_mcp.bridge._build_adapter", lambda *a, **kw: fake)
+
+    resp = _run(
+        BridgeRequest(prompt="x", cwd=str(tmp_path)),
+        _default_config(worktree_default=False),
+        _safety(),
+    )
+
+    assert resp.success is True
+    assert raw_home_path not in " ".join(resp.warnings)
+    assert "~/.local/bin/agy" in " ".join(resp.warnings)
 
 
 def test_run_unsafe_truncates_agent_messages(monkeypatch, tmp_path: Path):

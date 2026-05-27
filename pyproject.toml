@@ -110,6 +110,8 @@ include = [
     "docs/installation.md",
     "docs/output-strategy.md",
     "docs/README_EN.md",
+    "docs/README_JA.md",
+    "docs/README_ZH-TW.md",
     "docs/release.md",
     "docs/security.md",
     "README.md",

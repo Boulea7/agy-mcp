@@ -111,8 +111,9 @@ Notes:
   random high port (TLS-wrapped, unpublished proto). Experimental; flagged
   for a future "Lab" mode.
 - **Interactive `agy` auth.** Out of scope: the user runs `agy` once in a
-  shell and completes the browser/login flow; we only detect whether
-  `~/.gemini/oauth_creds.json` exists.
+  shell and completes the browser/login flow; we only detect local auth
+  evidence via a regular legacy OAuth file or a recent keyring-auth success
+  line in the CLI log.
 
 ## Backend routing
 
@@ -224,15 +225,19 @@ Synchronous `agy` calls use an ephemeral spool and return no `job_id`;
 raise `max_output_chars` or request `return_all_messages` when the sync
 caller needs more context.
 
-## Fail-fast on missing OAuth
+## Fail-fast on missing auth
 
-If `~/.gemini/oauth_creds.json` is absent or is not a regular file,
-`agy --print` can hang for the full `--print-timeout` before failing.
-The bridge and supervisor short-circuit non-dry-run agy invocations
-before spawning the CLI with
-`backend='agy' is not authenticated; run agy once and log in.`. The
-doctor uses the same lstat-style credential check and warns when the
-path is a symlink or a non-regular file.
+Older `agy` builds used `~/.gemini/oauth_creds.json`; current official
+docs describe system-keyring auth with browser Google Sign-In fallback.
+The bridge treats a regular OAuth file or a recent keyring-auth success
+line in `~/.gemini/antigravity-cli/log/cli-*.log` as authenticated.
+If the OAuth path exists but is a symlink or non-regular file, that is
+reported as unsafe and does not fall back to keyring-log inference.
+
+Without this preflight, `agy --print` can hang for the full
+`--print-timeout` before failing. The bridge and supervisor short-circuit
+non-dry-run agy invocations before spawning the CLI with
+`backend='agy' is not authenticated; run agy once and log in.`.
 
 ## Future work
 

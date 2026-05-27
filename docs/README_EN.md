@@ -3,8 +3,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-525%20passed-brightgreen.svg)](#)
-[![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-README-red.svg)](../README.md)
+[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+
+Languages: [`简体中文`](../README.md) · [`繁體中文`](README_ZH-TW.md) · [`日本語`](README_JA.md)
 
 > Wraps Google **Antigravity CLI** (`agy`) as 10 typed MCP tools any MCP
 > client (Claude Code / OpenAI Codex / Cursor / Cline / Continue …) can
@@ -60,7 +61,7 @@ Please install the open-source MCP `agy-mcp` for me. Concretely:
    `~/.claude/skills/`, `~/.agents/skills/`, and `~/.agy/skills/`.
    Tell me to restart the window so the SKILL is picked up.
 4. Verify by calling the `agy_doctor` MCP tool and pasting the full
-   JSON back to me. Expect `healthy=true` with all 6 checks
+   JSON back to me. Expect `healthy=true` with the main checks
    `ok=true`. If the `auth` check shows "not logged in", tell me to
    run `agy --version` once manually to trigger the OAuth flow, then
    call `agy_doctor` again.
@@ -130,7 +131,7 @@ collaboration backend any MCP client can call. Two equivalent paths:
 | `agy` | Synchronous one-shot call (PROMPT / cd / sandbox / SESSION_ID + `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`) |
 | `agy_continue` | Resume a prior `SESSION_ID` |
 | `agy_start` | Background long job; returns `job_id` immediately |
-| `agy_status` | Poll job state: running / completed / failed / cancelled |
+| `agy_status` | Poll job state: running / completed / failed / cancelled / upstream_error |
 | `agy_read` | Read job event stream (raw / claude / codex protocols) |
 | `agy_cancel` | Cross-platform process-group cancel |
 | `agy_sessions` | List recent sessions |
@@ -183,6 +184,8 @@ that repo knows when to call `agy`:
 | [`installation.md`](installation.md) | Install + Claude Code / Codex registration + SKILL + verification |
 | [`architecture.md`](architecture.md) | Module map (caller / MCP server / bridge / supervisor / adapter / safety) |
 | [`output-strategy.md`](output-strategy.md) | Hybrid backend: stdout + klog + transcript.jsonl + protocol translator |
+| [`README_ZH-TW.md`](README_ZH-TW.md) | Traditional Chinese README |
+| [`README_JA.md`](README_JA.md) | Japanese README |
 | [`security.md`](security.md) | Threat model, defence catalogue, explicit non-defences |
 | [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix |
 | [`examples.md`](examples.md) | 7 end-to-end scenarios |
@@ -194,7 +197,7 @@ that repo knows when to call `agy`:
 
 ```bash
 uv sync
-uv run pytest        # full suite — 525 tests
+uv run pytest        # full test suite
 uv run agymcp        # FastMCP stdio server (manual testing)
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 uv run agy-doctor    # environment and auth probe

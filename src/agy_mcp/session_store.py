@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,7 @@ from typing import Callable, Iterable
 from pydantic import ValidationError
 
 from agy_mcp.models import BackendName, CanonicalEvent, JobRecord, JobStatus
-from agy_mcp.utils import ensure_directory, safe_write_text, utc_now_iso
+from agy_mcp.utils import ensure_directory, redact_text, safe_write_text, utc_now_iso
 
 JOB_ID_PREFIX = "job_"
 # Strict job-id grammar: callers may supply ids over MCP, so we refuse
@@ -233,10 +234,26 @@ class SessionStore:
             paths = JobPaths.for_job(self.root, job_id)
         except ValueError:
             return []
-        if not paths.events.is_file():
+        try:
+            st = paths.events.stat(follow_symlinks=False)
+        except FileNotFoundError:
             return []
+        except OSError as exc:
+            return [_event_log_unreadable(exc)]
+        if not stat.S_ISREG(st.st_mode):
+            return [
+                CanonicalEvent(
+                    type="error",
+                    subtype="event_log_unreadable",
+                    text="event log is not a regular file",
+                )
+            ]
         events: list[CanonicalEvent] = []
-        with paths.events.open("r", encoding="utf-8") as fp:
+        try:
+            fp = _open_read_no_follow(paths.events)
+        except OSError as exc:
+            return [_event_log_unreadable(exc)]
+        with fp:
             for idx, line in enumerate(fp):
                 if idx < since:
                     continue
@@ -253,7 +270,7 @@ class SessionStore:
                         CanonicalEvent(
                             type="error",
                             subtype="event_decode_failure",
-                            text=stripped[:500],
+                            text=redact_text(stripped)[:500],
                         )
                     )
         return events
@@ -422,6 +439,60 @@ def _open_append_no_follow(path: Path):
         except OSError:
             pass
         raise
+
+
+def _open_read_no_follow(path: Path):
+    """Open ``path`` for reading without following a leaf symlink."""
+
+    flags = os.O_RDONLY
+    nofollow_supported = hasattr(os, "O_NOFOLLOW")
+    if nofollow_supported:
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise
+        if not nofollow_supported or exc.errno in (
+            errno.ENOTSUP,
+            errno.EOPNOTSUPP,
+            errno.EINVAL,
+        ):
+            if path.is_symlink():
+                raise OSError(
+                    errno.ELOOP, f"refusing to follow symlink: {path}",
+                ) from exc
+            fp = path.open("r", encoding="utf-8")
+            try:
+                st = os.fstat(fp.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    raise OSError(
+                        errno.EINVAL, f"event log is not regular: {path}"
+                    )
+                return fp
+            except BaseException:
+                fp.close()
+                raise
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, f"event log is not regular: {path}")
+        return os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def _event_log_unreadable(exc: OSError) -> CanonicalEvent:
+    return CanonicalEvent(
+        type="error",
+        subtype="event_log_unreadable",
+        text=redact_text(str(exc))[:500],
+    )
 
 
 def collect_artifact_paths(records: Iterable[JobRecord]) -> list[str]:
