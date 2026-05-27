@@ -4,7 +4,8 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-540%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![English](https://img.shields.io/badge/English-README-blue.svg)](docs/README_EN.md)
+
+语言：[`English`](docs/README_EN.md) · [`繁體中文`](docs/README_ZH-TW.md) · [`日本語`](docs/README_JA.md)
 
 > 把 Google **Antigravity CLI**（`agy`）包装成 11 个 typed MCP 工具，
 > 任何 MCP 客户端（Claude Code / OpenAI Codex / Cursor / Cline /
@@ -57,7 +58,7 @@ agy-doctor
    它会写到 `~/.claude/skills/`、`~/.agents/skills/`、`~/.agy/skills/`
    三处。装完后告诉我重启窗口让 SKILL 生效。
 4. 验证：调用 `agy_doctor` MCP 工具，把返回的 JSON 完整贴给我看；
-   预期 `healthy=true`，6 项 check 全部 `ok=true`。如果 `auth` 这项
+   预期 `healthy=true`，主要 check 全部 `ok=true`。如果 `auth` 这项
    显示未登录，告诉我手动跑一次 `agy --version` 触发 OAuth 流程，
    然后再调一次 `agy_doctor`。
 5. 安装来源默认走 PyPI：`uv tool install agy-mcp`。如果我让你装某个
@@ -165,6 +166,9 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 | [`docs/installation.md`](docs/installation.md) | 安装 + Claude Code / Codex 注册 + SKILL + 验证 |
 | [`docs/architecture.md`](docs/architecture.md) | 模块图（caller / MCP server / bridge / supervisor / adapter / safety） |
 | [`docs/output-strategy.md`](docs/output-strategy.md) | Hybrid backend：stdout + klog + transcript.jsonl + 协议翻译器 |
+| [`docs/README_EN.md`](docs/README_EN.md) | English README |
+| [`docs/README_ZH-TW.md`](docs/README_ZH-TW.md) | 繁體中文 README |
+| [`docs/README_JA.md`](docs/README_JA.md) | 日本語 README |
 | [`docs/security.md`](docs/security.md) | 威胁模型、防护清单、明确不防御项 |
 | [`docs/cli-capabilities.md`](docs/cli-capabilities.md) | `agy --help` 实测 + capability 矩阵 |
 | [`docs/examples.md`](docs/examples.md) | 7 个典型场景 |
@@ -172,13 +176,11 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 | [`docs/release.md`](docs/release.md) | PyPI trusted publishing + GitHub Release 发布手册（一次性设置 + 常规流程） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录（Keep a Changelog） |
 
-英文版 README → [`docs/README_EN.md`](docs/README_EN.md)。
-
 ## 开发
 
 ```bash
 uv sync
-uv run pytest        # 全量 525 个测试
+uv run pytest        # 全量测试
 uv run agymcp        # 启动 MCP stdio server（人工测试用）
 uv run agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 uv run agy-doctor    # 环境与鉴权探测

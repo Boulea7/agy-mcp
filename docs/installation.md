@@ -10,9 +10,13 @@ need a working `agy` on `PATH` before any non-dry-run call:
 
 - Download from Google's distribution channel for your platform.
 - Confirm with `agy --version` (the bridge probes this).
-- Run `agy` once and complete its interactive login flow; the bridge
-  refuses to run while `~/.gemini/oauth_creds.json` is missing
-  (`agy_doctor` will tell you).
+- Run `agy` once and complete its interactive login flow. Current official
+  Antigravity CLI docs describe authentication as system-keyring based,
+  with browser Google Sign-In as the fallback. Older builds may also leave
+  `~/.gemini/oauth_creds.json`; the bridge accepts either a regular OAuth
+  file or a recent keyring-auth success signal in the CLI log. If an OAuth
+  path exists but is a symlink or non-regular file, the bridge refuses it
+  and `agy_doctor` reports the issue.
 
 Optional fallback: `gemini` CLI v0.42+. If both binaries are on `PATH`, the
 adapter prefers `agy`; pass `backend="gemini"` (or set
@@ -82,7 +86,7 @@ This puts four commands on `PATH`:
 |---|---|
 | `agymcp` | FastMCP stdio server (used by `claude mcp add` / Codex `mcp_servers.agy`) |
 | `agy-bridge` | Standalone JSON-bridge CLI (used by Skills via `agy_bridge.py` forwarder) |
-| `agy-doctor` | Environment + auth probe |
+| `agy-doctor` | Environment + auth + network-env probe |
 | `agy-install-skill` | Install the SKILL bundle into Claude / Codex / Antigravity skill dirs |
 
 ## 3. Register `agymcp` as an MCP server
@@ -156,13 +160,22 @@ own state directory and the project policy refuses to write there.
 # Sanity: probe environment without making any agy API calls
 agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 
-# Full environment report (Python, uv, agy/gemini binaries, OAuth, session store)
+# Full environment report (Python, uv, agy/gemini binaries, auth, network env, session store)
 agy-doctor
 ```
 
 You should see a JSON envelope with `success=true`, a `command_preview`
 field showing the would-be argv (in dry-run mode), no secrets in any
 field, and `auth.ok=true` once the interactive `agy` login flow has run.
+
+If direct terminal `agy` works but MCP calls report
+`FAILED_PRECONDITION` / `User location is not supported`, compare the
+doctor's `network_env` row with your interactive shell. Claude Code or
+Codex may start the MCP server without shell-only proxy/VPN variables,
+so the child `agy` process can exit through a different region. Pass
+`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` via the MCP
+server environment or per-call `extra_env`; `PATH`, `HOME`, and other
+wrapper runtime controls remain blocked by request validation.
 
 ## 6. Project snippets
 

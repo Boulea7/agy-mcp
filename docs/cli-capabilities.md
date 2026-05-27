@@ -5,10 +5,13 @@
 ## Confirmed flags — local `agy --help` (v1.0.0, probed via `$(command -v agy)`, 2026-05-20)
 
 This table is the wrapper's local compatibility baseline, not a claim
-about the newest Google release channel. Google's public Antigravity
-changelog advertised an AGY 2.0 update on 2026-05-19; this machine still
-probed `agy --version` as `1.0.0`, so refresh this file and the adapter
-fixtures after upgrading the local CLI.
+about the newest Google release channel. The official Antigravity CLI
+changelog's latest public entry checked on 2026-05-26 is `1.0.2`, with
+`1.0.1` fixing OAuth token persistence/auth hangs and `1.0.2` adding
+`AGY_CLI_HIDE_ACCOUNT_INFO` plus several sandbox/plugin/statusline fixes.
+Google's public docs cover the TUI/auth/install surface, but do not
+document a stable JSON/streaming stdout contract for `--print` or
+`--log-file`; this wrapper therefore keeps probing the local binary.
 
 | Flag | Purpose |
 |---|---|
@@ -41,18 +44,23 @@ Verified by string-mining the Mach-O binary:
 | Env var | Effect |
 |---|---|
 | `AGY_CLI_DISABLE_AUTO_UPDATE` | Prevent the auto-updater from pinging at launch |
+| `AGY_CLI_HIDE_ACCOUNT_INFO` | Hide email and plan tier in the CLI header (official changelog 1.0.2) |
 | `AGY_BROWSER_WS_URL`, `AGY_BROWSER_ACTIVE_PORT_FILE` | Internal browser-subagent plumbing |
 | `ANTIGRAVITY_CONVERSATION_ID` | Inherit an existing conversation ID (CLI honors this) |
 | `ANTIGRAVITY_SOURCE_METADATA`, `ANTIGRAVITY_SIDECAR_WEB_PORT`, etc. | Sidecar/IDE bridge state |
 
 Wrapper policy: set `AGY_CLI_DISABLE_AUTO_UPDATE=1` for reproducible CI; honor
-`ANTIGRAVITY_CONVERSATION_ID` when caller passes a session.
+`ANTIGRAVITY_CONVERSATION_ID` when caller passes a session. The child process
+inherits normal network variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`,
+`NO_PROXY`) from the MCP/bridge process unless the caller overrides them via
+safe `extra_env` entries.
 
 ## Filesystem touched by `agy`
 
 | Path | Purpose | Wrapper interaction |
 |---|---|---|
-| `~/.gemini/oauth_creds.json` | OAuth tokens | **lstat only**; must be a regular file or agy fails fast before spawn. |
+| system keyring | Current official auth store | Not read by wrapper; inferred only from recent successful CLI auth log lines. |
+| `~/.gemini/oauth_creds.json` | OAuth tokens used by older builds | **lstat only**; if present, must be a regular file. Unsafe paths are rejected and do not fall back to keyring-log inference. |
 | `~/.gemini/settings.json` | Global Gemini-family settings | Read-only: `model.name`. |
 | `~/.gemini/antigravity-cli/settings.json` | CLI-specific overrides | Read-only: `model`, `toolPermission`, `artifactReviewPolicy`. |
 | `~/.gemini/antigravity-cli/log/cli-*.log` | klog operational log | Replaced per-invocation via `--log-file <tmp>`; tailed for lifecycle events. |
@@ -90,7 +98,9 @@ Language server shutting down
 ```
 
 `Created conversation <uuid>` is the session-ID anchor; surface it as `SESSION_ID`
-in the wrapper response. Auth-failure lines are mapped to structured error events.
+in the wrapper response. Auth-failure and upstream API failure lines are mapped
+to structured error events; `FAILED_PRECONDITION` commonly includes region or
+plan-availability messages such as `User location is not supported`.
 
 ## Output behaviour summary
 

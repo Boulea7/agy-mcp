@@ -182,7 +182,24 @@ class Supervisor:
     def _public_record(self, record: JobRecord) -> JobRecord:
         """Return a copy whose public path fields are redacted."""
 
-        return record.model_copy(update={"cwd": self._response_cwd(record.cwd)})
+        data = _redact_value(record.model_dump(mode="python"), self.safety)
+        for key in ("log_path", "stdout_path", "stderr_path", "events_path"):
+            if isinstance(data.get(key), str):
+                data[key] = self._public_session_path(record, data[key])
+        return JobRecord.model_validate(data)
+
+    def _public_session_path(self, record: JobRecord, raw_path: str) -> str:
+        """Return a stable non-local reference for paths inside a job dir."""
+
+        try:
+            p = Path(raw_path).expanduser().resolve(strict=False)
+            root = JobPaths.for_job(self.store.root, record.job_id).root.resolve(
+                strict=False,
+            )
+            rel = p.relative_to(root)
+        except (OSError, ValueError):
+            return self.safety.redact(raw_path)
+        return f"<session:{record.job_id}/{rel.as_posix()}>"
 
     # ------------------------------------------------------------------
     # Default adapter factory (delegates to routing.select_backend)
@@ -616,7 +633,15 @@ class Supervisor:
         else:
             session_id_resolved = result.session_id or request.session_id
             exit_code = result.exit_code
-            if result.exit_code == 0:
+            if result.exit_code == 0 and result.had_upstream_error:
+                status = "upstream_error"
+                if not error:
+                    error = self.safety.redact(
+                        result.upstream_error_text
+                        or _pick_error_from_events(result.events)
+                        or "upstream error",
+                    )
+            elif result.exit_code == 0:
                 # A clean exit always wins over a late cancel. Cancel that
                 # arrived while the adapter was still inside its wait
                 # loop will already have set exit_code != 0 via the

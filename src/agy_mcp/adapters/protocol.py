@@ -95,7 +95,12 @@ class ProtocolTranslator:
             # subtypes set it. This protects against future ``result``
             # subtypes like ``cancelled`` or ``partial`` being misread as
             # errors by clients.
-            error_subtypes = {"error", "wrapper_timeout", "error_during_execution"}
+            error_subtypes = {
+                "error",
+                "upstream_error",
+                "wrapper_timeout",
+                "error_during_execution",
+            }
             is_error = (event.subtype or "") in error_subtypes
             return _redact_dict(
                 {

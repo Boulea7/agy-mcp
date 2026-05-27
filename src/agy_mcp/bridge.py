@@ -393,6 +393,8 @@ def _run_unsafe(
     adapter, route_warnings = _select_backend(request, config, safety)
     cap = adapter.detect()
     backend_name = cap.backend
+    route_warnings_redacted = [safety.redact(w) for w in route_warnings]
+    cap_warnings = [safety.redact(w) for w in cap.warnings]
 
     # Short-circuit before any side effect when the routed backend has no
     # usable binary. Creating a worktree just to tear it down moments later
@@ -400,8 +402,11 @@ def _run_unsafe(
     if not cap.bin_path and not request.dry_run:
         return BridgeResponse(
             success=False,
-            error=" | ".join(route_warnings) or f"backend={backend_name!r} unavailable",
-            warnings=list(cap.warnings),
+            error=(
+                " | ".join(route_warnings_redacted)
+                or safety.redact(f"backend={backend_name!r} unavailable")
+            ),
+            warnings=cap_warnings,
             cwd=_response_cwd(safety, cwd_path),
             adapter=_adapter_meta(adapter, request, safety),
         ).touch()
@@ -409,7 +414,7 @@ def _run_unsafe(
         return BridgeResponse(
             success=False,
             error="backend='agy' is not authenticated; run agy once and log in.",
-            warnings=[*gate_warnings, *route_warnings, *cap.warnings],
+            warnings=[*gate_warnings, *route_warnings_redacted, *cap_warnings],
             cwd=_response_cwd(safety, cwd_path),
             adapter=_adapter_meta(adapter, request, safety),
         ).touch()
@@ -442,7 +447,7 @@ def _run_unsafe(
             return BridgeResponse(
                 success=False,
                 error=safety.redact(f"worktree creation failed: {exc}"),
-                warnings=[*gate_warnings, *route_warnings],
+                warnings=[*gate_warnings, *route_warnings_redacted],
                 cwd=_response_cwd(safety, cwd_path),
                 adapter=_adapter_meta(adapter, request, safety),
             ).touch()
@@ -450,7 +455,7 @@ def _run_unsafe(
     if request.dry_run:
         return _dry_run_response(
             request, adapter, effective_cwd, safety,
-            gate_warnings + route_warnings + worktree_warnings,
+            gate_warnings + route_warnings_redacted + worktree_warnings,
         )
 
     sink = ListEventSink()
@@ -478,7 +483,12 @@ def _run_unsafe(
             # already gathered, so the caller doesn't lose context.
             run_error = safety.redact(str(exc))
 
-    all_warnings = [*gate_warnings, *route_warnings, *worktree_warnings, *cap.warnings]
+    all_warnings = [
+        *gate_warnings,
+        *route_warnings_redacted,
+        *worktree_warnings,
+        *cap_warnings,
+    ]
 
     if result is None:
         return BridgeResponse(

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import time
 from pathlib import Path
 
@@ -91,6 +93,46 @@ def test_read_events_tolerates_corrupt_line(tmp_session_root: Path):
     assert events[1].subtype == "event_decode_failure"
     assert events[0].text == "good"
     assert events[2].text == "good-2"
+
+
+def test_read_events_redacts_corrupt_line(tmp_session_root: Path):
+    store = SessionStore(tmp_session_root)
+    record = store.create_job()
+    paths = JobPaths.for_job(tmp_session_root, record.job_id)
+    paths.events.write_text(
+        '{"type": "assistant", "text": "good"}\n'
+        "Authorization: Bearer sk-ant-secret1234567890\n",
+        encoding="utf-8",
+    )
+
+    events = store.read_events(record.job_id)
+
+    assert len(events) == 2
+    assert events[1].subtype == "event_decode_failure"
+    text = events[1].text or ""
+    assert "sk-ant-secret1234567890" not in text
+    assert "secret1234567890" not in text
+    assert "1234567890" not in text
+    assert text == "Authorization: *** ***"
+
+
+def test_open_read_no_follow_fallback_rejects_non_regular_file(monkeypatch):
+    if _is_windows():
+        return  # pragma: no cover - Windows lacks /dev/null and O_NOFOLLOW
+
+    from agy_mcp import session_store as store_mod
+
+    original_open = os.open
+
+    def fake_open(path, flags, *args, **kwargs):
+        if hasattr(os, "O_NOFOLLOW") and (flags & os.O_NOFOLLOW):
+            raise OSError(errno.EINVAL, "simulated O_NOFOLLOW unsupported")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.os, "open", fake_open)
+
+    with pytest.raises(OSError, match="event log is not regular"):
+        store_mod._open_read_no_follow(Path("/dev/null"))
 
 
 def test_list_jobs_returns_newest_first(tmp_session_root: Path):
@@ -223,6 +265,30 @@ def test_append_event_refuses_symlinked_log(tmp_session_root: Path):
     with _pytest.raises(OSError):
         store.append_event(record.job_id, CanonicalEvent(type="assistant", text="x"))
     assert secret.read_text(encoding="utf-8") == "DO_NOT_OVERWRITE"
+
+
+def test_read_events_refuses_symlinked_log(tmp_session_root: Path):
+    """A planted events.jsonl symlink must not be followed on read."""
+
+    if _is_windows():
+        return  # pragma: no cover - Windows symlink permissions vary
+    store = SessionStore(tmp_session_root)
+    record = store.create_job()
+    paths = JobPaths.for_job(tmp_session_root, record.job_id)
+    secret = tmp_session_root / "secret-events.txt"
+    secret.write_text(
+        json.dumps({"type": "assistant", "text": "DO_NOT_READ"}) + "\n",
+        encoding="utf-8",
+    )
+    paths.events.unlink()
+    paths.events.symlink_to(secret)
+
+    events = store.read_events(record.job_id)
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert events[0].subtype == "event_log_unreadable"
+    assert "DO_NOT_READ" not in (events[0].text or "")
 
 
 def test_injected_clock_pins_job_dir_mtime(tmp_session_root: Path):

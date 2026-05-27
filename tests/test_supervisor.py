@@ -45,6 +45,8 @@ class _ScriptedAdapter(BaseAdapter):
         delay_per_event: float = 0.0,
         block_until_cancel: bool = False,
         spawn_raises: Exception | None = None,
+        had_upstream_error: bool = False,
+        upstream_error_text: str | None = None,
     ) -> None:
         super().__init__()
         self._cap = capability
@@ -54,6 +56,8 @@ class _ScriptedAdapter(BaseAdapter):
         self._delay = delay_per_event
         self._block_until_cancel = block_until_cancel
         self._spawn_raises = spawn_raises
+        self._had_upstream_error = had_upstream_error
+        self._upstream_error_text = upstream_error_text
         self.run_requests: list[BridgeRequest] = []
 
     def _probe(self) -> Capability:
@@ -120,6 +124,8 @@ class _ScriptedAdapter(BaseAdapter):
             stderr_tail="",
             log_path=None,
             artifacts=[],
+            had_upstream_error=self._had_upstream_error,
+            upstream_error_text=self._upstream_error_text,
         )
 
 
@@ -620,6 +626,54 @@ def test_route_warnings_persist_to_job_record(tmp_path: Path):
     assert record.extra.get("route_warnings") == ["fallback to gemini"]
 
 
+def test_status_redacts_session_store_paths(tmp_path: Path):
+    events = [
+        CanonicalEvent(type="assistant", text="ok"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter = _ScriptedAdapter(capability=_capability(), events=events)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="hi", cwd=str(tmp_path)))
+    assert _wait_for(
+        lambda: supervisor.status(response.job_id).status == "completed",
+    )
+
+    public = supervisor.status(response.job_id)
+    persisted = supervisor.store.get_job(response.job_id)
+    assert persisted is not None
+    assert public.events_path == f"<session:{response.job_id}/events.jsonl>"
+    assert public.stdout_path == f"<session:{response.job_id}/stdout.log>"
+    assert public.stderr_path == f"<session:{response.job_id}/stderr.log>"
+    assert public.log_path == f"<session:{response.job_id}/agy.log>"
+    assert persisted.events_path != public.events_path
+
+
+def test_finalize_marks_zero_exit_upstream_error_as_failed_status(tmp_path: Path):
+    upstream_msg = (
+        "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
+    )
+    events = [
+        CanonicalEvent(type="error", subtype="upstream_failed_precondition", text=upstream_msg),
+        CanonicalEvent(type="result", subtype="upstream_error"),
+    ]
+    adapter = _ScriptedAdapter(
+        capability=_capability(),
+        events=events,
+        exit_code=0,
+        had_upstream_error=True,
+        upstream_error_text=upstream_msg,
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="hi", cwd=str(tmp_path)))
+
+    assert _wait_for(
+        lambda: supervisor.status(response.job_id).status == "upstream_error",
+    )
+    record = supervisor.status(response.job_id)
+    assert record.exit_code == 0
+    assert record.error == upstream_msg
+
+
 # ---------------------------------------------------------------------------
 # Adapter exception during run is captured as failure
 # ---------------------------------------------------------------------------
@@ -675,9 +729,11 @@ def test_adapter_exception_salvages_spool_files(tmp_path: Path):
     )
     record = supervisor.status(response.job_id)
     assert "adapter crashed" in (record.error or "")
-    assert Path(record.stdout_path).read_text(encoding="utf-8") == "stdout evidence"
-    assert Path(record.stderr_path).read_text(encoding="utf-8") == "stderr evidence"
-    assert Path(record.log_path).read_text(encoding="utf-8") == "klog evidence"
+    persisted = supervisor.store.get_job(response.job_id)
+    assert persisted is not None
+    assert Path(persisted.stdout_path).read_text(encoding="utf-8") == "stdout evidence"
+    assert Path(persisted.stderr_path).read_text(encoding="utf-8") == "stderr evidence"
+    assert Path(persisted.log_path).read_text(encoding="utf-8") == "klog evidence"
 
 
 # ---------------------------------------------------------------------------

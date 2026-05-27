@@ -41,6 +41,8 @@ REQUIRED_SDIST_FILES: set[str] = {
     "docs/installation.md",
     "docs/output-strategy.md",
     "docs/README_EN.md",
+    "docs/README_JA.md",
+    "docs/README_ZH-TW.md",
     "docs/release.md",
     "docs/security.md",
     "src/agy_mcp/__init__.py",
