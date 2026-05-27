@@ -90,7 +90,7 @@ _gemini_adapter: GeminiCliBackend | None = None
 # (Phase 5 R3 security P2).
 _MAX_JOB_ID_LEN = 84
 _JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
-_RESULT_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_RESULT_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "upstream_error"})
 _MAX_SESSION_ID_LEN = 96
 # Conservative charset for SESSION_ID; mirrors models._SESSION_ID_RE so
 # the server-side fast path and the pydantic validator stay in lockstep.

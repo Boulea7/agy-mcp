@@ -399,6 +399,24 @@ def test_agy_result_uses_terminal_result_text_for_cancelled_jobs(reset_state):
     assert out["result_text"] == "cancelled by user"
 
 
+def test_agy_result_treats_upstream_error_as_finished(reset_state):
+    record = reset_state.store.create_job(job_id="job_upstream_error")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(
+            type="result",
+            subtype="upstream_error",
+            text="user location is not supported",
+        ),
+    )
+    reset_state.store.finalize_job(record.job_id, status="upstream_error", exit_code=0)
+
+    out = server.agy_result_tool(record.job_id)
+    assert out["success"] is True
+    assert out["record"]["status"] == "upstream_error"
+    assert out["result_text"] == "user location is not supported"
+
+
 def test_agy_result_without_finished_jobs_returns_structured_failure(reset_state):
     out = server.agy_result_tool()
     assert out["success"] is False

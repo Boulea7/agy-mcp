@@ -156,7 +156,7 @@ class BridgeResponse(BaseModel):
     success: bool
     SESSION_ID: str = ""
     job_id: str | None = None
-    status: Literal["completed","running","failed","cancelled","unknown"] = "unknown"
+    status: Literal["completed","running","failed","cancelled","unknown","upstream_error"] = "unknown"
     agent_messages: str | list[dict] = ""
     all_messages: list[dict] = []
     artifacts: list[dict] = []
@@ -183,7 +183,7 @@ on canonical events so future agy event types survive without a schema bump).
 | `agy` | yes (async-wrapped) | One-shot synchronous call; standard PROMPT / cd / sandbox / SESSION_ID arg set + new `mode`/`backend`/`output_protocol`/`worktree`/`allow_write`/`extra_env` |
 | `agy_continue` | yes (async-wrapped) | Resume a prior `SESSION_ID` |
 | `agy_start` | no | Spawn a background job; returns `job_id` immediately |
-| `agy_status` | yes | `running` / `completed` / `failed` / `cancelled` + timing |
+| `agy_status` | yes | `running` / `completed` / `failed` / `cancelled` / `upstream_error` + timing |
 | `agy_read` | yes | Stream events (raw or protocol-translated) + artifacts |
 | `agy_result` | yes | Return the captured output for a finished background job |
 | `agy_cancel` | yes | Process-group cancel (POSIX `killpg` / Windows `CTRL_BREAK_EVENT`) |
