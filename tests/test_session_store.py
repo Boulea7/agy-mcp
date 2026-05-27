@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import time
 from pathlib import Path
 
@@ -107,8 +109,30 @@ def test_read_events_redacts_corrupt_line(tmp_session_root: Path):
 
     assert len(events) == 2
     assert events[1].subtype == "event_decode_failure"
-    assert "sk-ant-secret" not in (events[1].text or "")
-    assert "***" in (events[1].text or "")
+    text = events[1].text or ""
+    assert "sk-ant-secret1234567890" not in text
+    assert "secret1234567890" not in text
+    assert "1234567890" not in text
+    assert text == "Authorization: *** ***"
+
+
+def test_open_read_no_follow_fallback_rejects_non_regular_file(monkeypatch):
+    if _is_windows():
+        return  # pragma: no cover - Windows lacks /dev/null and O_NOFOLLOW
+
+    from agy_mcp import session_store as store_mod
+
+    original_open = os.open
+
+    def fake_open(path, flags, *args, **kwargs):
+        if hasattr(os, "O_NOFOLLOW") and (flags & os.O_NOFOLLOW):
+            raise OSError(errno.EINVAL, "simulated O_NOFOLLOW unsupported")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.os, "open", fake_open)
+
+    with pytest.raises(OSError, match="event log is not regular"):
+        store_mod._open_read_no_follow(Path("/dev/null"))
 
 
 def test_list_jobs_returns_newest_first(tmp_session_root: Path):

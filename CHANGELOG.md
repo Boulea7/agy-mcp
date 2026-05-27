@@ -29,6 +29,9 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 - `SessionStore.read_events` no longer follows a planted `events.jsonl`
   symlink and redacts malformed event-log lines before returning synthetic
   decode errors.
+- `SessionStore.read_events` now re-checks the fallback read handle with
+  `fstat` when the filesystem cannot use `O_NOFOLLOW`, preserving the
+  regular-file invariant before parsing an event log.
 - `agy_doctor` reports `NO_PROXY` separately instead of treating it as an
   outbound proxy, preserving the missing-proxy diagnostic note when only
   bypass rules are set.
@@ -41,6 +44,8 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
   pytest, package build, and release-artifact audit on Python 3.12.
 - Added least-privilege workflow permissions and a non-required compatibility
   matrix for Python 3.11/3.13 on Ubuntu and macOS.
+- Pinned third-party GitHub Actions to commit SHAs and disabled checkout
+  credential persistence in CI.
 
 ### Documentation
 

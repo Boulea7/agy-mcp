@@ -462,7 +462,17 @@ def _open_read_no_follow(path: Path):
                 raise OSError(
                     errno.ELOOP, f"refusing to follow symlink: {path}",
                 ) from exc
-            return path.open("r", encoding="utf-8")
+            fp = path.open("r", encoding="utf-8")
+            try:
+                st = os.fstat(fp.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    raise OSError(
+                        errno.EINVAL, f"event log is not regular: {path}"
+                    )
+                return fp
+            except BaseException:
+                fp.close()
+                raise
         raise
     try:
         st = os.fstat(fd)
