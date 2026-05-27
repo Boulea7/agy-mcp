@@ -23,12 +23,59 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DIST_DIR = PROJECT_ROOT / "dist"
+SRC_ROOT = PROJECT_ROOT / "src"
+SKILL_BODIES_ROOT = SRC_ROOT / "agy_mcp" / "_skill_bodies"
+SKILL_BODY_EXCLUDED_COMPONENTS = frozenset({"__pycache__"})
+SKILL_BODY_EXCLUDED_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_required_skill_body_file(path: Path) -> bool:
+    """Return whether a source skill-body file should ship to users."""
+
+    if not path.is_file():
+        return False
+    if any(component in SKILL_BODY_EXCLUDED_COMPONENTS for component in path.parts):
+        return False
+    if path.name in {".DS_Store", "Thumbs.db"}:
+        return False
+    return not path.name.endswith(SKILL_BODY_EXCLUDED_SUFFIXES)
+
+
+def _skill_body_files_for_sdist(
+    root: Path = SKILL_BODIES_ROOT,
+    project_root: Path = PROJECT_ROOT,
+) -> set[str]:
+    """Return every bundled skill file path as it appears in the sdist."""
+
+    if not root.is_dir():
+        return set()
+    return {
+        path.relative_to(project_root).as_posix()
+        for path in root.rglob("*")
+        if _is_required_skill_body_file(path)
+    }
+
+
+def _skill_body_files_for_wheel(
+    root: Path = SKILL_BODIES_ROOT,
+    src_root: Path = SRC_ROOT,
+) -> set[str]:
+    """Return every bundled skill file path as it appears in the wheel."""
+
+    if not root.is_dir():
+        return set()
+    return {
+        path.relative_to(src_root).as_posix()
+        for path in root.rglob("*")
+        if _is_required_skill_body_file(path)
+    }
 
 # Files we positively require in the sdist. Missing any of these is a release
 # blocker because skill bundles, public docs, and licence are part of the
 # product surface — losing them silently would ship a broken install.
-REQUIRED_SDIST_FILES: set[str] = {
+_REQUIRED_SDIST_BASE_FILES: set[str] = {
     "LICENSE",
     "PKG-INFO",
     "README.md",
@@ -65,10 +112,8 @@ REQUIRED_SDIST_FILES: set[str] = {
     "src/agy_mcp/adapters/base.py",
     "src/agy_mcp/adapters/gemini.py",
     "src/agy_mcp/adapters/protocol.py",
-    "src/agy_mcp/_skill_bodies/claude/SKILL.md",
-    "src/agy_mcp/_skill_bodies/codex/SKILL.md",
-    "src/agy_mcp/_skill_bodies/antigravity/SKILL.md",
 }
+REQUIRED_SDIST_FILES: set[str] = _REQUIRED_SDIST_BASE_FILES | _skill_body_files_for_sdist()
 
 ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
     # Hatchling includes the root .gitignore in sdists even when public
@@ -77,15 +122,6 @@ ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
     # forbidden below.
     ".gitignore",
     "src/agy_mcp/py.typed",
-    "src/agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
-    "src/agy_mcp/_skill_bodies/claude/references/prompt-patterns.md",
-    "src/agy_mcp/_skill_bodies/claude/references/security.md",
-    "src/agy_mcp/_skill_bodies/claude/references/usage.md",
-    "src/agy_mcp/_skill_bodies/claude/scripts/agy_bridge.py",
-    "src/agy_mcp/_skill_bodies/codex/references/prompt-patterns.md",
-    "src/agy_mcp/_skill_bodies/codex/references/security.md",
-    "src/agy_mcp/_skill_bodies/codex/references/usage.md",
-    "src/agy_mcp/_skill_bodies/codex/scripts/agy_bridge.py",
 }
 
 # Files we positively require in the wheel. The wheel is what users install,
@@ -93,7 +129,7 @@ ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
 # crash at runtime with ``FileNotFoundError`` and the user never finds out
 # until they invoke the tool. Phase 8 review P3: gate on the wheel surface
 # explicitly rather than trusting hatch to mirror the sdist whitelist.
-REQUIRED_WHEEL_FILES: set[str] = {
+_REQUIRED_WHEEL_BASE_FILES: set[str] = {
     "agy_mcp/__init__.py",
     "agy_mcp/__main__.py",
     "agy_mcp/bridge.py",
@@ -114,19 +150,8 @@ REQUIRED_WHEEL_FILES: set[str] = {
     "agy_mcp/adapters/base.py",
     "agy_mcp/adapters/gemini.py",
     "agy_mcp/adapters/protocol.py",
-    "agy_mcp/_skill_bodies/claude/SKILL.md",
-    "agy_mcp/_skill_bodies/claude/scripts/agy_bridge.py",
-    "agy_mcp/_skill_bodies/claude/references/usage.md",
-    "agy_mcp/_skill_bodies/claude/references/prompt-patterns.md",
-    "agy_mcp/_skill_bodies/claude/references/security.md",
-    "agy_mcp/_skill_bodies/codex/SKILL.md",
-    "agy_mcp/_skill_bodies/codex/scripts/agy_bridge.py",
-    "agy_mcp/_skill_bodies/codex/references/usage.md",
-    "agy_mcp/_skill_bodies/codex/references/prompt-patterns.md",
-    "agy_mcp/_skill_bodies/codex/references/security.md",
-    "agy_mcp/_skill_bodies/antigravity/SKILL.md",
-    "agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
 }
+REQUIRED_WHEEL_FILES: set[str] = _REQUIRED_WHEEL_BASE_FILES | _skill_body_files_for_wheel()
 
 # Files / patterns that MUST NOT appear in any artefact. A match here aborts
 # the release. Patterns use simple substring + path-component checks so we

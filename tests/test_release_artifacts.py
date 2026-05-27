@@ -13,9 +13,32 @@ _SPEC.loader.exec_module(release_audit)
 
 ALLOWED_SDIST_FILES = release_audit.ALLOWED_SDIST_FILES
 REQUIRED_SDIST_FILES = release_audit.REQUIRED_SDIST_FILES
+REQUIRED_WHEEL_FILES = release_audit.REQUIRED_WHEEL_FILES
 ArtifactFile = release_audit.ArtifactFile
 _check_contents = release_audit._check_contents
 _check_files = release_audit._check_files
+_check_wheel_metadata = release_audit._check_wheel_metadata
+_is_required_skill_body_file = release_audit._is_required_skill_body_file
+_skill_body_files_for_sdist = release_audit._skill_body_files_for_sdist
+_skill_body_files_for_wheel = release_audit._skill_body_files_for_wheel
+
+
+def test_release_required_sets_include_all_bundled_skill_body_files():
+    skill_root = Path(__file__).resolve().parents[1] / "src" / "agy_mcp" / "_skill_bodies"
+    assert skill_root.is_dir()
+
+    sdist_skill_files = _skill_body_files_for_sdist()
+    wheel_skill_files = _skill_body_files_for_wheel()
+
+    assert sdist_skill_files
+    assert wheel_skill_files
+    assert sdist_skill_files <= REQUIRED_SDIST_FILES
+    assert wheel_skill_files <= REQUIRED_WHEEL_FILES
+    assert {
+        path.relative_to(Path(__file__).resolve().parents[1]).as_posix()
+        for path in skill_root.rglob("*")
+        if _is_required_skill_body_file(path)
+    } == sdist_skill_files
 
 
 def test_release_check_rejects_root_dotdir_leaks():
@@ -100,3 +123,58 @@ def test_release_check_allows_placeholder_secret_docs():
     )
 
     assert problems == []
+
+
+def test_wheel_metadata_check_accepts_valid_dist_info():
+    files = [
+        ArtifactFile("agy_mcp/__init__.py", b""),
+        ArtifactFile(
+            "agy_mcp-0.1.8.dist-info/METADATA",
+            b"Metadata-Version: 2.4\nName: agy-mcp\nVersion: 0.1.8\n",
+        ),
+        ArtifactFile("agy_mcp-0.1.8.dist-info/WHEEL", b"Wheel-Version: 1.0\n"),
+        ArtifactFile(
+            "agy_mcp-0.1.8.dist-info/RECORD",
+            b"agy_mcp/__init__.py,sha256=abc,1\n",
+        ),
+    ]
+
+    assert _check_wheel_metadata("agy-mcp.whl", files) == []
+
+
+def test_wheel_metadata_check_rejects_missing_dist_info_files():
+    files = [
+        ArtifactFile("agy_mcp/__init__.py", b""),
+        ArtifactFile(
+            "agy_mcp-0.1.8.dist-info/METADATA",
+            b"Metadata-Version: 2.4\nName: agy-mcp\nVersion: 0.1.8\n",
+        ),
+    ]
+
+    problems = _check_wheel_metadata("agy-mcp.whl", files)
+
+    assert any("missing required file: RECORD" in problem for problem in problems)
+    assert any("missing required file: WHEEL" in problem for problem in problems)
+
+
+def test_wheel_metadata_check_rejects_payload_missing_from_record():
+    files = [
+        ArtifactFile("agy_mcp/__init__.py", b""),
+        ArtifactFile("agy_mcp/server.py", b""),
+        ArtifactFile(
+            "agy_mcp-0.1.8.dist-info/METADATA",
+            b"Metadata-Version: 2.4\nName: agy-mcp\nVersion: 0.1.8\n",
+        ),
+        ArtifactFile("agy_mcp-0.1.8.dist-info/WHEEL", b"Wheel-Version: 1.0\n"),
+        ArtifactFile(
+            "agy_mcp-0.1.8.dist-info/RECORD",
+            b"agy_mcp/__init__.py,sha256=abc,1\n",
+        ),
+    ]
+
+    problems = _check_wheel_metadata("agy-mcp.whl", files)
+
+    assert any(
+        "wheel ships agy_mcp/server.py but RECORD does not list it" in problem
+        for problem in problems
+    )
