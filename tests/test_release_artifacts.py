@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
+
+import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_release_artifacts.py"
 _SPEC = importlib.util.spec_from_file_location("check_release_artifacts", _SCRIPT)
@@ -39,6 +42,42 @@ def test_release_required_sets_include_all_bundled_skill_body_files():
         for path in skill_root.rglob("*")
         if _is_required_skill_body_file(path)
     } == sdist_skill_files
+
+
+def test_release_skill_body_scan_fails_when_root_is_missing(tmp_path: Path):
+    missing_root = tmp_path / "missing-skill-bodies"
+
+    with pytest.raises(RuntimeError, match="required skill body directory"):
+        _skill_body_files_for_sdist(root=missing_root, project_root=tmp_path)
+    with pytest.raises(RuntimeError, match="required skill body directory"):
+        _skill_body_files_for_wheel(root=missing_root, src_root=tmp_path / "src")
+
+
+def test_release_skill_body_scan_ignores_untracked_files(tmp_path: Path):
+    project_root = tmp_path / "project"
+    skill_root = project_root / "src" / "agy_mcp" / "_skill_bodies" / "claude"
+    skill_root.mkdir(parents=True)
+    tracked = skill_root / "SKILL.md"
+    untracked = skill_root / "local-note.md"
+    tracked.write_text("# tracked\n", encoding="utf-8")
+    untracked.write_text("# local only\n", encoding="utf-8")
+
+    subprocess.run(["git", "init"], cwd=project_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", tracked.relative_to(project_root).as_posix()],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+
+    assert _skill_body_files_for_sdist(
+        root=project_root / "src" / "agy_mcp" / "_skill_bodies",
+        project_root=project_root,
+    ) == {"src/agy_mcp/_skill_bodies/claude/SKILL.md"}
+    assert _skill_body_files_for_wheel(
+        root=project_root / "src" / "agy_mcp" / "_skill_bodies",
+        src_root=project_root / "src",
+    ) == {"agy_mcp/_skill_bodies/claude/SKILL.md"}
 
 
 def test_release_check_rejects_root_dotdir_leaks():

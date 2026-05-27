@@ -17,6 +17,7 @@ artefacts existing under ``dist/``.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -43,18 +44,52 @@ def _is_required_skill_body_file(path: Path) -> bool:
     return not path.name.endswith(SKILL_BODY_EXCLUDED_SUFFIXES)
 
 
+def _tracked_files_under(root: Path, project_root: Path) -> set[Path] | None:
+    """Return git-tracked files under ``root``, or None outside a git checkout."""
+
+    try:
+        relative_root = root.relative_to(project_root).as_posix()
+    except ValueError:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "ls-files", "-z", "--", relative_root],
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return {
+        project_root / raw.decode("utf-8")
+        for raw in result.stdout.split(b"\0")
+        if raw
+    }
+
+
+def _required_skill_body_source_files(root: Path, project_root: Path) -> set[Path]:
+    """Return source skill-body files that should be present in release outputs."""
+
+    if not root.is_dir():
+        raise RuntimeError(f"required skill body directory is missing: {root}")
+    candidates = _tracked_files_under(root, project_root)
+    if candidates is None:
+        candidates = set(root.rglob("*"))
+    return {
+        path
+        for path in candidates
+        if _is_required_skill_body_file(path)
+    }
+
+
 def _skill_body_files_for_sdist(
     root: Path = SKILL_BODIES_ROOT,
     project_root: Path = PROJECT_ROOT,
 ) -> set[str]:
     """Return every bundled skill file path as it appears in the sdist."""
 
-    if not root.is_dir():
-        return set()
     return {
         path.relative_to(project_root).as_posix()
-        for path in root.rglob("*")
-        if _is_required_skill_body_file(path)
+        for path in _required_skill_body_source_files(root, project_root)
     }
 
 
@@ -64,12 +99,9 @@ def _skill_body_files_for_wheel(
 ) -> set[str]:
     """Return every bundled skill file path as it appears in the wheel."""
 
-    if not root.is_dir():
-        return set()
     return {
         path.relative_to(src_root).as_posix()
-        for path in root.rglob("*")
-        if _is_required_skill_body_file(path)
+        for path in _required_skill_body_source_files(root, src_root.parent)
     }
 
 # Files we positively require in the sdist. Missing any of these is a release
