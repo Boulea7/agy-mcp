@@ -354,8 +354,16 @@ class SessionStore:
             return exact
 
         match: JobRecord | None = None
-        for record in self.list_jobs(limit=None):
-            if not record.job_id.startswith(reference):
+        for path in self.root.iterdir():
+            job_id = path.name
+            if (
+                not path.is_dir()
+                or not _JOB_ID_RE.fullmatch(job_id)
+                or not job_id.startswith(reference)
+            ):
+                continue
+            record = self.get_job(job_id)
+            if record is None:
                 continue
             if match is not None:
                 raise ValueError("job_id reference is ambiguous; pass a longer job_id")
