@@ -90,7 +90,7 @@ _gemini_adapter: GeminiCliBackend | None = None
 # (Phase 5 R3 security P2).
 _MAX_JOB_ID_LEN = 84
 _JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
-_RESULT_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "upstream_error"})
+_RESULT_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _MAX_SESSION_ID_LEN = 96
 # Conservative charset for SESSION_ID; mirrors models._SESSION_ID_RE so
 # the server-side fast path and the pydantic validator stay in lockstep.
@@ -338,8 +338,27 @@ def _validate_session_id(safety: SafetyPolicy, session_id: str) -> str | None:
     return None
 
 
-def _result_text_from_events(events: list[Any], *, fallback: str | None, safety: SafetyPolicy) -> str:
+def _job_record_recency(record: Any) -> str:
+    return record.finished_at or record.updated_at or record.started_at or ""
+
+
+def _result_text_from_events(
+    events: list[Any],
+    *,
+    status: str,
+    fallback: str | None,
+    safety: SafetyPolicy,
+) -> str:
     """Return the best human-readable result text from stored events."""
+
+    if status != "completed":
+        for event_type in ("result", "error"):
+            for event in reversed(events):
+                text = getattr(event, "text", None)
+                if getattr(event, "type", None) == event_type and text:
+                    return safety.redact(text)
+        if fallback:
+            return safety.redact(fallback)
 
     for event in reversed(events):
         text = getattr(event, "text", None)
@@ -347,7 +366,7 @@ def _result_text_from_events(events: list[Any], *, fallback: str | None, safety:
             return safety.redact(text)
     for event in reversed(events):
         text = getattr(event, "text", None)
-        if getattr(event, "type", None) == "error" and text:
+        if getattr(event, "type", None) in {"result", "error"} and text:
             return safety.redact(text)
     if fallback:
         return safety.redact(fallback)
@@ -674,31 +693,44 @@ def agy_read_tool(
     description=(
         "Return the captured output for a finished background job. Pass "
         "``job_id`` to select a job, or omit it to use the latest finished "
-        "job from agy_sessions. Running jobs should be inspected with "
-        "agy_status / agy_read first."
+        "job from agy_sessions. Set ``include_events=true`` to also return "
+        "stored events; otherwise use agy_read for the full event log."
     ),
 )
-def agy_result_tool(job_id: str | None = None) -> ResultToolResponse:
-    config, safety, _store_, supervisor = _ensure_state()
+def agy_result_tool(
+    job_id: str | None = None,
+    include_events: bool = False,
+    since: int = 0,
+) -> ResultToolResponse:
+    _config, safety, _store_, supervisor = _ensure_state()
     selected_job_id = job_id
     if selected_job_id is not None:
         err = _validate_job_id(safety, selected_job_id)
         if err is not None:
             return _wrapper_failure(safety, ValueError(err), ResultToolResponse)
+    if since < 0:
+        return _wrapper_failure(
+            safety,
+            ValueError("since must be a non-negative integer"),
+            ResultToolResponse,
+            job_id=selected_job_id,
+            since=since,
+        )
 
     try:
         if selected_job_id is None:
-            records = supervisor.list_sessions(limit=200)
-            record = next(
-                (r for r in records if r.status in _RESULT_JOB_STATUSES),
-                None,
-            )
-            if record is None:
+            records = [
+                record
+                for record in supervisor.list_sessions(limit=None)
+                if record.status in _RESULT_JOB_STATUSES
+            ]
+            if not records:
                 return _wrapper_failure(
                     safety,
                     ValueError("no finished jobs found; run agy_sessions to inspect recent jobs"),
                     ResultToolResponse,
                 )
+            record = max(records, key=_job_record_recency)
             selected_job_id = record.job_id
         else:
             record = supervisor.status(selected_job_id)
@@ -728,9 +760,13 @@ def agy_result_tool(job_id: str | None = None) -> ResultToolResponse:
             )
 
         events = supervisor.read_events(selected_job_id)
-        payload = [event.model_dump(mode="json") for event in events]
+        payload = [
+            event.model_dump(mode="json")
+            for event in (events[since:] if include_events else [])
+        ]
         result_text = _result_text_from_events(
             events,
+            status=record.status,
             fallback=record.error,
             safety=safety,
         )
@@ -747,6 +783,8 @@ def agy_result_tool(job_id: str | None = None) -> ResultToolResponse:
         job_id=selected_job_id,
         record=record,
         result_text=result_text,
+        include_events=include_events,
+        since=since,
         events=payload,
         count=len(payload),
     )

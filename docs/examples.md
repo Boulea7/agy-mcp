@@ -87,7 +87,7 @@ print("kicked off", job_id)
 #   {"success": True, "record": {... JobRecord fields incl. artifacts ...}}
 status = agy_status(job_id)
 record = status["record"]
-if record["status"] in {"completed", "failed", "cancelled", "upstream_error"}:
+if record["status"] in {"completed", "failed", "cancelled"}:
     result = agy_result(job_id)
     print(result["result_text"])
     out = agy_read(job_id, translate="claude")

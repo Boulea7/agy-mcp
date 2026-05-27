@@ -483,6 +483,8 @@ class ResultToolResponse(_DictLikeEnvelope):
     job_id: str | None = None
     record: JobRecord | None = None
     result_text: str = ""
+    include_events: bool = False
+    since: int | None = None
     events: list[dict[str, Any]] = Field(default_factory=list)
     count: int = 0
 

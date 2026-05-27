@@ -173,7 +173,7 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> bool:
 def test_eleven_tools_registered():
     """The documented agy tool set must all live on the FastMCP instance.
 
-    Historically ten tools; v0.1.8 added ``agy_result`` as the eleventh.
+    The metadata surface currently includes ``agy_result`` as the eleventh tool.
     """
 
     expected = {
@@ -325,7 +325,12 @@ def test_agy_start_status_read_cycle(reset_state, tmp_path: Path):
     assert result["job_id"] == job_id
     assert result["record"]["status"] == "completed"
     assert result["result_text"] == "hi from mcp"
-    assert result["count"] == 3
+    assert result["count"] == 0
+    assert result["events"] == []
+
+    result_with_events = server.agy_result_tool(job_id, include_events=True)
+    assert result_with_events["success"] is True
+    assert result_with_events["count"] == 3
 
 
 def test_agy_status_unknown_returns_structured_failure(reset_state):
@@ -363,10 +368,33 @@ def test_agy_result_without_job_id_uses_latest_finished_job(reset_state, tmp_pat
     assert out["result_text"] == "hi from mcp"
 
 
+def test_agy_result_uses_terminal_result_text_for_cancelled_jobs(reset_state):
+    record = reset_state.store.create_job(job_id="job_cancelled")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="assistant", text="partial assistant output"),
+    )
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="result", subtype="cancelled", text="cancelled by user"),
+    )
+    reset_state.store.finalize_job(record.job_id, status="cancelled", exit_code=-15)
+
+    out = server.agy_result_tool(record.job_id)
+    assert out["success"] is True
+    assert out["result_text"] == "cancelled by user"
+
+
 def test_agy_result_without_finished_jobs_returns_structured_failure(reset_state):
     out = server.agy_result_tool()
     assert out["success"] is False
     assert "no finished jobs" in (out["error"] or "")
+
+
+def test_agy_result_rejects_negative_since(reset_state):
+    out = server.agy_result_tool("job_does_not_exist_12345", since=-1)
+    assert out["success"] is False
+    assert "since" in (out["error"] or "")
 
 
 def test_agy_read_rejects_invalid_job_id_without_echo(reset_state):
@@ -1349,6 +1377,8 @@ def test_all_tool_output_models_round_trip_json(reset_state):
             job_id="job_roundtrip",
             record=JobRecord(job_id="job_roundtrip", status="completed"),
             result_text="ok",
+            include_events=True,
+            since=0,
             events=[{"type": "assistant", "text": "ok"}],
             count=1,
         ),
