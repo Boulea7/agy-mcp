@@ -198,6 +198,14 @@ def test_resolve_job_reference_rejects_ambiguous_prefix(tmp_session_root: Path):
         store.resolve_job_reference("job_shared")
 
 
+def test_resolve_job_reference_rejects_bare_prefix(tmp_session_root: Path):
+    store = SessionStore(tmp_session_root)
+    store.create_job(job_id="job_shared_alpha")
+
+    with pytest.raises(ValueError, match="job_id reference"):
+        store.resolve_job_reference("job_")
+
+
 def test_get_job_missing_returns_none(tmp_session_root: Path):
     store = SessionStore(tmp_session_root)
     assert store.get_job("job_doesnotexist") is None

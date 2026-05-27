@@ -557,6 +557,37 @@ def test_job_tools_reject_ambiguous_job_id_prefix(reset_state):
     assert out["record"] is None
 
 
+def test_job_tools_reject_bare_job_id_prefix(reset_state):
+    reset_state.store.create_job(job_id="job_bare_prefix_target")
+
+    out = server.agy_status_tool("job_")
+
+    assert out["success"] is False
+    assert out["record"] is None
+    assert "^job_[A-Za-z0-9_-]{1,80}$" in (out["error"] or "")
+
+
+def test_job_tools_return_structured_error_when_prefix_lookup_fails(
+    reset_state,
+    monkeypatch,
+):
+    def _raise_lookup_error(reference: str):
+        raise OSError(f"lookup failed for {reference}")
+
+    monkeypatch.setattr(
+        reset_state.store,
+        "resolve_job_reference",
+        _raise_lookup_error,
+    )
+
+    out = server.agy_status_tool("job_lookup_failure")
+
+    assert out["success"] is False
+    assert out["record"] is None
+    assert "job_id reference lookup failed" in (out["error"] or "")
+    assert "job_lookup_failure" in (out["error"] or "")
+
+
 def test_agy_sessions_lists_recent_jobs(reset_state, tmp_path: Path):
     started = server.agy_start_tool(PROMPT="hi", cd=str(tmp_path))
     job_id = started["job_id"]

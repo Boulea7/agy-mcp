@@ -38,7 +38,7 @@ JOB_ID_PREFIX = "job_"
 # anything that could traverse out of the store root. Generated ids satisfy
 # this regex (see generate_job_id).
 _JOB_ID_RE = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
-_JOB_ID_PREFIX_RE = re.compile(r"^job_[A-Za-z0-9_-]{0,80}$")
+_JOB_ID_PREFIX_RE = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
 
 
 def generate_job_id() -> str:
@@ -353,13 +353,14 @@ class SessionStore:
         if exact is not None:
             return exact
 
-        matches = [
-            record for record in self.list_jobs(limit=None)
-            if record.job_id.startswith(reference)
-        ]
-        if len(matches) > 1:
-            raise ValueError("job_id reference is ambiguous; pass a longer job_id")
-        return matches[0] if matches else None
+        match: JobRecord | None = None
+        for record in self.list_jobs(limit=None):
+            if not record.job_id.startswith(reference):
+                continue
+            if match is not None:
+                raise ValueError("job_id reference is ambiguous; pass a longer job_id")
+            match = record
+        return match
 
     # ------------------------------------------------------------------
     # Internals

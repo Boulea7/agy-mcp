@@ -90,7 +90,7 @@ _gemini_adapter: GeminiCliBackend | None = None
 # (Phase 5 R3 security P2).
 _MAX_JOB_ID_LEN = 84
 _JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
-_JOB_ID_REFERENCE_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{0,80}$")
+_JOB_ID_REFERENCE_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
 _RESULT_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "upstream_error"})
 _MAX_SESSION_ID_LEN = 96
 # Conservative charset for SESSION_ID; mirrors models._SESSION_ID_RE so
@@ -326,7 +326,7 @@ def _validate_job_id_reference(safety: SafetyPolicy, reference: str) -> str | No
         )
     if not _JOB_ID_REFERENCE_PATTERN.fullmatch(reference):
         return safety.redact(
-            "job_id must match ^job_[A-Za-z0-9_-]{0,80}$",
+            "job_id must match ^job_[A-Za-z0-9_-]{1,80}$",
         )
     if safety.redact(reference) != reference:
         return safety.redact("job_id must not contain secret-shaped text")
@@ -347,6 +347,8 @@ def _resolve_job_id_reference(
         record = store.resolve_job_reference(reference)
     except ValueError as exc:
         return None, safety.redact(str(exc))
+    except Exception as exc:
+        return None, safety.redact(f"job_id reference lookup failed: {exc}")
     if record is not None:
         return record.job_id, None
     # Preserve the old exact-id not-found path for callers that pass a full
