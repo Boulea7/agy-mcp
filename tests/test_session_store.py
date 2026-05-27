@@ -181,6 +181,23 @@ def test_find_by_session_id_returns_most_recent(tmp_session_root: Path):
     assert found.job_id == newer.job_id
 
 
+def test_resolve_job_reference_accepts_exact_id_or_unique_prefix(tmp_session_root: Path):
+    store = SessionStore(tmp_session_root)
+    record = store.create_job(job_id="job_prefix_target")
+
+    assert store.resolve_job_reference(record.job_id) == record
+    assert store.resolve_job_reference("job_prefix_tar") == record
+
+
+def test_resolve_job_reference_rejects_ambiguous_prefix(tmp_session_root: Path):
+    store = SessionStore(tmp_session_root)
+    store.create_job(job_id="job_shared_alpha")
+    store.create_job(job_id="job_shared_beta")
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        store.resolve_job_reference("job_shared")
+
+
 def test_get_job_missing_returns_none(tmp_session_root: Path):
     store = SessionStore(tmp_session_root)
     assert store.get_job("job_doesnotexist") is None

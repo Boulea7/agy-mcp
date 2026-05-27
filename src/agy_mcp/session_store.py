@@ -38,6 +38,7 @@ JOB_ID_PREFIX = "job_"
 # anything that could traverse out of the store root. Generated ids satisfy
 # this regex (see generate_job_id).
 _JOB_ID_RE = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
+_JOB_ID_PREFIX_RE = re.compile(r"^job_[A-Za-z0-9_-]{0,80}$")
 
 
 def generate_job_id() -> str:
@@ -60,6 +61,14 @@ def _validate_job_id(job_id: str) -> str:
             f"invalid job_id {job_id!r}: must match {_JOB_ID_RE.pattern}"
         )
     return job_id
+
+
+def _validate_job_reference(reference: str) -> str:
+    if not isinstance(reference, str) or not _JOB_ID_PREFIX_RE.fullmatch(reference):
+        raise ValueError(
+            f"invalid job_id reference {reference!r}: must match {_JOB_ID_PREFIX_RE.pattern}"
+        )
+    return reference
 
 
 @dataclass(slots=True)
@@ -330,6 +339,27 @@ class SessionStore:
             if record.session_id == session_id:
                 return record
         return None
+
+    def resolve_job_reference(self, reference: str) -> JobRecord | None:
+        """Resolve an exact job id or unique job-id prefix to a JobRecord.
+
+        This is intentionally read-only and never creates missing job
+        directories. Exact IDs keep their old behaviour through ``get_job``;
+        shorter prefixes must uniquely identify a stored record.
+        """
+
+        reference = _validate_job_reference(reference)
+        exact = self.get_job(reference)
+        if exact is not None:
+            return exact
+
+        matches = [
+            record for record in self.list_jobs(limit=None)
+            if record.job_id.startswith(reference)
+        ]
+        if len(matches) > 1:
+            raise ValueError("job_id reference is ambiguous; pass a longer job_id")
+        return matches[0] if matches else None
 
     # ------------------------------------------------------------------
     # Internals

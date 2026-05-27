@@ -101,6 +101,11 @@ If the job hangs you can `agy_cancel(job_id)` — the supervisor sends
 `SIGTERM` to the process group, waits a grace window, then `SIGKILL`s
 the leftover.
 
+For `agy_status`, `agy_read`, `agy_result`, and `agy_cancel`, the `job_id`
+argument may be the full id or a unique prefix such as `job_177986`. If the
+prefix matches more than one stored job, the tool returns a structured
+`success=false` ambiguity error rather than guessing.
+
 ---
 
 ## 4. Multi-turn continuation

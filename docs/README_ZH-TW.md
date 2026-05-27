@@ -122,10 +122,10 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 | `agy` | 同步一次性呼叫（PROMPT / cd / sandbox / SESSION_ID + `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`） |
 | `agy_continue` | 延續既有 `SESSION_ID` |
 | `agy_start` | 啟動背景長任務，立即回傳 `job_id` |
-| `agy_status` | 查詢 job 狀態：running / completed / failed / cancelled / upstream_error |
-| `agy_read` | 讀取 job 事件流（raw / claude / codex 三種協定） |
-| `agy_result` | 取得已完成 job 的結果；不傳 `job_id` 時回傳最近完成任務 |
-| `agy_cancel` | 跨平台 process group 終止 |
+| `agy_status` | 查詢 job 狀態：running / completed / failed / cancelled / upstream_error；`job_id` 可使用唯一前綴 |
+| `agy_read` | 讀取 job 事件流（raw / claude / codex 三種協定）；`job_id` 可使用唯一前綴 |
+| `agy_result` | 取得已完成 job 的結果；不傳 `job_id` 時回傳最近完成任務；傳參可使用唯一前綴 |
+| `agy_cancel` | 跨平台 process group 終止；`job_id` 可使用唯一前綴 |
 | `agy_sessions` | 列出最近 session |
 | `agy_doctor` | 環境 + 鑑權 + capability 探測（不洩漏 secrets） |
 | `agy_install_skill` | 將 SKILL bundle 安裝到 Claude / Codex / Antigravity 目錄 |
