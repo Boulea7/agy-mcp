@@ -94,6 +94,15 @@ unchanged. Pick the one that matches your downstream parser.
 - Long jobs expose `exit_code` and timing on the `JobRecord` returned
   by `agy_status`.
 
+## Review prompt profile
+
+For ordinary code review, call `agy(..., mode="review")` with a narrow
+scope and ask for P0/P1/P2 findings first. For high-risk changes, use
+the adversarial review prompt profile in `references/prompt-patterns.md`:
+ask Antigravity to attack correctness, security boundaries, concurrency,
+state persistence, rollback, and missing tests. Treat it as a stricter
+prompt, not a separate bridge mode.
+
 ## Detailed references
 
 - `references/usage.md` — full CLI flag reference, MCP tool surface,
