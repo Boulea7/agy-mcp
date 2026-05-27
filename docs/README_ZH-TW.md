@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 
 語言：[`简体中文`](../README.md) · [`English`](README_EN.md) · [`日本語`](README_JA.md)
 

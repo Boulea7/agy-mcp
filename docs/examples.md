@@ -166,8 +166,8 @@ out = agy_doctor(force_refresh=True)  # re-probes capabilities, no stale cache
 ```
 
 The doctor never leaks secrets — `auth` reports presence, never token
-contents, and `network_env` reports only proxy presence plus a redacted
-host/port summary. If terminal `agy` works but MCP calls hit
+contents, and `network_env` reports outbound proxy presence plus a redacted
+host/port summary and `NO_PROXY` length. If terminal `agy` works but MCP calls hit
 `User location is not supported`, compare this row against the shell
 where direct `agy` works.
 

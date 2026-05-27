@@ -270,7 +270,7 @@ class SessionStore:
                         CanonicalEvent(
                             type="error",
                             subtype="event_decode_failure",
-                            text=redact_text(stripped[:500]),
+                            text=redact_text(stripped)[:500],
                         )
                     )
         return events

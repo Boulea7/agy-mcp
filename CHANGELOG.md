@@ -29,6 +29,9 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 - `SessionStore.read_events` no longer follows a planted `events.jsonl`
   symlink and redacts malformed event-log lines before returning synthetic
   decode errors.
+- `agy_doctor` reports `NO_PROXY` separately instead of treating it as an
+  outbound proxy, preserving the missing-proxy diagnostic note when only
+  bypass rules are set.
 - Synchronous bridge warnings from routing and capability probes now pass
   through `SafetyPolicy.redact` before reaching the public response.
 
@@ -36,6 +39,8 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 - Simplified GitHub Actions to a single `required-ci` check that runs ruff,
   pytest, package build, and release-artifact audit on Python 3.12.
+- Added least-privilege workflow permissions and a non-required compatibility
+  matrix for Python 3.11/3.13 on Ubuntu and macOS.
 
 ### Documentation
 

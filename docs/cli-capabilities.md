@@ -6,7 +6,7 @@
 
 This table is the wrapper's local compatibility baseline, not a claim
 about the newest Google release channel. The official Antigravity CLI
-changelog's latest public entry checked on 2026-05-27 is `1.0.2`, with
+changelog's latest public entry checked on 2026-05-26 is `1.0.2`, with
 `1.0.1` fixing OAuth token persistence/auth hangs and `1.0.2` adding
 `AGY_CLI_HIDE_ACCOUNT_INFO` plus several sandbox/plugin/statusline fixes.
 Google's public docs cover the TUI/auth/install surface, but do not

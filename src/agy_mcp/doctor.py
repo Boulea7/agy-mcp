@@ -257,17 +257,23 @@ def _check_auth(safety: SafetyPolicy) -> DoctorCheck:
 def _check_network_env(safety: SafetyPolicy) -> DoctorCheck:
     """Summarise network-relevant env without exposing proxy credentials."""
 
-    proxy_names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY")
+    outbound_proxy_names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+    no_proxy_names = ("NO_PROXY",)
     locale_names = ("LANG", "LC_ALL", "LC_CTYPE")
     parts: list[str] = []
     proxy_present = False
 
-    for name in proxy_names:
+    for name in outbound_proxy_names:
         value = os.environ.get(name) or os.environ.get(name.lower())
         if not value:
             continue
         proxy_present = True
         parts.append(f"{name}={_summarise_proxy_value(value, safety)}")
+
+    for name in no_proxy_names:
+        value = os.environ.get(name) or os.environ.get(name.lower())
+        if value:
+            parts.append(f"{name}=set(len={len(value)})")
 
     if not proxy_present:
         parts.append("proxy_env=none")

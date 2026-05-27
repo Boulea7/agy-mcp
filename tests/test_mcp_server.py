@@ -449,6 +449,33 @@ def test_doctor_network_env_summarises_proxy_without_credentials(
     assert "pass" not in check.detail
 
 
+def test_doctor_network_env_does_not_treat_no_proxy_as_outbound_proxy(
+    reset_state, monkeypatch, tmp_path,
+):
+    from agy_mcp import doctor as doc_mod
+
+    for name in (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    check = doc_mod._check_network_env(SafetyPolicy())
+
+    assert check.name == "network_env"
+    assert check.ok is True
+    assert "NO_PROXY=set(len=" in check.detail
+    assert "proxy_env=none" in check.detail
+    assert "note=MCP process may not inherit shell-only proxy/VPN variables" in (
+        check.detail
+    )
+
+
 def test_agy_install_skill_writes_scaffold(reset_state, tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
