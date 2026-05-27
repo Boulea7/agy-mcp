@@ -514,6 +514,80 @@ def test_agy_cancel_rejects_invalid_job_id_without_echo(reset_state):
     assert "ctrlbytes" not in payload
 
 
+def test_job_tools_accept_unique_job_id_prefix(reset_state):
+    record = reset_state.store.create_job(job_id="job_prefix_server_target")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="assistant", text="prefix resolved"),
+    )
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="result", subtype="success"),
+    )
+    reset_state.store.finalize_job(record.job_id, status="completed", exit_code=0)
+
+    status = server.agy_status_tool("job_prefix_server")
+    assert status["success"] is True
+    assert status["record"]["job_id"] == record.job_id
+
+    read = server.agy_read_tool("job_prefix_server")
+    assert read["success"] is True
+    assert read["job_id"] == record.job_id
+    assert read["count"] == 2
+
+    result = server.agy_result_tool("job_prefix_server")
+    assert result["success"] is True
+    assert result["job_id"] == record.job_id
+    assert result["result_text"] == "prefix resolved"
+
+    cancel = server.agy_cancel_tool("job_prefix_server")
+    assert cancel["success"] is True
+    assert cancel["job_id"] == record.job_id
+    assert cancel["signalled"] is False
+
+
+def test_job_tools_reject_ambiguous_job_id_prefix(reset_state):
+    reset_state.store.create_job(job_id="job_prefix_ambiguous_alpha")
+    reset_state.store.create_job(job_id="job_prefix_ambiguous_beta")
+
+    out = server.agy_status_tool("job_prefix_ambiguous")
+
+    assert out["success"] is False
+    assert "ambiguous" in (out["error"] or "")
+    assert out["record"] is None
+
+
+def test_job_tools_reject_bare_job_id_prefix(reset_state):
+    reset_state.store.create_job(job_id="job_bare_prefix_target")
+
+    out = server.agy_status_tool("job_")
+
+    assert out["success"] is False
+    assert out["record"] is None
+    assert "^job_[A-Za-z0-9_-]{1,80}$" in (out["error"] or "")
+
+
+def test_job_tools_return_structured_error_when_prefix_lookup_fails(
+    reset_state,
+    monkeypatch,
+):
+    def _raise_lookup_error(reference: str):
+        raise OSError(f"lookup failed for {reference}")
+
+    monkeypatch.setattr(
+        reset_state.store,
+        "resolve_job_reference",
+        _raise_lookup_error,
+    )
+
+    out = server.agy_status_tool("job_lookup_failure")
+
+    assert out["success"] is False
+    assert out["record"] is None
+    assert "job_id reference lookup failed" in (out["error"] or "")
+    assert "job_lookup_failure" in (out["error"] or "")
+
+
 def test_agy_sessions_lists_recent_jobs(reset_state, tmp_path: Path):
     started = server.agy_start_tool(PROMPT="hi", cd=str(tmp_path))
     job_id = started["job_id"]

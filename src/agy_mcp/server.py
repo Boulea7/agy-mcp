@@ -90,6 +90,7 @@ _gemini_adapter: GeminiCliBackend | None = None
 # (Phase 5 R3 security P2).
 _MAX_JOB_ID_LEN = 84
 _JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
+_JOB_ID_REFERENCE_PATTERN = _JOB_ID_PATTERN
 _RESULT_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "upstream_error"})
 _MAX_SESSION_ID_LEN = 96
 # Conservative charset for SESSION_ID; mirrors models._SESSION_ID_RE so
@@ -312,6 +313,47 @@ def _validate_job_id(safety: SafetyPolicy, job_id: str) -> str | None:
     if safety.redact(job_id) != job_id:
         return safety.redact("job_id must not contain secret-shaped text")
     return None
+
+
+def _validate_job_id_reference(safety: SafetyPolicy, reference: str) -> str | None:
+    """Return a redacted error string if a job id or prefix is invalid."""
+
+    if not reference:
+        return safety.redact("job_id is required")
+    if len(reference) > _MAX_JOB_ID_LEN:
+        return safety.redact(
+            f"job_id exceeds {_MAX_JOB_ID_LEN} chars; refusing to look up",
+        )
+    if not _JOB_ID_REFERENCE_PATTERN.fullmatch(reference):
+        return safety.redact(
+            "job_id must match ^job_[A-Za-z0-9_-]{1,80}$",
+        )
+    if safety.redact(reference) != reference:
+        return safety.redact("job_id must not contain secret-shaped text")
+    return None
+
+
+def _resolve_job_id_reference(
+    safety: SafetyPolicy,
+    store: SessionStore,
+    reference: str,
+) -> tuple[str | None, str | None]:
+    """Resolve an exact job id or unique prefix; return ``(job_id, error)``."""
+
+    err = _validate_job_id_reference(safety, reference)
+    if err is not None:
+        return None, err
+    try:
+        record = store.resolve_job_reference(reference)
+    except ValueError as exc:
+        return None, safety.redact(str(exc))
+    except Exception as exc:
+        return None, safety.redact(f"job_id reference lookup failed: {exc}")
+    if record is not None:
+        return record.job_id, None
+    # Preserve the old not-found path for callers that pass a well-formed
+    # job_id which has not been created in this session store.
+    return reference, None
 
 
 def _validate_session_id(safety: SafetyPolicy, session_id: str) -> str | None:
@@ -602,15 +644,18 @@ def agy_start_tool(
 
 @mcp.tool(
     name="agy_status",
-    description="Return the JobRecord (status, exit code, error, timestamps) for a job_id.",
+    description=(
+        "Return the JobRecord (status, exit code, error, timestamps) for a "
+        "job_id or unique job-id prefix."
+    ),
 )
 def agy_status_tool(job_id: str) -> StatusToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
-    err = _validate_job_id(safety, job_id)
+    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, job_id)
     if err is not None:
         return _wrapper_failure(safety, ValueError(err), StatusToolResponse)
     try:
-        record = supervisor.status(job_id)
+        record = supervisor.status(resolved_job_id or job_id)
     except Exception as exc:  # noqa: BLE001
         return _wrapper_failure(safety, exc, StatusToolResponse)
     if record is None:
@@ -619,7 +664,7 @@ def agy_status_tool(job_id: str) -> StatusToolResponse:
         # failed. (Phase 5 R1 arch P1.3)
         return _wrapper_failure(
             safety,
-            ValueError(f"job_id {job_id!r} not found"),
+            ValueError(f"job_id {resolved_job_id or job_id!r} not found"),
             StatusToolResponse,
         )
     return StatusToolResponse(success=True, record=record)
@@ -635,7 +680,8 @@ def agy_status_tool(job_id: str) -> StatusToolResponse:
     description=(
         "Read events from a job's event log. ``since`` is the 0-based offset; "
         "``translate`` may be 'raw', 'claude', or 'codex' to wire-format the "
-        "events (default returns canonical events as dicts)."
+        "events (default returns canonical events as dicts). ``job_id`` may be "
+        "a full id or unique prefix."
     ),
 )
 def agy_read_tool(
@@ -644,7 +690,7 @@ def agy_read_tool(
     translate: OutputProtocol | None = None,
 ) -> ReadToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
-    err = _validate_job_id(safety, job_id)
+    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, job_id)
     if err is not None:
         return _wrapper_failure(
             safety, ValueError(err), ReadToolResponse,
@@ -658,33 +704,33 @@ def agy_read_tool(
             since=since,
         )
     try:
-        record = supervisor.status(job_id)
+        record = supervisor.status(resolved_job_id or job_id)
     except Exception as exc:  # noqa: BLE001
-        return _wrapper_failure(safety, exc, ReadToolResponse, job_id=job_id)
+        return _wrapper_failure(safety, exc, ReadToolResponse, job_id=resolved_job_id)
     if record is None:
         return _wrapper_failure(
             safety,
-            ValueError(f"job_id {job_id!r} not found"),
+            ValueError(f"job_id {resolved_job_id or job_id!r} not found"),
             ReadToolResponse,
-            job_id=job_id,
+            job_id=resolved_job_id,
         )
     try:
         if translate is None:
-            events = supervisor.read_events(job_id, since=since)
+            events = supervisor.read_events(resolved_job_id or job_id, since=since)
             payload: list[dict[str, Any]] = [
                 e.model_dump(mode="json") for e in events
             ]
         else:
             payload = supervisor.read_translated(
-                job_id, since=since, protocol=translate,
+                resolved_job_id or job_id, since=since, protocol=translate,
             )
     except Exception as exc:  # noqa: BLE001
         return _wrapper_failure(
-            safety, exc, ReadToolResponse, job_id=job_id, since=since,
+            safety, exc, ReadToolResponse, job_id=resolved_job_id, since=since,
         )
     return ReadToolResponse(
         success=True,
-        job_id=job_id,
+        job_id=resolved_job_id or job_id,
         since=since,
         translate=translate,
         events=payload,
@@ -701,9 +747,10 @@ def agy_read_tool(
     name="agy_result",
     description=(
         "Return the captured output for a finished background job. Pass "
-        "``job_id`` to select a job, or omit it to use the latest finished "
-        "job from agy_sessions. Set ``include_events=true`` to also return "
-        "stored events; otherwise use agy_read for the full event log."
+        "``job_id`` (full id or unique prefix) to select a job, or omit it "
+        "to use the latest finished job from agy_sessions. Set "
+        "``include_events=true`` to also return stored events; otherwise use "
+        "agy_read for the full event log."
     ),
 )
 def agy_result_tool(
@@ -714,7 +761,7 @@ def agy_result_tool(
     _config, safety, _store_, supervisor = _ensure_state()
     selected_job_id = job_id
     if selected_job_id is not None:
-        err = _validate_job_id(safety, selected_job_id)
+        selected_job_id, err = _resolve_job_id_reference(safety, _store_, selected_job_id)
         if err is not None:
             return _wrapper_failure(safety, ValueError(err), ResultToolResponse)
     if since < 0:
@@ -808,27 +855,27 @@ def agy_result_tool(
 @mcp.tool(
     name="agy_cancel",
     description=(
-        "Signal a running job to stop. Returns ``success=True, signalled=True`` "
-        "if the worker was alive, ``signalled=False`` if it was unknown / "
-        "already finished."
+        "Signal a running job to stop by full job_id or unique prefix. Returns "
+        "``success=True, signalled=True`` if the worker was alive, "
+        "``signalled=False`` if it was unknown / already finished."
     ),
 )
 def agy_cancel_tool(job_id: str) -> CancelToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
-    err = _validate_job_id(safety, job_id)
+    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, job_id)
     if err is not None:
         return _wrapper_failure(
             safety, ValueError(err), CancelToolResponse,
         )
     try:
-        signalled = supervisor.cancel(job_id)
+        signalled = supervisor.cancel(resolved_job_id or job_id)
     except Exception as exc:  # noqa: BLE001
         return _wrapper_failure(
-            safety, exc, CancelToolResponse, job_id=job_id,
+            safety, exc, CancelToolResponse, job_id=resolved_job_id,
         )
     return CancelToolResponse(
         success=True,
-        job_id=safety.redact(job_id),
+        job_id=safety.redact(resolved_job_id or job_id),
         signalled=signalled,
     )
 
