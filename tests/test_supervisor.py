@@ -24,6 +24,7 @@ from agy_mcp.supervisor import (
     StoreEventSink,
     Supervisor,
     _migrate_if_present,
+    _process_start_signature,
     _worktree_slug,
 )
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
@@ -585,6 +586,28 @@ def test_status_reconciles_foreign_reused_pid(tmp_path: Path, monkeypatch):
     assert public.status == "failed"
     assert public.error == _RECONCILE_ERROR
     assert supervisor.store.get_job(record.job_id).status == "failed"
+
+
+def test_process_start_signature_uses_timezone_stable_ps_env(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="Mon Jan  1 00:00:00 2024\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("agy_mcp.supervisor.subprocess.run", _fake_run)
+
+    assert _process_start_signature(123) == "ps-lstart:Mon Jan  1 00:00:00 2024"
+    assert captured["cmd"] == ["ps", "-o", "lstart=", "-p", "123"]
+    assert isinstance(captured["env"], dict)
+    assert captured["env"]["TZ"] == "UTC"
+    assert captured["env"]["LC_ALL"] == "C"
 
 
 def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):

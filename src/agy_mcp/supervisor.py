@@ -766,6 +766,7 @@ def _process_start_signature(pid: int) -> str | None:
             ["ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True,
             check=False,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
             text=True,
             timeout=1,
         )
