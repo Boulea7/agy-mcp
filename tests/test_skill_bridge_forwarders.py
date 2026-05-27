@@ -92,5 +92,4 @@ def test_codex_forwarder_uses_codex_specific_copy():
 
     assert "Codex skill" in raw
     assert "Codex agent" in raw
-    assert "Claude skill" not in raw
-    assert "Claude agent" not in raw
+    assert "Claude" not in raw
