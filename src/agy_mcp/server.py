@@ -720,9 +720,10 @@ def agy_result_tool(
     try:
         if selected_job_id is None:
             records = [
-                record
+                current
                 for record in supervisor.list_sessions(limit=None)
-                if record.status in _RESULT_JOB_STATUSES
+                if (current := supervisor.status(record.job_id)) is not None
+                and current.status in _RESULT_JOB_STATUSES
             ]
             if not records:
                 return _wrapper_failure(

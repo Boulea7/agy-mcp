@@ -368,6 +368,20 @@ def test_agy_result_without_job_id_uses_latest_finished_job(reset_state, tmp_pat
     assert out["result_text"] == "hi from mcp"
 
 
+def test_agy_result_without_job_id_reconciles_stale_running_record(reset_state):
+    record = reset_state.store.create_job(job_id="job_stale_running")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="result", subtype="failed", text="worker stopped before finalize"),
+    )
+
+    out = server.agy_result_tool()
+    assert out["success"] is True
+    assert out["job_id"] == record.job_id
+    assert out["record"]["status"] == "failed"
+    assert out["result_text"] == "worker stopped before finalize"
+
+
 def test_agy_result_uses_terminal_result_text_for_cancelled_jobs(reset_state):
     record = reset_state.store.create_job(job_id="job_cancelled")
     reset_state.store.append_event(
