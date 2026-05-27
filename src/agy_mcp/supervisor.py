@@ -36,6 +36,7 @@ Phase 4 review invariants from R3 hand-off:
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import tempfile
 import threading
@@ -166,6 +167,7 @@ class Supervisor:
         self._adapter_factory = adapter_factory or self._default_adapter_factory
         self._jobs: dict[str, _JobHandle] = {}
         self._lock = threading.RLock()
+        self._instance_id = secrets.token_hex(8)
         # Cap concurrent worker threads so a flood of ``agy_start`` calls
         # can't spin up an unbounded number of subprocesses + reader
         # threads. (Phase 5 R2 security P1-3.)
@@ -345,6 +347,13 @@ class Supervisor:
                 cwd=self._response_cwd(effective_request.cwd),
                 request=_serialise_request(effective_request, self.safety),
                 backend=backend_name,
+                pid=os.getpid(),
+                extra={
+                    "supervisor": {
+                        "pid": os.getpid(),
+                        "instance_id": self._instance_id,
+                    }
+                },
             )
         except (FileExistsError, TypeError, ValueError) as exc:
             self._job_slots.release()  # release the slot we just took
@@ -466,6 +475,8 @@ class Supervisor:
             if fresh is None:
                 return self._public_record(record)
             if fresh.status != "running":
+                return self._public_record(fresh)
+            if _owned_by_foreign_live_supervisor(fresh, self._instance_id):
                 return self._public_record(fresh)
             finalised = self.store.finalize_job(
                 job_id,
@@ -709,6 +720,37 @@ def _utc_now() -> str:
     from agy_mcp.utils import utc_now_iso
 
     return utc_now_iso()
+
+
+def _owned_by_foreign_live_supervisor(
+    record: JobRecord,
+    current_instance_id: str,
+) -> bool:
+    """Return True when another live supervisor owns the running record."""
+
+    owner = record.extra.get("supervisor")
+    if not isinstance(owner, dict):
+        return False
+    if owner.get("instance_id") == current_instance_id:
+        return False
+    pid = owner.get("pid")
+    return isinstance(pid, int) and _pid_exists(pid)
+
+
+def _pid_exists(pid: int) -> bool:
+    """Return whether ``pid`` appears alive on this host."""
+
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _migrate_if_present(src: Path, dst: Path) -> None:

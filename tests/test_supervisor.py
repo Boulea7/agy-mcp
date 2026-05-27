@@ -19,7 +19,13 @@ from agy_mcp.models import (
 )
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
-from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present, _worktree_slug
+from agy_mcp.supervisor import (
+    _RECONCILE_ERROR,
+    StoreEventSink,
+    Supervisor,
+    _migrate_if_present,
+    _worktree_slug,
+)
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
 
 # ---------------------------------------------------------------------------
@@ -481,6 +487,43 @@ def test_status_marks_crashed_worker_as_failed(tmp_path: Path):
     record = supervisor.status(response.job_id)
     assert record.status == "failed"
     assert "simulated crash" in (record.error or "")
+
+
+def test_status_keeps_foreign_live_supervisor_job_running(tmp_path: Path):
+    """A second process must not mark another live supervisor's job failed."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_live",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={"supervisor": {"pid": os.getpid(), "instance_id": "foreign"}},
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "running"
+    assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):
+    """A dead foreign owner is still reconciled as a stale running job."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_dead",
+        cwd=str(tmp_path),
+        pid=999_999_999,
+        extra={"supervisor": {"pid": 999_999_999, "instance_id": "foreign"}},
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
 
 
 # ---------------------------------------------------------------------------
