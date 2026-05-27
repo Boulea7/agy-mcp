@@ -25,6 +25,7 @@ from agy_mcp.supervisor import (
     Supervisor,
     _linux_process_start_signature,
     _migrate_if_present,
+    _pid_exists,
     _process_start_signature,
     _worktree_slug,
 )
@@ -631,6 +632,27 @@ def test_linux_process_start_signature_uses_boot_id_and_start_ticks(tmp_path: Pa
     assert _linux_process_start_signature(123, proc_root=proc_root) == (
         "proc-stat:boot-id-123:42424242"
     )
+
+
+def test_pid_exists_uses_non_destructive_windows_probe(monkeypatch):
+    calls: list[int] = []
+
+    def _forbid_signal_probe(pid: int, signal: int) -> None:
+        raise AssertionError("os.kill must not be used for Windows PID probes")
+
+    def _fake_windows_pid_exists(pid: int) -> bool:
+        calls.append(pid)
+        return True
+
+    monkeypatch.setattr("agy_mcp.supervisor.os.name", "nt")
+    monkeypatch.setattr("agy_mcp.supervisor.os.kill", _forbid_signal_probe)
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_pid_exists",
+        _fake_windows_pid_exists,
+    )
+
+    assert _pid_exists(123) is True
+    assert calls == [123]
 
 
 def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):

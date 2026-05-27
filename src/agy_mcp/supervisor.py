@@ -807,6 +807,14 @@ def _pid_exists(pid: int) -> bool:
 
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_pid_exists(pid)
+    return _posix_pid_exists(pid)
+
+
+def _posix_pid_exists(pid: int) -> bool:
+    """Return whether ``pid`` exists using POSIX signal-0 semantics."""
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -816,6 +824,29 @@ def _pid_exists(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_pid_exists(pid: int) -> bool:
+    """Return whether ``pid`` exists on Windows without signalling it."""
+
+    try:
+        import ctypes
+    except ImportError:
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        return False
 
 
 def _migrate_if_present(src: Path, dst: Path) -> None:
