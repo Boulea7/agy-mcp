@@ -761,6 +761,9 @@ def _process_start_signature(pid: int) -> str | None:
 
     if pid <= 0:
         return None
+    linux_signature = _linux_process_start_signature(pid)
+    if linux_signature is not None:
+        return linux_signature
     try:
         result = subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(pid)],
@@ -776,6 +779,27 @@ def _process_start_signature(pid: int) -> str | None:
         return None
     started_at = result.stdout.strip()
     return f"ps-lstart:{started_at}" if started_at else None
+
+
+def _linux_process_start_signature(
+    pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+) -> str | None:
+    """Return Linux boot-id + process start ticks when procfs is available."""
+
+    try:
+        stat_text = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        boot_id = (
+            proc_root / "sys" / "kernel" / "random" / "boot_id"
+        ).read_text(encoding="utf-8").strip()
+        fields_after_comm = stat_text.rsplit(")", 1)[1].strip().split()
+        start_ticks = fields_after_comm[19]
+    except (IndexError, OSError):
+        return None
+    if not boot_id or not start_ticks:
+        return None
+    return f"proc-stat:{boot_id}:{start_ticks}"
 
 
 def _pid_exists(pid: int) -> bool:

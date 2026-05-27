@@ -23,6 +23,7 @@ from agy_mcp.supervisor import (
     _RECONCILE_ERROR,
     StoreEventSink,
     Supervisor,
+    _linux_process_start_signature,
     _migrate_if_present,
     _process_start_signature,
     _worktree_slug,
@@ -603,11 +604,33 @@ def test_process_start_signature_uses_timezone_stable_ps_env(monkeypatch):
 
     monkeypatch.setattr("agy_mcp.supervisor.subprocess.run", _fake_run)
 
-    assert _process_start_signature(123) == "ps-lstart:Mon Jan  1 00:00:00 2024"
-    assert captured["cmd"] == ["ps", "-o", "lstart=", "-p", "123"]
+    assert (
+        _process_start_signature(123_456_789)
+        == "ps-lstart:Mon Jan  1 00:00:00 2024"
+    )
+    assert captured["cmd"] == ["ps", "-o", "lstart=", "-p", "123456789"]
     assert isinstance(captured["env"], dict)
     assert captured["env"]["TZ"] == "UTC"
     assert captured["env"]["LC_ALL"] == "C"
+
+
+def test_linux_process_start_signature_uses_boot_id_and_start_ticks(tmp_path: Path):
+    proc_root = tmp_path / "proc"
+    proc_pid = proc_root / "123"
+    proc_boot = proc_root / "sys" / "kernel" / "random"
+    proc_pid.mkdir(parents=True)
+    proc_boot.mkdir(parents=True)
+    fields_after_comm = ["S"] + ["0"] * 19
+    fields_after_comm[19] = "42424242"
+    (proc_pid / "stat").write_text(
+        f"123 (python worker) {' '.join(fields_after_comm)}\n",
+        encoding="utf-8",
+    )
+    (proc_boot / "boot_id").write_text("boot-id-123\n", encoding="utf-8")
+
+    assert _linux_process_start_signature(123, proc_root=proc_root) == (
+        "proc-stat:boot-id-123:42424242"
+    )
 
 
 def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):
