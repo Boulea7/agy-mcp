@@ -90,7 +90,7 @@ _gemini_adapter: GeminiCliBackend | None = None
 # (Phase 5 R3 security P2).
 _MAX_JOB_ID_LEN = 84
 _JOB_ID_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
-_JOB_ID_REFERENCE_PATTERN = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
+_JOB_ID_REFERENCE_PATTERN = _JOB_ID_PATTERN
 _RESULT_JOB_STATUSES = frozenset({"completed", "failed", "cancelled", "upstream_error"})
 _MAX_SESSION_ID_LEN = 96
 # Conservative charset for SESSION_ID; mirrors models._SESSION_ID_RE so
@@ -351,11 +351,9 @@ def _resolve_job_id_reference(
         return None, safety.redact(f"job_id reference lookup failed: {exc}")
     if record is not None:
         return record.job_id, None
-    # Preserve the old exact-id not-found path for callers that pass a full
-    # well-formed id for a job that has not been created.
-    if _JOB_ID_PATTERN.fullmatch(reference):
-        return reference, None
-    return None, "job_id prefix did not match any known job"
+    # Preserve the old not-found path for callers that pass a well-formed
+    # job_id which has not been created in this session store.
+    return reference, None
 
 
 def _validate_session_id(safety: SafetyPolicy, session_id: str) -> str | None:
