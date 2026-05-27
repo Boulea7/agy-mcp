@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -168,6 +169,7 @@ class Supervisor:
         self._jobs: dict[str, _JobHandle] = {}
         self._lock = threading.RLock()
         self._instance_id = secrets.token_hex(8)
+        self._process_start_signature = _process_start_signature(os.getpid())
         # Cap concurrent worker threads so a flood of ``agy_start`` calls
         # can't spin up an unbounded number of subprocesses + reader
         # threads. (Phase 5 R2 security P1-3.)
@@ -341,19 +343,22 @@ class Supervisor:
                 ).touch()
 
         try:
+            owner = {
+                "pid": os.getpid(),
+                "instance_id": self._instance_id,
+            }
+            if self._process_start_signature is not None:
+                owner["process_start_signature"] = self._process_start_signature
             record = self.store.create_job(
                 job_id=resolved_job_id,
                 session_id=effective_request.session_id,
                 cwd=self._response_cwd(effective_request.cwd),
                 request=_serialise_request(effective_request, self.safety),
                 backend=backend_name,
+                # Jobs execute in worker threads owned by this supervisor
+                # process, so pid intentionally identifies the owner process.
                 pid=os.getpid(),
-                extra={
-                    "supervisor": {
-                        "pid": os.getpid(),
-                        "instance_id": self._instance_id,
-                    }
-                },
+                extra={"supervisor": owner},
             )
         except (FileExistsError, TypeError, ValueError) as exc:
             self._job_slots.release()  # release the slot we just took
@@ -734,7 +739,42 @@ def _owned_by_foreign_live_supervisor(
     if owner.get("instance_id") == current_instance_id:
         return False
     pid = owner.get("pid")
-    return isinstance(pid, int) and _pid_exists(pid)
+    if not isinstance(pid, int):
+        return False
+    signature = owner.get("process_start_signature")
+    if isinstance(signature, str) and signature:
+        return _pid_matches_start_signature(pid, signature)
+    return _pid_exists(pid)
+
+
+def _pid_matches_start_signature(pid: int, expected: str) -> bool:
+    """Return whether ``pid`` still has the recorded process identity."""
+
+    current = _process_start_signature(pid)
+    if current is None:
+        return _pid_exists(pid)
+    return current == expected
+
+
+def _process_start_signature(pid: int) -> str | None:
+    """Return a best-effort non-reusable process start signature."""
+
+    if pid <= 0:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    started_at = result.stdout.strip()
+    return f"ps-lstart:{started_at}" if started_at else None
 
 
 def _pid_exists(pid: int) -> bool:

@@ -304,6 +304,26 @@ def test_start_returns_running_envelope_and_completes(tmp_path: Path):
     assert [e.type for e in persisted] == ["system", "assistant", "result"]
 
 
+def test_start_records_supervisor_owner_signature(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "current-owner" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="hello", cwd=str(tmp_path)))
+
+    assert response.success is True
+    record = supervisor.store.get_job(response.job_id)
+    assert record is not None
+    assert record.pid == os.getpid()
+    assert record.extra["supervisor"] == {
+        "pid": os.getpid(),
+        "instance_id": supervisor._instance_id,
+        "process_start_signature": "current-owner",
+    }
+
+
 def test_start_redacts_request_snapshot(tmp_path: Path):
     events = [
         CanonicalEvent(type="assistant", text="ok"),
@@ -505,6 +525,66 @@ def test_status_keeps_foreign_live_supervisor_job_running(tmp_path: Path):
 
     assert public.status == "running"
     assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_keeps_foreign_live_supervisor_with_matching_signature(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A matching process signature prevents PID-reuse false positives."""
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "current-owner" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_live_signed",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={
+            "supervisor": {
+                "pid": os.getpid(),
+                "instance_id": "foreign",
+                "process_start_signature": "current-owner",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "running"
+    assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_reconciles_foreign_reused_pid(tmp_path: Path, monkeypatch):
+    """A reused PID must not keep a stale foreign job running forever."""
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "current-owner" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_reused_pid",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={
+            "supervisor": {
+                "pid": os.getpid(),
+                "instance_id": "foreign",
+                "process_start_signature": "previous-owner",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
 
 
 def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):
