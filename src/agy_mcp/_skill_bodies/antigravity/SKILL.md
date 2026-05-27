@@ -57,6 +57,11 @@ useful.
   (fix if cheap), `P3` (note for later).
 - **Skip nits.** Style issues that don't hurt readability are not
   worth flagging.
+- If the prompt asks for adversarial review, actively challenge the
+  change: look for data loss, auth or path-boundary mistakes, stale
+  state, races, retries, cancellation gaps, rollback hazards, release
+  drift, and missing tests. Say `no P0/P1 findings` only after checking
+  those paths.
 
 ## When the driving agent is in `execute` mode
 

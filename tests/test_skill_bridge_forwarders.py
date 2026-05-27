@@ -85,3 +85,11 @@ def test_template_skill_body_resolves_placeholder():
     templated = _template_skill_body(body)
     assert _VERSION_PLACEHOLDER not in templated
     assert f'"agy-mcp=={_AGY_MCP_VERSION}"' in templated
+
+
+def test_codex_forwarder_uses_codex_specific_copy():
+    raw = _forwarder_path("codex").read_text(encoding="utf-8")
+
+    assert "Codex skill" in raw
+    assert "Codex agent" in raw
+    assert "Claude" not in raw

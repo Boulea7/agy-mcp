@@ -85,6 +85,15 @@ under `SafetyPolicy`, and refuses destructive prompts even with
 `python -m agy_mcp.doctor`) reports the environment without leaking
 secrets.
 
+## Review prompt profile
+
+For ordinary code review, call `agy(..., mode="review")` with a narrow
+scope and ask for P0/P1/P2 findings first. For high-risk changes, use
+the adversarial review prompt profile in `references/prompt-patterns.md`:
+ask Antigravity to attack correctness, security boundaries, concurrency,
+state persistence, rollback, and missing tests. Treat it as a stricter
+prompt, not a separate bridge mode.
+
 ## Detailed references
 
 - `references/usage.md` — full CLI flag reference + MCP tool surface +
