@@ -65,10 +65,11 @@ python scripts/agy_bridge.py --cd "/proj" --SESSION_ID abc-123 \
   --PROMPT "Now propose a refactor."
 ```
 
-## Long jobs (start / status / read / cancel)
+## Long jobs (start / status / result / read / cancel)
 
 For tasks that exceed a single Claude turn, use the supervisor surface
-via the MCP tools `agy_start` / `agy_status` / `agy_read` / `agy_cancel`.
+via the MCP tools `agy_start` / `agy_status` / `agy_result` /
+`agy_read` / `agy_cancel`.
 See `references/usage.md` for full examples.
 
 ## Capability detection

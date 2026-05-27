@@ -16,9 +16,9 @@ others.
                            |
 +--------------------------v-------------------------------------+
 |  MCP server  (src/agy_mcp/server.py)                           |
-|  - 10 tools: agy, agy_start, agy_continue, agy_status,         |
-|    agy_read, agy_cancel, agy_sessions, agy_doctor,             |
-|    agy_install_skill, agy_purge                                |
+|  - 11 tools: agy, agy_start, agy_continue, agy_status,         |
+|    agy_read, agy_result, agy_cancel, agy_sessions,             |
+|    agy_doctor, agy_install_skill, agy_purge                    |
 |  - Singletons: config, safety, session_store, supervisor       |
 |  - Async tools wrap a per-loop CapacityLimiter (8 by default)  |
 +--------------------------+-------------------------------------+
@@ -185,6 +185,7 @@ on canonical events so future agy event types survive without a schema bump).
 | `agy_start` | no | Spawn a background job; returns `job_id` immediately |
 | `agy_status` | yes | `running` / `completed` / `failed` / `cancelled` + timing |
 | `agy_read` | yes | Stream events (raw or protocol-translated) + artifacts |
+| `agy_result` | yes | Return the captured output for a finished background job |
 | `agy_cancel` | yes | Process-group cancel (POSIX `killpg` / Windows `CTRL_BREAK_EVENT`) |
 | `agy_sessions` | yes | List recent jobs with mtime / status / cwd summary |
 | `agy_doctor` | yes | Environment + auth probe (no secrets); `force_refresh=True` after CLI upgrade |

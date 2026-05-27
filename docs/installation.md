@@ -123,7 +123,7 @@ command = "agymcp"
 
 ## 4. Install the SKILL bundle
 
-The MCP server makes 10 tools available, but the SKILL bundle teaches the
+The MCP server makes 11 tools available, but the SKILL bundle teaches the
 agent **when and how** to call them. Without it, callers have to discover
 the tool surface on their own.
 

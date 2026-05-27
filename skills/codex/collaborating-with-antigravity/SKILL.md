@@ -65,8 +65,8 @@ python scripts/agy_bridge.py --cd /proj --SESSION_ID abc-123 \
 ## Detached long jobs
 
 Codex projects that run long agent loops should prefer the MCP tool
-surface (`agy_start` / `agy_status` / `agy_read` / `agy_cancel` /
-`agy_sessions`) over polling the CLI in a shell loop. The supervisor
+surface (`agy_start` / `agy_status` / `agy_result` / `agy_read` /
+`agy_cancel` / `agy_sessions`) over polling the CLI in a shell loop. The supervisor
 handles worker thread lifecycle, log spooling, and cross-platform
 process-group cleanup.
 
