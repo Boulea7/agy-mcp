@@ -332,8 +332,8 @@ def _run_provider(
     timeout: int,
 ) -> tuple[str, str, int]:
     with (
-        tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stdout_file,
-        tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr_file,
+        tempfile.TemporaryFile(mode="w+b") as stdout_file,
+        tempfile.TemporaryFile(mode="w+b") as stderr_file,
     ):
         try:
             # argv is built from local config, validated for control chars, and
@@ -343,7 +343,6 @@ def _run_provider(
                 argv,
                 cwd=str(workdir),
                 env=env,
-                text=True,
                 stdout=stdout_file,
                 stderr=stderr_file,
                 shell=False,
@@ -359,16 +358,18 @@ def _run_provider(
 
 
 def _read_limited(handle, limit: int) -> str:
-    handle.seek(0)
-    data = handle.read(limit + 1)
-    if len(data) > limit:
-        return data[:limit]
-    return data
+    handle.seek(0, os.SEEK_END)
+    size = handle.tell()
+    handle.seek(max(0, size - limit))
+    data = handle.read(limit)
+    return data.decode("utf-8", errors="replace")
 
 
 def _validate_name(name: str, value: str, *, pattern: re.Pattern[str] = _NAME_RE) -> None:
     if not pattern.fullmatch(value):
         raise ValueError(f"{name} must match {pattern.pattern}")
+    if value in {".", ".."}:
+        raise ValueError(f"{name} must not be '.' or '..'")
 
 
 def _build_argv(
@@ -477,8 +478,10 @@ def _redact_json(value: Any, *, safety: SafetyPolicy) -> Any:
 
 def _pick_string(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
-    if isinstance(value, str) and value:
-        return value
+    if isinstance(value, str):
+        return value if value else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
     return None
 
 

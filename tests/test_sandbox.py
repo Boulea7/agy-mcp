@@ -148,6 +148,35 @@ print(json.dumps({
     ]
 
 
+def test_start_sandbox_coerces_scalar_provider_fields(tmp_path: Path):
+    launcher = _write_launcher(
+        tmp_path,
+        """
+import json
+
+print(json.dumps({
+    "sandbox_id": 12345,
+    "status": 7,
+    "endpoint": 5900,
+}))
+""".lstrip(),
+    )
+    config = _config_with_provider(launcher)
+    safety = SafetyPolicy.from_config(config)
+
+    out = start_sandbox(
+        config=config,
+        safety=safety,
+        provider="fake",
+        target="pc",
+        cwd=str(tmp_path),
+    )
+
+    assert out.sandbox_id == "12345"
+    assert out.status == "7"
+    assert out.endpoint == "5900"
+
+
 def test_start_sandbox_accepts_json_on_last_stdout_line(tmp_path: Path):
     launcher = _write_launcher(
         tmp_path,
@@ -172,6 +201,32 @@ print(json.dumps({"sandbox_id": "box-last-line", "endpoint": "http://127.0.0.1:5
     assert out.success is True
     assert out.sandbox_id == "box-last-line"
     assert out.endpoint == "http://127.0.0.1:5900"
+
+
+def test_start_sandbox_keeps_tail_json_after_large_stdout(tmp_path: Path):
+    launcher = _write_launcher(
+        tmp_path,
+        """
+import json
+import sys
+
+sys.stdout.write("x" * (300 * 1024))
+print()
+print(json.dumps({"sandbox_id": "box-tail", "status": "running"}))
+""".lstrip(),
+    )
+    config = _config_with_provider(launcher)
+    safety = SafetyPolicy.from_config(config)
+
+    out = start_sandbox(
+        config=config,
+        safety=safety,
+        provider="fake",
+        target="pc",
+        cwd=str(tmp_path),
+    )
+
+    assert out.sandbox_id == "box-tail"
 
 
 def test_sandbox_status_runs_provider_action(tmp_path: Path):
@@ -323,6 +378,21 @@ def test_sandbox_control_rejects_bad_sandbox_id(tmp_path: Path):
         )
 
 
+def test_sandbox_control_rejects_dot_sandbox_id(tmp_path: Path):
+    launcher = _write_launcher(tmp_path, "raise SystemExit(0)\n")
+    config = _config_with_provider(launcher)
+    safety = SafetyPolicy.from_config(config)
+
+    with pytest.raises(ValueError, match="sandbox_id must not"):
+        sandbox_status(
+            config=config,
+            safety=safety,
+            provider="fake",
+            sandbox_id="..",
+            cwd=str(tmp_path),
+        )
+
+
 def test_sandbox_logs_rejects_excessive_tail(tmp_path: Path):
     launcher = _write_launcher(tmp_path, "raise SystemExit(0)\n")
     config = _config_with_provider(launcher)
@@ -381,6 +451,21 @@ def test_start_sandbox_rejects_bad_target_slug(tmp_path: Path):
             safety=safety,
             provider="fake",
             target="../pc",
+            cwd=str(tmp_path),
+        )
+
+
+def test_start_sandbox_rejects_dot_target(tmp_path: Path):
+    launcher = _write_launcher(tmp_path, "raise SystemExit(0)\n")
+    config = _config_with_provider(launcher)
+    safety = SafetyPolicy.from_config(config)
+
+    with pytest.raises(ValueError, match="target must not"):
+        start_sandbox(
+            config=config,
+            safety=safety,
+            provider="fake",
+            target=".",
             cwd=str(tmp_path),
         )
 
