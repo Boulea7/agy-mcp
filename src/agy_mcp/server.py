@@ -10,6 +10,11 @@ Tools (all return dicts with stable keys; never raise across the wire):
 * ``agy_result`` — fetch captured output for a finished job.
 * ``agy_cancel`` — signal a running job to stop.
 * ``agy_sessions`` — list recent jobs.
+* ``agy_sandbox_start`` — launch a configured sandbox provider.
+* ``agy_sandbox_status`` — query a configured sandbox provider.
+* ``agy_sandbox_stop`` — stop a configured sandbox provider.
+* ``agy_sandbox_logs`` — fetch logs from a configured sandbox provider.
+* ``agy_sandbox_attach`` — fetch attach metadata from a configured provider.
 * ``agy_doctor`` — environment + capability probe.
 * ``agy_install_skill`` — write the scaffold skill into target dirs.
 
@@ -32,6 +37,7 @@ import asyncio
 import re
 import threading
 import weakref
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -57,10 +63,19 @@ from agy_mcp.models import (
     PurgeToolResponse,
     ReadToolResponse,
     ResultToolResponse,
+    SandboxControlToolResponse,
+    SandboxStartToolResponse,
     SessionsToolResponse,
     StatusToolResponse,
 )
 from agy_mcp.safety import SafetyPolicy
+from agy_mcp.sandbox import (
+    sandbox_attach,
+    sandbox_logs,
+    sandbox_status,
+    start_sandbox,
+    stop_sandbox,
+)
 from agy_mcp.session_store import SessionStore
 from agy_mcp.supervisor import Supervisor
 
@@ -228,7 +243,10 @@ mcp = FastMCP(
         "Google Antigravity (agy) CLI bridge with long-task supervisor. "
         "Use ``agy`` for one-shot prompts, ``agy_start`` + ``agy_status`` "
         "+ ``agy_read`` / ``agy_result`` + ``agy_cancel`` for detached jobs, and "
-        "``agy_doctor`` to check the environment."
+        "``agy_doctor`` to check the environment. Use ``agy_sandbox_start`` "
+        "+ ``agy_sandbox_status`` / ``agy_sandbox_logs`` / "
+        "``agy_sandbox_attach`` / ``agy_sandbox_stop`` for configured "
+        "sandbox environments."
     ),
 )
 
@@ -866,6 +884,231 @@ def agy_sessions_tool(limit: int = 50) -> SessionsToolResponse:
 
 
 # ---------------------------------------------------------------------------
+# Tool: agy_sandbox_start — launch configured provider
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="agy_sandbox_start",
+    description=(
+        "Launch a configured local or external remote sandbox provider for "
+        "mobile / PC testing. Providers are configured under "
+        "[sandbox.providers.<name>] in config.toml; this tool runs the "
+        "provider command without a shell and parses its JSON stdout into "
+        "sandbox_id / endpoint / status."
+    ),
+)
+async def agy_sandbox_start_tool(
+    provider: str | None = None,
+    target: str = "pc",
+    cd: str = ".",
+    scenario: str | None = None,
+    timeout: int | None = None,
+    dry_run: bool = False,
+) -> SandboxStartToolResponse:
+    config, safety, _store_, _supervisor_ = _ensure_state()
+    try:
+        limiter = await _get_bridge_limiter()
+        return await anyio.to_thread.run_sync(
+            partial(
+                start_sandbox,
+                config=config,
+                safety=safety,
+                provider=provider,
+                target=target,
+                cwd=cd,
+                scenario=scenario,
+                timeout=timeout,
+                dry_run=dry_run,
+            ),
+            limiter=limiter,
+        )
+    except Exception as exc:  # noqa: BLE001 - top-level tool guard
+        return _wrapper_failure(
+            safety,
+            exc,
+            SandboxStartToolResponse,
+            provider=provider,
+            target=target,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tools: sandbox lifecycle control
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="agy_sandbox_status",
+    description=(
+        "Return status for a sandbox previously created by a configured local "
+        "or external remote provider. The provider must define a status argv "
+        "command under [sandbox.providers.<name>] in config.toml."
+    ),
+)
+async def agy_sandbox_status_tool(
+    sandbox_id: str,
+    provider: str | None = None,
+    cd: str = ".",
+    timeout: int | None = None,
+    dry_run: bool = False,
+) -> SandboxControlToolResponse:
+    config, safety, _store_, _supervisor_ = _ensure_state()
+    try:
+        limiter = await _get_bridge_limiter()
+        return await anyio.to_thread.run_sync(
+            partial(
+                sandbox_status,
+                config=config,
+                safety=safety,
+                provider=provider,
+                sandbox_id=sandbox_id,
+                cwd=cd,
+                timeout=timeout,
+                dry_run=dry_run,
+            ),
+            limiter=limiter,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _wrapper_failure(
+            safety,
+            exc,
+            SandboxControlToolResponse,
+            action="status",
+            provider=provider,
+            sandbox_id=sandbox_id,
+        )
+
+
+@mcp.tool(
+    name="agy_sandbox_stop",
+    description=(
+        "Stop a sandbox previously created by a configured local or external "
+        "remote provider. The provider must define a stop argv command under "
+        "[sandbox.providers.<name>] in config.toml."
+    ),
+)
+async def agy_sandbox_stop_tool(
+    sandbox_id: str,
+    provider: str | None = None,
+    cd: str = ".",
+    timeout: int | None = None,
+    dry_run: bool = False,
+) -> SandboxControlToolResponse:
+    config, safety, _store_, _supervisor_ = _ensure_state()
+    try:
+        limiter = await _get_bridge_limiter()
+        return await anyio.to_thread.run_sync(
+            partial(
+                stop_sandbox,
+                config=config,
+                safety=safety,
+                provider=provider,
+                sandbox_id=sandbox_id,
+                cwd=cd,
+                timeout=timeout,
+                dry_run=dry_run,
+            ),
+            limiter=limiter,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _wrapper_failure(
+            safety,
+            exc,
+            SandboxControlToolResponse,
+            action="stop",
+            provider=provider,
+            sandbox_id=sandbox_id,
+        )
+
+
+@mcp.tool(
+    name="agy_sandbox_logs",
+    description=(
+        "Fetch recent logs for a sandbox from a configured local or external "
+        "remote provider. The provider must define a logs argv command; tail "
+        "is passed as the {tail} template value."
+    ),
+)
+async def agy_sandbox_logs_tool(
+    sandbox_id: str,
+    provider: str | None = None,
+    cd: str = ".",
+    tail: int = 200,
+    timeout: int | None = None,
+    dry_run: bool = False,
+) -> SandboxControlToolResponse:
+    config, safety, _store_, _supervisor_ = _ensure_state()
+    try:
+        limiter = await _get_bridge_limiter()
+        return await anyio.to_thread.run_sync(
+            partial(
+                sandbox_logs,
+                config=config,
+                safety=safety,
+                provider=provider,
+                sandbox_id=sandbox_id,
+                cwd=cd,
+                tail=tail,
+                timeout=timeout,
+                dry_run=dry_run,
+            ),
+            limiter=limiter,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _wrapper_failure(
+            safety,
+            exc,
+            SandboxControlToolResponse,
+            action="logs",
+            provider=provider,
+            sandbox_id=sandbox_id,
+        )
+
+
+@mcp.tool(
+    name="agy_sandbox_attach",
+    description=(
+        "Return attach/connect metadata for a sandbox from a configured local "
+        "or external remote provider. The provider must define an attach argv "
+        "command that returns JSON, commonly including endpoint/url."
+    ),
+)
+async def agy_sandbox_attach_tool(
+    sandbox_id: str,
+    provider: str | None = None,
+    cd: str = ".",
+    timeout: int | None = None,
+    dry_run: bool = False,
+) -> SandboxControlToolResponse:
+    config, safety, _store_, _supervisor_ = _ensure_state()
+    try:
+        limiter = await _get_bridge_limiter()
+        return await anyio.to_thread.run_sync(
+            partial(
+                sandbox_attach,
+                config=config,
+                safety=safety,
+                provider=provider,
+                sandbox_id=sandbox_id,
+                cwd=cd,
+                timeout=timeout,
+                dry_run=dry_run,
+            ),
+            limiter=limiter,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _wrapper_failure(
+            safety,
+            exc,
+            SandboxControlToolResponse,
+            action="attach",
+            provider=provider,
+            sandbox_id=sandbox_id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tool: agy_doctor — environment probe
 # ---------------------------------------------------------------------------
 
@@ -1073,6 +1316,11 @@ __all__ = [
     "agy_purge_tool",
     "agy_read_tool",
     "agy_result_tool",
+    "agy_sandbox_attach_tool",
+    "agy_sandbox_logs_tool",
+    "agy_sandbox_start_tool",
+    "agy_sandbox_status_tool",
+    "agy_sandbox_stop_tool",
     "agy_sessions_tool",
     "agy_start_tool",
     "agy_status_tool",

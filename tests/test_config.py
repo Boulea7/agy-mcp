@@ -48,6 +48,17 @@ scrub_extra_env = ["MY_INTERNAL_TOKEN"]
 [session_store]
 root = "/tmp/agy-sessions"
 retention_days = 7
+
+[sandbox]
+default_provider = "external-remote"
+default_timeout = 120
+
+[sandbox.providers.external-remote]
+start = ["remote-sandbox", "start", "--target", "{target}", "--json"]
+status = ["remote-sandbox", "status", "--id", "{sandbox_id}", "--json"]
+stop = ["remote-sandbox", "stop", "--id", "{sandbox_id}", "--json"]
+logs = ["remote-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
+attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
 """.strip(),
         encoding="utf-8",
     )
@@ -61,6 +72,45 @@ retention_days = 7
     assert config.safety.scrub_extra_env == ["MY_INTERNAL_TOKEN"]
     assert config.session_store.root == "/tmp/agy-sessions"
     assert config.session_store.retention_days == 7
+    assert config.sandbox.default_provider == "external-remote"
+    assert config.sandbox.default_timeout == 120
+    assert config.sandbox.providers["external-remote"].start == [
+        "remote-sandbox",
+        "start",
+        "--target",
+        "{target}",
+        "--json",
+    ]
+    assert config.sandbox.providers["external-remote"].status == [
+        "remote-sandbox",
+        "status",
+        "--id",
+        "{sandbox_id}",
+        "--json",
+    ]
+    assert config.sandbox.providers["external-remote"].stop == [
+        "remote-sandbox",
+        "stop",
+        "--id",
+        "{sandbox_id}",
+        "--json",
+    ]
+    assert config.sandbox.providers["external-remote"].logs == [
+        "remote-sandbox",
+        "logs",
+        "--id",
+        "{sandbox_id}",
+        "--tail",
+        "{tail}",
+        "--json",
+    ]
+    assert config.sandbox.providers["external-remote"].attach == [
+        "remote-sandbox",
+        "attach",
+        "--id",
+        "{sandbox_id}",
+        "--json",
+    ]
     assert config.source.endswith("config.toml")
 
 
@@ -79,10 +129,12 @@ prefer = "auto"
     monkeypatch.setenv("AGY_MCP_WORKTREE_DEFAULT", "0")
     monkeypatch.setenv("AGY_MCP_BACKEND", "gemini")
     monkeypatch.setenv("AGY_BIN", "/opt/agy/agy")
+    monkeypatch.setenv("AGY_MCP_SANDBOX_DEFAULT_PROVIDER", "local")
     config = load_config(path=cfg)
     assert config.execute.worktree_default is False
     assert config.backend.prefer == "gemini"
     assert config.backend.agy_bin == "/opt/agy/agy"
+    assert config.sandbox.default_provider == "local"
 
 
 def test_invalid_worktree_env_preserves_toml_value(

@@ -7,7 +7,7 @@
 
 言語：[`简体中文`](../README.md) · [`繁體中文`](README_ZH-TW.md) · [`English`](README_EN.md)
 
-> Google **Antigravity CLI**（`agy`）を 11 個の typed MCP tool として
+> Google **Antigravity CLI**（`agy`）を typed MCP tool として
 > ラップし、任意の MCP client（Claude Code / OpenAI Codex / Cursor /
 > Cline / Continue …）から直接呼び出せるようにします。任意で Skill
 > bundle も提供し、skill 対応プラットフォームに*いつ委譲するか*、
@@ -76,7 +76,7 @@ agy-mcp という open-source MCP をインストールしてください。具�
   現在の permission mode が acceptEdits を許している場合は、そのまま進める。
 
 各 step が終わるたびに 1 行で報告する。すべて終わったら 4 行でまとめる：
-どこにインストールされたか、11 個の MCP tool が公開されたか、SKILL の
+どこにインストールされたか、MCP tool が公開されたか、SKILL の
 配置先、残っている任意項目。
 ````
 
@@ -109,7 +109,7 @@ Google の新しい Antigravity CLI（`agy`）を、任意の MCP client から
 呼び出せる collaboration agent backend にする wrapper です。2 つの
 同等な経路を提供します：
 
-- **MCP server**：`agymcp` が FastMCP stdio 経由で 11 個の typed JSON
+- **MCP server**：`agymcp` が FastMCP stdio 経由で typed JSON
   tool を公開します。pydantic envelope は安定して解析できます。
   **任意の MCP client で利用可能**です。
 - **Skill bundles**：`~/.claude/skills/`、`~/.agents/skills/`、
@@ -124,7 +124,7 @@ Google の新しい Antigravity CLI（`agy`）を、任意の MCP client から
 > あります。この project は CLI の wrap、routing、isolation、audit を
 > 行うだけで、`agy` API を再実装しません。
 
-## 11 個の MCP tool
+## 16 個の MCP tool
 
 | Tool | Purpose |
 |---|---|
@@ -136,6 +136,11 @@ Google の新しい Antigravity CLI（`agy`）を、任意の MCP client から
 | `agy_result` | finished job result を取得。`job_id` 省略時は最新の finished job を返す |
 | `agy_cancel` | cross-platform process-group cancel |
 | `agy_sessions` | 最近の session を一覧 |
+| `agy_sandbox_start` | 設定済み local / external remote mobile / PC sandbox provider を起動し、sandbox_id / endpoint / status を返す |
+| `agy_sandbox_status` | 起動済み sandbox の provider status を取得 |
+| `agy_sandbox_stop` | 起動済み sandbox を停止 |
+| `agy_sandbox_logs` | sandbox の最近の logs を取得 |
+| `agy_sandbox_attach` | VNC / WebRTC / Appium / Selenium endpoint などの接続情報を返す |
 | `agy_doctor` | env + auth + capability probe（secrets は出さない） |
 | `agy_install_skill` | SKILL bundle を Claude / Codex / Antigravity dirs にインストール |
 | `agy_purge` | local session-store directories を掃除（`days <= 0` は拒否） |
@@ -184,7 +189,7 @@ repo の `CLAUDE.md` / `AGENTS.md` に配置できます：
 | [`output-strategy.md`](output-strategy.md) | Hybrid backend：stdout + klog + transcript.jsonl + protocol translator |
 | [`security.md`](security.md) | Threat model、defence catalogue、explicit non-defences |
 | [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix |
-| [`examples.md`](examples.md) | 7 end-to-end scenarios |
+| [`examples.md`](examples.md) | 8 end-to-end scenarios |
 | [`comparison-with-cli-wrappers.md`](comparison-with-cli-wrappers.md) | Stream-json passthrough vs Hybrid backend wrapper patterns |
 | [`release.md`](release.md) | PyPI trusted publishing + GitHub Release manual（one-time setup + routine flow） |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history（Keep a Changelog） |

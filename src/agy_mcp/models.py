@@ -560,6 +560,43 @@ class PurgeToolResponse(_DictLikeEnvelope):
     remaining: int = 0
 
 
+class SandboxStartToolResponse(_DictLikeEnvelope):
+    """Envelope returned by ``agy_sandbox_start``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    provider: str | None = None
+    target: str | None = None
+    status: str = "unknown"
+    sandbox_id: str | None = None
+    endpoint: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    command_preview: list[str] | None = None
+    created_at: str = Field(default_factory=lambda: _iso_now())
+
+
+class SandboxControlToolResponse(_DictLikeEnvelope):
+    """Envelope returned by sandbox lifecycle tools after start."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    action: str | None = None
+    provider: str | None = None
+    sandbox_id: str | None = None
+    status: str = "unknown"
+    endpoint: str | None = None
+    logs: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    command_preview: list[str] | None = None
+    created_at: str = Field(default_factory=lambda: _iso_now())
+
+
 __all__ = [
     "AdapterMetadata",
     "BackendName",
@@ -577,6 +614,8 @@ __all__ = [
     "PurgeToolResponse",
     "ReadToolResponse",
     "ResultToolResponse",
+    "SandboxControlToolResponse",
+    "SandboxStartToolResponse",
     "SessionsToolResponse",
     "StatusToolResponse",
 ]

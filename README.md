@@ -7,7 +7,7 @@
 
 语言：[`English`](docs/README_EN.md) · [`繁體中文`](docs/README_ZH-TW.md) · [`日本語`](docs/README_JA.md)
 
-> 把 Google **Antigravity CLI**（`agy`）包装成 11 个 typed MCP 工具，
+> 把 Google **Antigravity CLI**（`agy`）包装成 typed MCP 工具，
 > 任何 MCP 客户端（Claude Code / OpenAI Codex / Cursor / Cline /
 > Continue …）都能直接调用。配套可选 Skill bundle，让支持 skill 的
 > 平台学会*何时*调、*用哪个 mode*。
@@ -71,8 +71,8 @@ agy-doctor
 - 任何写入操作（包括上面这些）做之前先简短说一下要做什么，等我点头
   再执行；如果你的当前权限模式允许 acceptEdits，就直接执行。
 
-每完成一步给我一行汇报，全部完成后给出一份 4 行总结：装在哪、11 个
-MCP 工具是否齐、SKILL 落地路径、剩余可选项。
+每完成一步给我一行汇报，全部完成后给出一份 4 行总结：装在哪、MCP
+工具是否齐、SKILL 落地路径、剩余可选项。
 ````
 
 </details>
@@ -102,7 +102,7 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 把 Google 新发布的 Antigravity CLI（`agy`）包装成可被任意 MCP 客户端
 调用的协作 agent backend。两条等价路径：
 
-- **MCP server**：`agymcp` 经 FastMCP stdio 暴露 11 个 typed JSON 工具，
+- **MCP server**：`agymcp` 经 FastMCP stdio 暴露 typed JSON 工具，
   pydantic envelope 稳定可解析。**任何 MCP 客户端皆可**。
 - **Skill bundles**：装到 `~/.claude/skills/`、`~/.agents/skills/`、
   `~/.agy/skills/`，教 agent *何时*调 agy、*用哪个 mode*、注意哪些安全
@@ -114,7 +114,7 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 > `agy --print`，可能消耗 Antigravity 请求额度。本项目只包装、路由、
 > 隔离、审计，不重新实现 `agy` API。
 
-## 11 个 MCP 工具
+## 16 个 MCP 工具
 
 | 工具 | 用途 |
 |---|---|
@@ -126,6 +126,11 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 | `agy_result` | 取已完成 job 的结果；不传 `job_id` 时返回最近完成任务 |
 | `agy_cancel` | 跨平台 process group 终止 |
 | `agy_sessions` | 列最近 session |
+| `agy_sandbox_start` | 按配置拉起本地或外部远端 mobile / PC sandbox provider，返回 sandbox_id / endpoint / status |
+| `agy_sandbox_status` | 查询已启动 sandbox 的 provider 状态 |
+| `agy_sandbox_stop` | 停止已启动 sandbox |
+| `agy_sandbox_logs` | 拉取 sandbox 最近日志 |
+| `agy_sandbox_attach` | 获取 sandbox 连接信息，如 VNC / WebRTC / Appium / Selenium endpoint |
 | `agy_doctor` | 环境 + 鉴权 + capability 探测（不泄漏 secrets） |
 | `agy_install_skill` | 把 SKILL bundle 装到 Claude / Codex / Antigravity 目录 |
 | `agy_purge` | 清理本机 session-store 目录（refuse `days<=0`） |
@@ -171,7 +176,7 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 | [`docs/README_JA.md`](docs/README_JA.md) | 日本語 README |
 | [`docs/security.md`](docs/security.md) | 威胁模型、防护清单、明确不防御项 |
 | [`docs/cli-capabilities.md`](docs/cli-capabilities.md) | `agy --help` 实测 + capability 矩阵 |
-| [`docs/examples.md`](docs/examples.md) | 7 个典型场景 |
+| [`docs/examples.md`](docs/examples.md) | 8 个典型场景 |
 | [`docs/comparison-with-cli-wrappers.md`](docs/comparison-with-cli-wrappers.md) | Stream-json passthrough vs Hybrid backend 两种 wrapper 模式对比 |
 | [`docs/release.md`](docs/release.md) | PyPI trusted publishing + GitHub Release 发布手册（一次性设置 + 常规流程） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录（Keep a Changelog） |

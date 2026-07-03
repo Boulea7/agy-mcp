@@ -175,6 +175,15 @@ deadlock.
 - `agy_status` / `agy_read` / `agy_result` / `agy_cancel`: `job_id` must match
   `^job_[A-Za-z0-9_-]{1,80}$`. Oversized values are rejected with a
   structured error.
+- `agy_sandbox_start` / `agy_sandbox_status` / `agy_sandbox_stop` /
+  `agy_sandbox_logs` / `agy_sandbox_attach`: provider and target are
+  bounded slugs (`[A-Za-z0-9_.-]{1,64}`), sandbox ids are bounded
+  URL-safe-ish ids (`[A-Za-z0-9_.:-]{1,128}`), and log `tail` is capped.
+  Provider commands are configured as argv arrays and run without a shell.
+  The child process receives the same scrubbed environment policy as
+  bridge backends, and provider stdout/stderr is captured through
+  temporary files, read back with size limits, and redacted before being
+  returned in structured envelopes.
 - All sync tools route through `_structured_failure` on exception —
   never a bare traceback to the caller.
 

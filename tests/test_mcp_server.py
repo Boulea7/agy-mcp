@@ -12,7 +12,13 @@ import pytest
 
 from agy_mcp import server
 from agy_mcp.adapters.base import AdapterRunResult, BaseAdapter, EventSink
-from agy_mcp.config import BackendConfig, Config, ExecuteConfig, SafetyConfig
+from agy_mcp.config import (
+    BackendConfig,
+    Config,
+    ExecuteConfig,
+    SafetyConfig,
+    SandboxProviderConfig,
+)
 from agy_mcp.models import (
     AdapterMetadata,
     BackendName,
@@ -170,10 +176,10 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def test_eleven_tools_registered():
+def test_sixteen_tools_registered():
     """The documented agy tool set must all live on the FastMCP instance.
 
-    The metadata surface currently includes ``agy_result`` as the eleventh tool.
+    The metadata surface includes sandbox lifecycle control tools.
     """
 
     expected = {
@@ -185,6 +191,11 @@ def test_eleven_tools_registered():
         "agy_result",
         "agy_cancel",
         "agy_sessions",
+        "agy_sandbox_start",
+        "agy_sandbox_status",
+        "agy_sandbox_stop",
+        "agy_sandbox_logs",
+        "agy_sandbox_attach",
         "agy_doctor",
         "agy_install_skill",
         "agy_purge",
@@ -530,6 +541,66 @@ def test_agy_sessions_rejects_negative_limit(reset_state):
     out = server.agy_sessions_tool(limit=-1)
     assert out["success"] is False
     assert "limit" in (out["error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Sandbox launch / control
+# ---------------------------------------------------------------------------
+
+
+def test_agy_sandbox_start_dry_run_returns_provider_preview(reset_state, tmp_path: Path):
+    launcher = tmp_path / "sandbox-launcher"
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    reset_state.config.sandbox.default_provider = "fake"
+    reset_state.config.sandbox.providers["fake"] = SandboxProviderConfig(
+        start=[
+            str(launcher),
+            "start",
+            "--target",
+            "{target}",
+            "--cwd",
+            "{cwd}",
+            "--scenario",
+            "{scenario}",
+        ],
+        status=[
+            str(launcher),
+            "status",
+            "--id",
+            "{sandbox_id}",
+        ],
+    )
+
+    out = _run_async(
+        server.agy_sandbox_start_tool(
+            target="mobile",
+            cd=str(tmp_path),
+            scenario="login-smoke",
+            dry_run=True,
+        )
+    )
+
+    assert out["success"] is True
+    assert out["provider"] == "fake"
+    assert out["target"] == "mobile"
+    assert out["status"] == "dry_run"
+    assert out["command_preview"] is not None
+    assert "--target" in out["command_preview"]
+    assert "mobile" in out["command_preview"]
+
+    status = _run_async(
+        server.agy_sandbox_status_tool(
+            sandbox_id="sandbox-1",
+            cd=str(tmp_path),
+            dry_run=True,
+        )
+    )
+    assert status["success"] is True
+    assert status["action"] == "status"
+    assert status["sandbox_id"] == "sandbox-1"
+    assert status["command_preview"] is not None
+    assert "sandbox-1" in status["command_preview"]
 
 
 # ---------------------------------------------------------------------------
@@ -1401,6 +1472,11 @@ def test_all_tools_advertise_output_schema(reset_state):
         "agy_result",
         "agy_cancel",
         "agy_sessions",
+        "agy_sandbox_start",
+        "agy_sandbox_status",
+        "agy_sandbox_stop",
+        "agy_sandbox_logs",
+        "agy_sandbox_attach",
         "agy_doctor",
         "agy_install_skill",
         "agy_purge",
@@ -1478,6 +1554,8 @@ def test_all_tool_output_models_round_trip_json(reset_state):
         PurgeToolResponse,
         ReadToolResponse,
         ResultToolResponse,
+        SandboxControlToolResponse,
+        SandboxStartToolResponse,
         SessionsToolResponse,
         StatusToolResponse,
     )
@@ -1523,6 +1601,44 @@ def test_all_tool_output_models_round_trip_json(reset_state):
             success=True,
             count=1,
             records=[JobRecord(job_id="job_roundtrip")],
+        ),
+        "agy_sandbox_start": SandboxStartToolResponse(
+            success=True,
+            provider="fake",
+            target="pc",
+            status="running",
+            sandbox_id="sandbox-1",
+            endpoint="http://127.0.0.1:5900",
+            metadata={"kind": "vm"},
+        ),
+        "agy_sandbox_status": SandboxControlToolResponse(
+            success=True,
+            action="status",
+            provider="fake",
+            sandbox_id="sandbox-1",
+            status="ready",
+            metadata={"kind": "vm"},
+        ),
+        "agy_sandbox_stop": SandboxControlToolResponse(
+            success=True,
+            action="stop",
+            provider="fake",
+            sandbox_id="sandbox-1",
+            status="stopped",
+        ),
+        "agy_sandbox_logs": SandboxControlToolResponse(
+            success=True,
+            action="logs",
+            provider="fake",
+            sandbox_id="sandbox-1",
+            logs="ok",
+        ),
+        "agy_sandbox_attach": SandboxControlToolResponse(
+            success=True,
+            action="attach",
+            provider="fake",
+            sandbox_id="sandbox-1",
+            endpoint="vnc://127.0.0.1:5900",
         ),
         "agy_doctor": DoctorToolResponse(
             success=True,

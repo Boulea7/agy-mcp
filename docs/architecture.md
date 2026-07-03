@@ -16,9 +16,10 @@ others.
                            |
 +--------------------------v-------------------------------------+
 |  MCP server  (src/agy_mcp/server.py)                           |
-|  - 11 tools: agy, agy_start, agy_continue, agy_status,         |
+|  - 16 tools: agy, agy_start, agy_continue, agy_status,         |
 |    agy_read, agy_result, agy_cancel, agy_sessions,             |
-|    agy_doctor, agy_install_skill, agy_purge                    |
+|    agy_sandbox_start/status/stop/logs/attach, agy_doctor,      |
+|    agy_install_skill, agy_purge                                |
 |  - Singletons: config, safety, session_store, supervisor       |
 |  - Async tools wrap a per-loop CapacityLimiter (8 by default)  |
 +--------------------------+-------------------------------------+
@@ -89,6 +90,34 @@ build, and it has no effect on `agy-mcp`'s own behaviour.
 
 Defaults: `worktree=True` for `execute` mode, `allow_write=False`,
 `backend="auto"`, `output_protocol="claude"`.
+
+Sandbox launch providers are configured under `[sandbox]`:
+
+```toml
+[sandbox]
+default_provider = "local-vm"
+default_timeout = 900
+
+[sandbox.providers.local-vm]
+start = ["sandboxctl", "start", "--target", "{target}", "--cwd", "{cwd}", "--json"]
+status = ["sandboxctl", "status", "--id", "{sandbox_id}", "--json"]
+stop = ["sandboxctl", "stop", "--id", "{sandbox_id}", "--json"]
+logs = ["sandboxctl", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
+attach = ["sandboxctl", "attach", "--id", "{sandbox_id}", "--json"]
+
+[sandbox.providers.external-remote]
+start = ["remote-sandbox", "start", "--target", "{target}", "--project", "{cwd}", "--json"]
+status = ["remote-sandbox", "status", "--id", "{sandbox_id}", "--json"]
+stop = ["remote-sandbox", "stop", "--id", "{sandbox_id}", "--json"]
+logs = ["remote-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
+attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
+```
+
+`agy_sandbox_start` treats both local and external remote providers the
+same way: run the configured command without a shell and expect JSON stdout
+with optional `sandbox_id`, `endpoint`, and `status` fields. The bridge does
+not encode any cloud vendor, company-internal service, device-farm API, or
+VM implementation detail.
 
 ### `session_store.py` — per-job filesystem layout
 
@@ -188,6 +217,11 @@ on canonical events so future agy event types survive without a schema bump).
 | `agy_result` | yes | Return the captured output for a finished background job |
 | `agy_cancel` | yes | Process-group cancel (POSIX `killpg` / Windows `CTRL_BREAK_EVENT`) |
 | `agy_sessions` | yes | List recent jobs with mtime / status / cwd summary |
+| `agy_sandbox_start` | yes | Launch configured local or external remote mobile / PC sandbox provider |
+| `agy_sandbox_status` | yes | Query provider status for a started sandbox |
+| `agy_sandbox_stop` | yes | Stop a started sandbox |
+| `agy_sandbox_logs` | yes | Fetch recent sandbox logs |
+| `agy_sandbox_attach` | yes | Return attach/connect metadata for a sandbox |
 | `agy_doctor` | yes | Environment + auth probe (no secrets); `force_refresh=True` after CLI upgrade |
 | `agy_install_skill` | yes | Install SKILL bundle into Claude / Codex / Antigravity dirs |
 | `agy_purge` | yes | Prune session-store directories older than `days` (refuses `days<=0`) |

@@ -1,6 +1,6 @@
 # Examples
 
-Seven end-to-end scenarios showing the typical bridge call patterns. All
+Eight end-to-end scenarios showing the typical bridge call patterns. All
 examples assume `agy-mcp` is registered with the caller (see
 [`installation.md`](installation.md)).
 
@@ -175,7 +175,99 @@ where direct `agy` works.
 
 ---
 
-## 6. Install the collaboration skill
+## 6. Launch a configured sandbox environment
+
+Configure a provider command once in `~/.config/agy-mcp/config.toml`.
+The provider can be either local or external remote. `agy-mcp` does not
+assume a specific cloud, vendor, or internal platform; it only executes the
+configured wrapper command and reads JSON from stdout.
+
+```toml
+[sandbox]
+default_provider = "local-vm"
+default_timeout = 900
+
+[sandbox.providers.local-vm]
+start = [
+  "local-sandbox",
+  "start",
+  "--target",
+  "{target}",
+  "--scenario",
+  "{scenario}",
+  "--cwd",
+  "{cwd}",
+  "--json",
+]
+status = ["local-sandbox", "status", "--id", "{sandbox_id}", "--json"]
+stop = ["local-sandbox", "stop", "--id", "{sandbox_id}", "--json"]
+logs = ["local-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
+attach = ["local-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
+
+[sandbox.providers.external-remote]
+start = [
+  "remote-sandbox",
+  "start",
+  "--target",
+  "{target}",
+  "--scenario",
+  "{scenario}",
+  "--project",
+  "{cwd}",
+  "--json",
+]
+status = ["remote-sandbox", "status", "--id", "{sandbox_id}", "--json"]
+stop = ["remote-sandbox", "stop", "--id", "{sandbox_id}", "--json"]
+logs = ["remote-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
+attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
+```
+
+Then launch it through MCP:
+
+```python
+local_box = agy_sandbox_start(
+    provider="local-vm",
+    target="pc",
+    cd="/Users/me/work/app",
+    scenario="checkout-smoke",
+)
+
+remote_box = agy_sandbox_start(
+    provider="external-remote",
+    target="mobile",
+    cd="/Users/me/work/app",
+    scenario="checkout-smoke",
+)
+# sandbox_id and endpoint come from provider JSON stdout.
+
+state = agy_sandbox_status(
+    provider="external-remote",
+    sandbox_id=remote_box["sandbox_id"],
+)
+
+connection = agy_sandbox_attach(
+    provider="external-remote",
+    sandbox_id=remote_box["sandbox_id"],
+)
+
+recent_logs = agy_sandbox_logs(
+    provider="external-remote",
+    sandbox_id=remote_box["sandbox_id"],
+    tail=200,
+)
+
+agy_sandbox_stop(
+    provider="external-remote",
+    sandbox_id=remote_box["sandbox_id"],
+)
+```
+
+Use `dry_run=True` to inspect the resolved command without starting
+anything.
+
+---
+
+## 7. Install the collaboration skill
 
 Teach the caller's agent **when and how** to delegate to `agy`.
 
@@ -207,7 +299,7 @@ in user scope (project policy forbids writes under `~/.gemini/`).
 
 ---
 
-## 7. Prune the local session store
+## 8. Prune the local session store
 
 Long-running projects accumulate per-job directories under
 `~/.agy-mcp/sessions/`. Drop ones older than a threshold without

@@ -85,11 +85,28 @@ class SessionStoreConfig:
 
 
 @dataclass(slots=True)
+class SandboxProviderConfig:
+    start: list[str] = field(default_factory=list)
+    status: list[str] = field(default_factory=list)
+    stop: list[str] = field(default_factory=list)
+    logs: list[str] = field(default_factory=list)
+    attach: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SandboxConfig:
+    default_provider: str | None = None
+    default_timeout: int = 900
+    providers: dict[str, SandboxProviderConfig] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class Config:
     execute: ExecuteConfig = field(default_factory=ExecuteConfig)
     backend: BackendConfig = field(default_factory=BackendConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     session_store: SessionStoreConfig = field(default_factory=SessionStoreConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     source: str = "defaults"
 
     def session_store_root(self) -> Path:
@@ -174,6 +191,7 @@ def _from_toml(data: dict[str, Any]) -> Config:
     backend_section = data.get("backend", {}) if isinstance(data, dict) else {}
     safety_section = data.get("safety", {}) if isinstance(data, dict) else {}
     store_section = data.get("session_store", {}) if isinstance(data, dict) else {}
+    sandbox_section = data.get("sandbox", {}) if isinstance(data, dict) else {}
 
     execute = ExecuteConfig(
         worktree_default=_coerce_bool(
@@ -197,7 +215,41 @@ def _from_toml(data: dict[str, Any]) -> Config:
         root=_coerce_str(store_section.get("root"), ""),
         retention_days=_coerce_int(store_section.get("retention_days"), DEFAULT_RETENTION_DAYS),
     )
-    return Config(execute=execute, backend=backend, safety=safety, session_store=session_store)
+    sandbox = _sandbox_from_toml(sandbox_section)
+    return Config(
+        execute=execute,
+        backend=backend,
+        safety=safety,
+        session_store=session_store,
+        sandbox=sandbox,
+    )
+
+
+def _sandbox_from_toml(section: Any) -> SandboxConfig:
+    if not isinstance(section, dict):
+        return SandboxConfig()
+    providers: dict[str, SandboxProviderConfig] = {}
+    raw_providers = section.get("providers", {})
+    if isinstance(raw_providers, dict):
+        for name, raw in raw_providers.items():
+            if not isinstance(raw, dict):
+                continue
+            providers[str(name)] = SandboxProviderConfig(
+                start=_coerce_str_list(raw.get("start")),
+                status=_coerce_str_list(raw.get("status")),
+                stop=_coerce_str_list(raw.get("stop")),
+                logs=_coerce_str_list(raw.get("logs")),
+                attach=_coerce_str_list(raw.get("attach")),
+            )
+    return SandboxConfig(
+        default_provider=(
+            str(section["default_provider"])
+            if section.get("default_provider") is not None
+            else None
+        ),
+        default_timeout=_coerce_int(section.get("default_timeout"), 900),
+        providers=providers,
+    )
 
 
 def _apply_env_overrides(config: Config) -> None:
@@ -236,6 +288,9 @@ def _apply_env_overrides(config: Config) -> None:
     env_retention = os.environ.get("AGY_MCP_SESSION_RETENTION_DAYS")
     if env_retention:
         config.session_store.retention_days = _coerce_int(env_retention, config.session_store.retention_days)
+    env_sandbox_provider = os.environ.get("AGY_MCP_SANDBOX_DEFAULT_PROVIDER")
+    if env_sandbox_provider:
+        config.sandbox.default_provider = env_sandbox_provider
 
 
 # Module-level singleton cache; callers may force reload via load_config().
@@ -273,6 +328,8 @@ __all__ = [
     "DEFAULT_WORKTREE",
     "ExecuteConfig",
     "SafetyConfig",
+    "SandboxConfig",
+    "SandboxProviderConfig",
     "SessionStoreConfig",
     "default_config_path",
     "default_session_store_root",

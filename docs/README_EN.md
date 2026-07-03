@@ -7,7 +7,7 @@
 
 Languages: [`简体中文`](../README.md) · [`繁體中文`](README_ZH-TW.md) · [`日本語`](README_JA.md)
 
-> Wraps Google **Antigravity CLI** (`agy`) as 11 typed MCP tools any MCP
+> Wraps Google **Antigravity CLI** (`agy`) as typed MCP tools any MCP
 > client (Claude Code / OpenAI Codex / Cursor / Cline / Continue …) can
 > call directly. Ships with optional Skill bundles that teach
 > skill-aware platforms *when* to delegate and *which mode* to use.
@@ -79,7 +79,7 @@ Constraints:
   proceed.
 
 Report a one-liner per step. After everything is done, give me a
-4-line summary: where it landed, whether all 11 MCP tools are
+4-line summary: where it landed, whether all MCP tools are
 exposed, where the SKILL files live, and what remains optional.
 ````
 
@@ -110,7 +110,7 @@ Full install + troubleshooting → [`installation.md`](installation.md).
 A wrapper that turns Google's new Antigravity CLI (`agy`) into a
 collaboration backend any MCP client can call. Two equivalent paths:
 
-- **MCP server**: `agymcp` exposes 11 typed JSON tools over FastMCP
+- **MCP server**: `agymcp` exposes typed JSON tools over FastMCP
   stdio with stable pydantic envelopes. **Any MCP client.**
 - **Skill bundles**: install into `~/.claude/skills/`,
   `~/.agents/skills/`, `~/.agy/skills/`. Teach the agent *when* to
@@ -124,7 +124,7 @@ collaboration backend any MCP client can call. Two equivalent paths:
 > The project wraps, routes, isolates, and audits the CLI; it does
 > not reimplement the `agy` API.
 
-## 11 MCP tools
+## 16 MCP tools
 
 | Tool | Purpose |
 |---|---|
@@ -136,6 +136,11 @@ collaboration backend any MCP client can call. Two equivalent paths:
 | `agy_result` | Fetch a finished job result; omitting `job_id` returns the latest finished job |
 | `agy_cancel` | Cross-platform process-group cancel |
 | `agy_sessions` | List recent sessions |
+| `agy_sandbox_start` | Launch a configured local or external remote mobile / PC sandbox provider and return sandbox_id / endpoint / status |
+| `agy_sandbox_status` | Query provider status for a started sandbox |
+| `agy_sandbox_stop` | Stop a started sandbox |
+| `agy_sandbox_logs` | Fetch recent sandbox logs |
+| `agy_sandbox_attach` | Return sandbox connection metadata such as VNC / WebRTC / Appium / Selenium endpoints |
 | `agy_doctor` | Env + auth + capability probe (no secrets) |
 | `agy_install_skill` | Install SKILL bundles into Claude / Codex / Antigravity dirs |
 | `agy_purge` | Prune local session-store directories (refuses `days <= 0`) |
@@ -189,7 +194,7 @@ that repo knows when to call `agy`:
 | [`README_JA.md`](README_JA.md) | Japanese README |
 | [`security.md`](security.md) | Threat model, defence catalogue, explicit non-defences |
 | [`cli-capabilities.md`](cli-capabilities.md) | Live `agy --help` + capability matrix |
-| [`examples.md`](examples.md) | 7 end-to-end scenarios |
+| [`examples.md`](examples.md) | 8 end-to-end scenarios |
 | [`comparison-with-cli-wrappers.md`](comparison-with-cli-wrappers.md) | Stream-json passthrough vs Hybrid backend wrapper patterns |
 | [`release.md`](release.md) | PyPI trusted publishing + GitHub Release manual (one-time setup + routine flow) |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history (Keep a Changelog) |

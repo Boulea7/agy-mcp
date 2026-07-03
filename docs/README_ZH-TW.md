@@ -7,7 +7,7 @@
 
 語言：[`简体中文`](../README.md) · [`English`](README_EN.md) · [`日本語`](README_JA.md)
 
-> 將 Google **Antigravity CLI**（`agy`）包裝成 11 個 typed MCP 工具，
+> 將 Google **Antigravity CLI**（`agy`）包裝成 typed MCP 工具，
 > 任何 MCP client（Claude Code / OpenAI Codex / Cursor / Cline /
 > Continue …）都能直接呼叫。專案也提供可選的 Skill bundle，讓支援
 > skill 的平台知道*何時*委派、*使用哪個 mode*。
@@ -72,8 +72,8 @@ agy-doctor
 - 任何寫入操作做之前先簡短說明要做什麼，等我同意再執行；如果你目前
   的權限模式允許 acceptEdits，就直接執行。
 
-每完成一步給我一行回報。全部完成後給出 4 行總結：安裝位置、11 個
-MCP 工具是否齊全、SKILL 落地路徑、剩餘可選項。
+每完成一步給我一行回報。全部完成後給出 4 行總結：安裝位置、MCP
+工具是否齊全、SKILL 落地路徑、剩餘可選項。
 ````
 
 </details>
@@ -103,7 +103,7 @@ MCP 工具是否齊全、SKILL 落地路徑、剩餘可選項。
 這是一個 wrapper，將 Google 新推出的 Antigravity CLI（`agy`）變成任意
 MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 
-- **MCP server**：`agymcp` 透過 FastMCP stdio 暴露 11 個 typed JSON
+- **MCP server**：`agymcp` 透過 FastMCP stdio 暴露 typed JSON
   工具，pydantic envelope 穩定可解析。**任何 MCP client 都可使用**。
 - **Skill bundles**：安裝到 `~/.claude/skills/`、`~/.agents/skills/`、
   `~/.agy/skills/`，教 agent *何時*呼叫 agy、*使用哪個 mode*、遵守
@@ -115,7 +115,7 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 > `agy --print`，可能消耗 Antigravity 請求額度。本專案只負責包裝、
 > 路由、隔離與審計，不重新實作 `agy` API。
 
-## 11 個 MCP 工具
+## 16 個 MCP 工具
 
 | 工具 | 用途 |
 |---|---|
@@ -127,6 +127,11 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 | `agy_result` | 取得已完成 job 的結果；不傳 `job_id` 時回傳最近完成任務 |
 | `agy_cancel` | 跨平台 process group 終止 |
 | `agy_sessions` | 列出最近 session |
+| `agy_sandbox_start` | 依設定啟動本機或外部遠端 mobile / PC sandbox provider，回傳 sandbox_id / endpoint / status |
+| `agy_sandbox_status` | 查詢已啟動 sandbox 的 provider 狀態 |
+| `agy_sandbox_stop` | 停止已啟動 sandbox |
+| `agy_sandbox_logs` | 讀取 sandbox 最近日誌 |
+| `agy_sandbox_attach` | 取得 sandbox 連線資訊，例如 VNC / WebRTC / Appium / Selenium endpoint |
 | `agy_doctor` | 環境 + 鑑權 + capability 探測（不洩漏 secrets） |
 | `agy_install_skill` | 將 SKILL bundle 安裝到 Claude / Codex / Antigravity 目錄 |
 | `agy_purge` | 清理本機 session-store 目錄（拒絕 `days <= 0`） |
@@ -174,7 +179,7 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 | [`output-strategy.md`](output-strategy.md) | Hybrid backend：stdout + klog + transcript.jsonl + protocol translator |
 | [`security.md`](security.md) | 威脅模型、防護清單、明確不防禦項 |
 | [`cli-capabilities.md`](cli-capabilities.md) | `agy --help` 實測 + capability 矩陣 |
-| [`examples.md`](examples.md) | 7 個典型場景 |
+| [`examples.md`](examples.md) | 8 個典型場景 |
 | [`comparison-with-cli-wrappers.md`](comparison-with-cli-wrappers.md) | Stream-json passthrough vs Hybrid backend 兩種 wrapper 模式對比 |
 | [`release.md`](release.md) | PyPI trusted publishing + GitHub Release 發布手冊（一次性設定 + 常規流程） |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 版本變更記錄（Keep a Changelog） |
