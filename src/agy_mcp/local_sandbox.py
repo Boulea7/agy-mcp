@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,30 @@ _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_STARTUP_TIMEOUT = 60
 _LOG_TAIL_MAX_LINES = 10_000
 _LIVE_PROCS: dict[int, subprocess.Popen[str]] = {}
+_CHILD_ENV_ALLOWLIST = {
+    "APPDATA",
+    "ANDROID_HOME",
+    "ANDROID_SDK_ROOT",
+    "COMSPEC",
+    "HOME",
+    "JAVA_HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LOCALAPPDATA",
+    "PATH",
+    "PATHEXT",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "WINDIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+}
 
 
 class LocalSandboxError(RuntimeError):
@@ -103,6 +129,7 @@ def _cmd_start(args: argparse.Namespace) -> dict[str, Any]:
         raise LocalSandboxError("startup-timeout must be positive seconds")
     if args.port < 0 or args.appium_port < 0:
         raise LocalSandboxError("ports must be non-negative")
+    _validate_loopback_host(args.host)
 
     sandbox_id = _new_sandbox_id(target)
     sandbox_dir = _state_root() / sandbox_id
@@ -191,39 +218,46 @@ def _start_android(
     emulator_process: dict[str, Any] | None = None
     logs: dict[str, str] = {}
 
-    if not serial:
-        emulator = shutil.which("emulator")
-        if not emulator:
-            raise LocalSandboxError(
-                "no online Android device and emulator CLI not found on PATH; "
-                "install Android Emulator or connect a device visible to adb."
+    try:
+        if not serial:
+            emulator = shutil.which("emulator")
+            if not emulator:
+                raise LocalSandboxError(
+                    "no online Android device and emulator CLI not found on PATH; "
+                    "install Android Emulator or connect a device visible to adb."
+                )
+            emulator_avd = (
+                args.android_avd
+                or os.environ.get("AGY_LOCAL_SANDBOX_ANDROID_AVD", "")
+                or _first_android_avd(emulator)
             )
-        emulator_avd = (
-            args.android_avd
-            or os.environ.get("AGY_LOCAL_SANDBOX_ANDROID_AVD", "")
-            or _first_android_avd(emulator)
-        )
-        if not emulator_avd:
-            raise LocalSandboxError(
-                "no Android AVD found; create one with Android Studio or pass --android-avd."
+            if not emulator_avd:
+                raise LocalSandboxError(
+                    "no Android AVD found; create one with Android Studio or pass --android-avd."
+                )
+
+            emulator_log = sandbox_dir / "emulator.log"
+            command = [emulator, "-avd", emulator_avd, "-no-snapshot-save"]
+            if args.headless or _env_true("AGY_LOCAL_SANDBOX_ANDROID_HEADLESS"):
+                command.extend(["-no-window", "-no-audio"])
+            emulator_pid = _spawn_detached(command, cwd=cwd, log_path=emulator_log)
+            emulator_process = _process_record(pid=emulator_pid, command=command, log_path=emulator_log)
+            owns_emulator = True
+            logs["emulator"] = str(emulator_log)
+            serial = _wait_for_android_device(
+                adb,
+                before=before,
+                timeout=args.startup_timeout,
+                pid=emulator_pid,
             )
 
-        emulator_log = sandbox_dir / "emulator.log"
-        command = [emulator, "-avd", emulator_avd, "-no-snapshot-save"]
-        if args.headless or _env_true("AGY_LOCAL_SANDBOX_ANDROID_HEADLESS"):
-            command.extend(["-no-window", "-no-audio"])
-        emulator_pid = _spawn_detached(command, cwd=cwd, log_path=emulator_log)
-        emulator_process = _process_record(pid=emulator_pid, command=command, log_path=emulator_log)
-        owns_emulator = True
-        logs["emulator"] = str(emulator_log)
-        serial = _wait_for_android_device(
-            adb,
-            before=before,
-            timeout=args.startup_timeout,
-            pid=emulator_pid,
-        )
-
-    _wait_for_android_boot(adb, serial=serial, timeout=args.startup_timeout)
+        _wait_for_android_boot(adb, serial=serial, timeout=args.startup_timeout)
+    except Exception:
+        if owns_emulator:
+            if serial:
+                _run_quiet([adb, "-s", serial, "emu", "kill"], timeout=5)
+            _terminate_process(emulator_process, allow_unverified=True)
+        raise
     appium = _start_appium(args, sandbox_dir=sandbox_dir, cwd=cwd)
     logs.update(appium.pop("logs", {}))
     appium_process = appium.pop("process", None)
@@ -369,6 +403,18 @@ def _canonical_target(target: str) -> str:
     raise LocalSandboxError("target must be one of pc/playwright or mobile/android")
 
 
+def _validate_loopback_host(host: str) -> None:
+    normalized = host.strip().strip("[]")
+    if normalized.lower() == "localhost":
+        return
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        raise LocalSandboxError("host must be localhost or a loopback IP address")
+    if not address.is_loopback:
+        raise LocalSandboxError("host must be localhost or a loopback IP address")
+
+
 def _new_sandbox_id(target: str) -> str:
     return f"local-{target}-{int(time.time())}-{secrets.token_hex(4)}"
 
@@ -387,6 +433,8 @@ def _state_root() -> Path:
 def _state_path(sandbox_id: str) -> Path:
     if not _SANDBOX_ID_RE.fullmatch(sandbox_id):
         raise LocalSandboxError(f"sandbox id must match {_SANDBOX_ID_RE.pattern}")
+    if sandbox_id in {".", ".."}:
+        raise LocalSandboxError("sandbox id must not be '.' or '..'")
     return _state_root() / sandbox_id / "state.json"
 
 
@@ -567,7 +615,7 @@ def _fork_exec_detached(command: list[str], *, cwd: Path, log_path: Path) -> int
                     os.close(stdin_fd)
                 if log_fd > 2:
                     os.close(log_fd)
-            os.execvpe(command[0], command, os.environ.copy())
+            os.execvpe(command[0], command, _child_environment())
         except BaseException as exc:  # noqa: BLE001 - last chance before os._exit.
             message = f"{type(exc).__name__}: {exc}".encode("utf-8", errors="replace")
             try:
@@ -597,6 +645,7 @@ def _popen_detached_windows(command: list[str], *, cwd: Path, log_path: Path) ->
     log_handle = log_path.open("a", encoding="utf-8", errors="replace")
     kwargs: dict[str, Any] = {
         "cwd": str(cwd),
+        "env": _child_environment(),
         "stdin": subprocess.DEVNULL,
         "stdout": log_handle,
         "stderr": subprocess.STDOUT,
@@ -626,6 +675,8 @@ def _process_record(*, pid: int, command: list[str], log_path: Path) -> dict[str
     start_token = _process_start_token(pid)
     if start_token:
         record["start_token"] = start_token
+    elif os.name == "nt":
+        record["identity_unverified"] = True
     return record
 
 
@@ -709,7 +760,7 @@ def _process_identity_matches(process: dict[str, Any] | None) -> bool:
         return True
     expected = process.get("start_token") if isinstance(process, dict) else None
     if not isinstance(expected, str) or not expected:
-        return False
+        return bool(process.get("identity_unverified")) if isinstance(process, dict) else False
     return _process_start_token(pid) == expected
 
 
@@ -737,6 +788,8 @@ def _process_group_id(pid: int) -> int | None:
 
 
 def _process_start_token(pid: int) -> str:
+    if os.name == "nt":
+        return _windows_process_start_token(pid)
     proc_stat = Path(f"/proc/{pid}/stat")
     try:
         text = proc_stat.read_text(encoding="utf-8", errors="replace")
@@ -748,6 +801,22 @@ def _process_start_token(pid: int) -> str:
     result = _run_capture(["ps", "-p", str(pid), "-o", "lstart="], timeout=5)
     if result.returncode == 0 and result.stdout.strip():
         return f"ps:{result.stdout.strip()}"
+    return ""
+
+
+def _windows_process_start_token(pid: int) -> str:
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        (
+            "Get-CimInstance Win32_Process -Filter "
+            f"'ProcessId={pid}' | Select-Object -ExpandProperty CreationDate"
+        ),
+    ]
+    result = _run_capture(command, timeout=5)
+    if result.returncode == 0 and result.stdout.strip():
+        return f"win:{result.stdout.strip()}"
     return ""
 
 
@@ -763,12 +832,21 @@ def _tail_log_files(state: dict[str, Any], *, tail: int) -> str:
         if not path.is_file():
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                lines = deque((line.rstrip("\n") for line in handle), maxlen=tail)
         except OSError:
             continue
-        body = "\n".join(lines[-tail:])
+        body = "\n".join(lines)
         sections.append(f"== {name} ==\n{body}" if body else f"== {name} ==")
     return "\n".join(sections)
+
+
+def _child_environment() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _CHILD_ENV_ALLOWLIST or key.startswith("LC_")
+    }
 
 
 def _run_capture(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:

@@ -164,3 +164,121 @@ def test_wait_for_android_device_ignores_before_devices(
             timeout=1,
             pid=123,
         )
+
+
+def test_start_rejects_non_loopback_host(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    code = local_sandbox.main(
+        [
+            "start",
+            "--target",
+            "pc",
+            "--cwd",
+            str(tmp_path),
+            "--host",
+            "0.0.0.0",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "loopback" in captured.err
+
+
+def test_state_path_rejects_dot_segments():
+    with pytest.raises(local_sandbox.LocalSandboxError, match="must not"):
+        local_sandbox._state_path("..")
+
+
+def test_child_environment_scrubs_token(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("PATH", "/bin")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_" + "a" * 32)
+    monkeypatch.setenv("ANDROID_HOME", "/android")
+
+    env = local_sandbox._child_environment()
+
+    assert env["PATH"] == "/bin"
+    assert env["ANDROID_HOME"] == "/android"
+    assert "GITHUB_TOKEN" not in env
+
+
+def test_tail_log_files_returns_only_recent_lines(tmp_path: Path):
+    log = tmp_path / "provider.log"
+    log.write_text("\n".join(f"line-{idx}" for idx in range(20)), encoding="utf-8")
+
+    out = local_sandbox._tail_log_files({"logs": {"provider": str(log)}}, tail=3)
+
+    assert "line-16" not in out
+    assert "line-17" in out
+    assert "line-19" in out
+
+
+def test_start_android_cleans_owned_emulator_on_boot_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Args:
+        android_avd = "Pixel"
+        appium_port = 0
+        headless = False
+        host = "127.0.0.1"
+        no_appium = True
+        scenario = ""
+        startup_timeout = 1
+
+    cleanup: list[str] = []
+    monkeypatch.setattr(
+        local_sandbox.shutil,
+        "which",
+        lambda name: {"adb": "/adb", "emulator": "/emulator"}.get(name),
+    )
+    monkeypatch.setattr(local_sandbox, "_online_android_devices", lambda _adb: [])
+    monkeypatch.setattr(local_sandbox, "_spawn_detached", lambda *_args, **_kwargs: 123)
+    monkeypatch.setattr(
+        local_sandbox,
+        "_process_record",
+        lambda **_kwargs: {"pid": 123, "pgid": 123, "start_token": "tok"},
+    )
+    monkeypatch.setattr(
+        local_sandbox,
+        "_wait_for_android_device",
+        lambda *_args, **_kwargs: "emulator-5554",
+    )
+
+    def fail_boot(*_args, **_kwargs):
+        raise local_sandbox.LocalSandboxError("boot failed")
+
+    monkeypatch.setattr(local_sandbox, "_wait_for_android_boot", fail_boot)
+    monkeypatch.setattr(local_sandbox, "_run_quiet", lambda *_args, **_kwargs: cleanup.append("emu-kill"))
+    monkeypatch.setattr(
+        local_sandbox,
+        "_terminate_process",
+        lambda *_args, **_kwargs: cleanup.append("terminate") or True,
+    )
+
+    with pytest.raises(local_sandbox.LocalSandboxError, match="boot failed"):
+        local_sandbox._start_android(
+            Args(),
+            sandbox_id="local-mobile-test",
+            sandbox_dir=tmp_path,
+            cwd=tmp_path,
+        )
+
+    assert cleanup == ["emu-kill", "terminate"]
+
+
+def test_process_record_marks_windows_unverified_when_token_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(local_sandbox.os, "name", "nt", raising=False)
+    monkeypatch.setattr(local_sandbox, "_process_group_id", lambda _pid: None)
+    monkeypatch.setattr(local_sandbox, "_process_start_token", lambda _pid: "")
+
+    record = local_sandbox._process_record(
+        pid=123,
+        command=["tool"],
+        log_path=tmp_path / "tool.log",
+    )
+
+    assert record["identity_unverified"] is True
