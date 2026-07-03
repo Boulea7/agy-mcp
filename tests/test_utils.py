@@ -272,6 +272,50 @@ def test_safe_write_text_verify_under_refuses_symlink_parent(tmp_path):
     assert not (outside / "nested").exists()
 
 
+@pytest.mark.skipif(is_windows(), reason="symlink alias handling is POSIX-specific")
+def test_safe_write_text_verify_under_accepts_home_alias_inside_root(tmp_path):
+    real_home = tmp_path / "data00" / "home" / "alice"
+    real_home.mkdir(parents=True)
+    alias_home = tmp_path / "home-alias"
+    alias_home.symlink_to(real_home, target_is_directory=True)
+
+    target = alias_home / "skills" / "config.json"
+
+    safe_write_text(target, "{}", verify_under=real_home.resolve(strict=True))
+
+    assert (real_home / "skills" / "config.json").read_text(encoding="utf-8") == "{}"
+
+
+@pytest.mark.skipif(is_windows(), reason="symlink alias handling is POSIX-specific")
+def test_safe_write_text_verify_under_accepts_alias_root_without_suffix(tmp_path):
+    real_home = tmp_path / "data00" / "home" / "alice"
+    real_home.mkdir(parents=True)
+    alias_home = tmp_path / "home-alias"
+    alias_home.symlink_to(real_home, target_is_directory=True)
+
+    target = alias_home / "config.json"
+
+    safe_write_text(target, "{}", verify_under=real_home.resolve(strict=True))
+
+    assert (real_home / "config.json").read_text(encoding="utf-8") == "{}"
+
+
+@pytest.mark.skipif(is_windows(), reason="symlink alias handling is POSIX-specific")
+def test_safe_write_text_verify_under_rejects_alias_outside_root(tmp_path):
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    alias = tmp_path / "outside-alias"
+    alias.symlink_to(outside, target_is_directory=True)
+
+    target = alias / "config.json"
+
+    with pytest.raises(OSError, match="not under"):
+        safe_write_text(target, "{}", verify_under=root.resolve(strict=True))
+    assert not (outside / "config.json").exists()
+
+
 def test_safe_write_text_leaves_no_tmp_orphans(tmp_path):
     target = tmp_path / "out.txt"
     safe_write_text(target, "ok")
@@ -311,6 +355,8 @@ def test_safe_write_text_fallback_path_still_writes(tmp_path, monkeypatch):
         ("/Users/alice/agy-mcp/file.py", "~/agy-mcp/file.py"),
         ("/home/bob/projects/x", "~/projects/x"),
         ("/Users/alice/x and /Users/bob/y", "~/x and ~/y"),
+        ("/data00/home/alice/work/agy-mcp", "~/work/agy-mcp"),
+        ("cwd=/data00/home/alice/work/agy-mcp", "cwd=~/work/agy-mcp"),
         ("nothing to anonymise here", "nothing to anonymise here"),
         ("", ""),
         (r"C:\Users\carol\Documents", r"~/Documents"),

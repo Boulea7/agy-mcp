@@ -142,8 +142,15 @@ _HOME_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)(?:\\\\\?\\)?[A-Z]:[\\/]Users[\\/][A-Za-z0-9._-]+" + _HOME_TAIL),
     # UNC ``\\server\share\Users\<u>``.
     re.compile(r"(?i)\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9._-]+\\Users\\[A-Za-z0-9._-]+" + _HOME_TAIL),
-    re.compile(r"/Users/[A-Za-z0-9._-]+" + _HOME_TAIL),
-    re.compile(r"/home/[A-Za-z0-9._-]+" + _HOME_TAIL),
+    # POSIX homes that sit under a mount prefix, e.g.
+    # ``/data00/home/alice``. Match the whole mounted home path so the
+    # replacement becomes ``~/...`` rather than ``/data00~/...``.
+    re.compile(
+        r"(?<![A-Za-z0-9._-])/[A-Za-z0-9._-]+/(?:Users|home)/[A-Za-z0-9._-]+"
+        + _HOME_TAIL
+    ),
+    re.compile(r"(?<![A-Za-z0-9._-])/Users/[A-Za-z0-9._-]+" + _HOME_TAIL),
+    re.compile(r"(?<![A-Za-z0-9._-])/home/[A-Za-z0-9._-]+" + _HOME_TAIL),
     # Explicit-home reference: ``~alice/`` or ``~alice``. Lead-anchor on a
     # non-word lookbehind so embedded text like ``foo~bar`` won't match.
     re.compile(r"(?<!\w)~[A-Za-z][A-Za-z0-9._-]*" + _HOME_TAIL),
@@ -769,16 +776,48 @@ def _relative_parts_under_verified_root(
         raise OSError(f"verify_under root is not a directory: {root}")
     try:
         rel = parent.relative_to(resolved_root)
-    except ValueError as exc:
-        raise OSError(
-            f"refusing to {action} {target}: parent {parent} not under {root}",
-        ) from exc
+    except ValueError:
+        try:
+            rel = _relative_parts_via_existing_anchor(parent, resolved_root)
+        except OSError as alias_exc:
+            raise OSError(
+                f"refusing to {action} {target}: parent {parent} not under {root}",
+            ) from alias_exc
     rel_parts = rel.parts
     if any(segment in ("", ".", os.pardir) for segment in rel_parts):
         raise OSError(
             f"refusing to {action} {target}: parent contains traversal segment",
         )
     return resolved_root, rel_parts
+
+
+def _relative_parts_via_existing_anchor(parent: Path, resolved_root: Path) -> Path:
+    """Return ``parent`` parts when it reaches ``resolved_root`` through an alias.
+
+    Some Linux hosts expose ``$HOME`` as ``/home/user`` while
+    ``Path.home().resolve()`` is ``/data00/home/user``. The openat writer
+    pins the resolved root, so it is safe to accept such an alias only
+    after resolving the longest existing ancestor and proving that it
+    lands under ``resolved_root``. Missing suffixes are then created from
+    the pinned root fd without following the alias path again.
+    """
+
+    missing: list[str] = []
+    probe = parent
+    while not probe.exists():
+        if probe.parent == probe:
+            raise OSError(f"parent {parent} has no existing anchor")
+        missing.append(probe.name)
+        probe = probe.parent
+
+    try:
+        resolved_probe = probe.resolve(strict=True)
+        probe_rel = resolved_probe.relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        raise OSError(f"parent {parent} alias does not resolve under {resolved_root}") from exc
+
+    base_parts = tuple(part for part in probe_rel.parts if part not in ("", "."))
+    return Path(*base_parts, *reversed(missing))
 
 
 # ---------------------------------------------------------------------------
