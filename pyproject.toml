@@ -56,6 +56,7 @@ agymcp = "agy_mcp.cli:main"
 agy-bridge = "agy_mcp.bridge:main"
 agy-doctor = "agy_mcp.doctor:main"
 agy-install-skill = "agy_mcp.install:main"
+agy-local-sandbox = "agy_mcp.local_sandbox:main"
 
 [project.urls]
 Homepage = "https://github.com/Boulea7/agy-mcp"

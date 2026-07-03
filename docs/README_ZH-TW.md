@@ -127,7 +127,7 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 | `agy_result` | 取得已完成 job 的結果；不傳 `job_id` 時回傳最近完成任務 |
 | `agy_cancel` | 跨平台 process group 終止 |
 | `agy_sessions` | 列出最近 session |
-| `agy_sandbox_start` | 依設定啟動本機或外部遠端 mobile / PC sandbox provider，回傳 sandbox_id / endpoint / status |
+| `agy_sandbox_start` | 啟動內建 local（Playwright / Android）或已設定的外部遠端 mobile / PC sandbox provider，回傳 sandbox_id / endpoint / status |
 | `agy_sandbox_status` | 查詢已啟動 sandbox 的 provider 狀態 |
 | `agy_sandbox_stop` | 停止已啟動 sandbox |
 | `agy_sandbox_logs` | 讀取 sandbox 最近日誌 |
@@ -135,6 +135,11 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 | `agy_doctor` | 環境 + 鑑權 + capability 探測（不洩漏 secrets） |
 | `agy_install_skill` | 將 SKILL bundle 安裝到 Claude / Codex / Antigravity 目錄 |
 | `agy_purge` | 清理本機 session-store 目錄（拒絕 `days <= 0`） |
+
+`provider="local"` 是內建 provider：`target="pc"` 會啟動 Playwright
+`run-server` 並回傳 `ws://` endpoint；`target="android"` / `"mobile"` 會使用
+本機 `adb` / `emulator`，若已安裝 Appium 也會啟動並回傳 HTTP endpoint。
+外部裝置農場或 cloud browser 仍透過 `[sandbox.providers.<name>]` 設定接入。
 
 ## 何時呼叫 / 何時不要呼叫
 

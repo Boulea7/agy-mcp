@@ -175,21 +175,28 @@ where direct `agy` works.
 
 ---
 
-## 6. Launch a configured sandbox environment
+## 6. Launch a local or external sandbox environment
 
-Configure a provider command once in `~/.config/agy-mcp/config.toml`.
-The provider can be either local or external remote. `agy-mcp` does not
-assume a specific cloud, vendor, or internal platform; it only executes the
-configured wrapper command and reads JSON from stdout.
+`agy-mcp` ships a built-in `local` provider backed by `agy-local-sandbox`.
+It can start a local Playwright `run-server` for PC/browser tests and can
+attach to an online Android device or boot a local Android Emulator through
+`adb` / `emulator`. If `appium` is installed, the Android provider also starts
+an Appium server and returns its HTTP endpoint.
+
+No local cloud or company-internal service is assumed. External device farms,
+VM pools, or cloud browsers remain ordinary configured providers that expose
+the same JSON contract.
 
 ```toml
 [sandbox]
-default_provider = "local-vm"
+default_provider = "local"
 default_timeout = 900
 
-[sandbox.providers.local-vm]
+# The built-in provider is registered automatically. This explicit stanza is
+# optional; keep it only if you want to pin or customize the command.
+[sandbox.providers.local]
 start = [
-  "local-sandbox",
+  "agy-local-sandbox",
   "start",
   "--target",
   "{target}",
@@ -199,10 +206,10 @@ start = [
   "{cwd}",
   "--json",
 ]
-status = ["local-sandbox", "status", "--id", "{sandbox_id}", "--json"]
-stop = ["local-sandbox", "stop", "--id", "{sandbox_id}", "--json"]
-logs = ["local-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
-attach = ["local-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
+status = ["agy-local-sandbox", "status", "--id", "{sandbox_id}", "--json"]
+stop = ["agy-local-sandbox", "stop", "--id", "{sandbox_id}", "--json"]
+logs = ["agy-local-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
+attach = ["agy-local-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
 
 [sandbox.providers.external-remote]
 start = [
@@ -226,11 +233,20 @@ Then launch it through MCP:
 
 ```python
 local_box = agy_sandbox_start(
-    provider="local-vm",
+    provider="local",
     target="pc",
     cd="/Users/me/work/app",
     scenario="checkout-smoke",
 )
+# local_box["endpoint"] is a Playwright ws:// endpoint.
+
+android_box = agy_sandbox_start(
+    provider="local",
+    target="android",
+    cd="/Users/me/work/app",
+    scenario="checkout-smoke",
+)
+# android_box["endpoint"] is Appium HTTP if appium is installed, otherwise adb:<serial>.
 
 remote_box = agy_sandbox_start(
     provider="external-remote",

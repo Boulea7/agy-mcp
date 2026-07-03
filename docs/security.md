@@ -184,6 +184,11 @@ deadlock.
   bridge backends, and provider stdout/stderr is captured through
   temporary files, read back with size limits, and redacted before being
   returned in structured envelopes.
+  The built-in `local` provider is a local process/device launcher, not a
+  permission sandbox: it starts already-installed Playwright, `adb`,
+  Android Emulator, and optionally Appium, records only local PID/endpoint
+  state under `~/.agy-mcp/local-sandboxes/`, and does not assume or contact
+  any company-internal cloud.
 - All sync tools route through `_structured_failure` on exception —
   never a bare traceback to the caller.
 

@@ -162,6 +162,9 @@ agy-bridge --cd . --PROMPT "Hello" --mode ask --dry-run --debug
 
 # Full environment report (Python, uv, agy/gemini binaries, auth, network env, session store)
 agy-doctor
+
+# Built-in local sandbox provider CLI; requires Playwright or Android tools only when starting one
+agy-local-sandbox --help
 ```
 
 You should see a JSON envelope with `success=true`, a `command_preview`

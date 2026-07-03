@@ -126,7 +126,7 @@ agy-doctor
 | `agy_result` | 取已完成 job 的结果；不传 `job_id` 时返回最近完成任务 |
 | `agy_cancel` | 跨平台 process group 终止 |
 | `agy_sessions` | 列最近 session |
-| `agy_sandbox_start` | 按配置拉起本地或外部远端 mobile / PC sandbox provider，返回 sandbox_id / endpoint / status |
+| `agy_sandbox_start` | 拉起内置 local（Playwright / Android）或配置的外部远端 mobile / PC sandbox provider，返回 sandbox_id / endpoint / status |
 | `agy_sandbox_status` | 查询已启动 sandbox 的 provider 状态 |
 | `agy_sandbox_stop` | 停止已启动 sandbox |
 | `agy_sandbox_logs` | 拉取 sandbox 最近日志 |
@@ -134,6 +134,11 @@ agy-doctor
 | `agy_doctor` | 环境 + 鉴权 + capability 探测（不泄漏 secrets） |
 | `agy_install_skill` | 把 SKILL bundle 装到 Claude / Codex / Antigravity 目录 |
 | `agy_purge` | 清理本机 session-store 目录（refuse `days<=0`） |
+
+`provider="local"` 是随包提供的本地 provider：`target="pc"` 会启动
+Playwright `run-server` 并返回 `ws://` endpoint；`target="android"` /
+`"mobile"` 会使用本机 `adb` / `emulator`，可用时再启动 Appium。外部远端
+设备农场或云浏览器仍通过 `[sandbox.providers.<name>]` 配置接入。
 
 ## 何时调用 / 何时不调用
 

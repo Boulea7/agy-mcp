@@ -27,6 +27,7 @@ DEFAULT_ALLOW_WRITE = False
 DEFAULT_BACKEND = "auto"          # auto | agy | gemini
 DEFAULT_OUTPUT_PROTOCOL = "claude"  # raw | claude | codex
 DEFAULT_RETENTION_DAYS = 30
+BUILTIN_LOCAL_SANDBOX_PROVIDER = "local"
 _BOOL_TRUE = {"1", "true", "yes", "on"}
 _BOOL_FALSE = {"0", "false", "no", "off"}
 
@@ -93,11 +94,61 @@ class SandboxProviderConfig:
     attach: list[str] = field(default_factory=list)
 
 
+def builtin_sandbox_providers() -> dict[str, SandboxProviderConfig]:
+    """Return built-in providers available without user TOML config."""
+
+    return {
+        BUILTIN_LOCAL_SANDBOX_PROVIDER: SandboxProviderConfig(
+            start=[
+                "agy-local-sandbox",
+                "start",
+                "--target",
+                "{target}",
+                "--scenario",
+                "{scenario}",
+                "--cwd",
+                "{cwd}",
+                "--json",
+            ],
+            status=[
+                "agy-local-sandbox",
+                "status",
+                "--id",
+                "{sandbox_id}",
+                "--json",
+            ],
+            stop=[
+                "agy-local-sandbox",
+                "stop",
+                "--id",
+                "{sandbox_id}",
+                "--json",
+            ],
+            logs=[
+                "agy-local-sandbox",
+                "logs",
+                "--id",
+                "{sandbox_id}",
+                "--tail",
+                "{tail}",
+                "--json",
+            ],
+            attach=[
+                "agy-local-sandbox",
+                "attach",
+                "--id",
+                "{sandbox_id}",
+                "--json",
+            ],
+        )
+    }
+
+
 @dataclass(slots=True)
 class SandboxConfig:
     default_provider: str | None = None
     default_timeout: int = 900
-    providers: dict[str, SandboxProviderConfig] = field(default_factory=dict)
+    providers: dict[str, SandboxProviderConfig] = field(default_factory=builtin_sandbox_providers)
 
 
 @dataclass(slots=True)
@@ -228,7 +279,7 @@ def _from_toml(data: dict[str, Any]) -> Config:
 def _sandbox_from_toml(section: Any) -> SandboxConfig:
     if not isinstance(section, dict):
         return SandboxConfig()
-    providers: dict[str, SandboxProviderConfig] = {}
+    providers = builtin_sandbox_providers()
     raw_providers = section.get("providers", {})
     if isinstance(raw_providers, dict):
         for name, raw in raw_providers.items():

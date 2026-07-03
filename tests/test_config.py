@@ -27,6 +27,8 @@ def test_defaults_match_user_decision(isolated_env, tmp_path: Path, monkeypatch:
     assert config.backend.prefer == DEFAULT_BACKEND == "auto"
     assert config.backend.output_protocol == DEFAULT_OUTPUT_PROTOCOL == "claude"
     assert config.session_store.root  # filled with default path
+    assert "local" in config.sandbox.providers
+    assert config.sandbox.providers["local"].start[:2] == ["agy-local-sandbox", "start"]
 
 
 def test_toml_overrides_defaults(isolated_env, tmp_path: Path):
@@ -74,6 +76,7 @@ attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
     assert config.session_store.retention_days == 7
     assert config.sandbox.default_provider == "external-remote"
     assert config.sandbox.default_timeout == 120
+    assert "local" in config.sandbox.providers
     assert config.sandbox.providers["external-remote"].start == [
         "remote-sandbox",
         "start",
@@ -199,3 +202,4 @@ def test_pyproject_exposes_doctor_console_script():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     assert data["project"]["scripts"]["agy-doctor"] == "agy_mcp.doctor:main"
+    assert data["project"]["scripts"]["agy-local-sandbox"] == "agy_mcp.local_sandbox:main"

@@ -884,18 +884,20 @@ def agy_sessions_tool(limit: int = 50) -> SessionsToolResponse:
 
 
 # ---------------------------------------------------------------------------
-# Tool: agy_sandbox_start — launch configured provider
+# Tool: agy_sandbox_start — launch local or configured provider
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool(
     name="agy_sandbox_start",
     description=(
-        "Launch a configured local or external remote sandbox provider for "
-        "mobile / PC testing. Providers are configured under "
-        "[sandbox.providers.<name>] in config.toml; this tool runs the "
-        "provider command without a shell and parses its JSON stdout into "
-        "sandbox_id / endpoint / status."
+        "Launch the built-in local sandbox provider or a configured external "
+        "remote provider for mobile / PC testing. provider='local' starts "
+        "Playwright for PC/browser targets or local adb/emulator/Appium for "
+        "Android targets. External providers are configured under "
+        "[sandbox.providers.<name>] in config.toml. The tool runs the provider "
+        "command without a shell and parses JSON stdout into sandbox_id / "
+        "endpoint / status."
     ),
 )
 async def agy_sandbox_start_tool(
@@ -941,9 +943,9 @@ async def agy_sandbox_start_tool(
 @mcp.tool(
     name="agy_sandbox_status",
     description=(
-        "Return status for a sandbox previously created by a configured local "
-        "or external remote provider. The provider must define a status argv "
-        "command under [sandbox.providers.<name>] in config.toml."
+        "Return status for a sandbox previously created by the built-in local "
+        "provider or a configured external remote provider. The selected "
+        "provider must define a status argv command."
     ),
 )
 async def agy_sandbox_status_tool(
@@ -983,9 +985,9 @@ async def agy_sandbox_status_tool(
 @mcp.tool(
     name="agy_sandbox_stop",
     description=(
-        "Stop a sandbox previously created by a configured local or external "
-        "remote provider. The provider must define a stop argv command under "
-        "[sandbox.providers.<name>] in config.toml."
+        "Stop a sandbox previously created by the built-in local provider or "
+        "a configured external remote provider. The selected provider must "
+        "define a stop argv command."
     ),
 )
 async def agy_sandbox_stop_tool(
@@ -1025,9 +1027,10 @@ async def agy_sandbox_stop_tool(
 @mcp.tool(
     name="agy_sandbox_logs",
     description=(
-        "Fetch recent logs for a sandbox from a configured local or external "
-        "remote provider. The provider must define a logs argv command; tail "
-        "is passed as the {tail} template value."
+        "Fetch recent logs for a sandbox from the built-in local provider or "
+        "a configured external remote provider. The selected provider must "
+        "define a logs argv command; tail is passed as the {tail} template "
+        "value."
     ),
 )
 async def agy_sandbox_logs_tool(
@@ -1069,9 +1072,10 @@ async def agy_sandbox_logs_tool(
 @mcp.tool(
     name="agy_sandbox_attach",
     description=(
-        "Return attach/connect metadata for a sandbox from a configured local "
-        "or external remote provider. The provider must define an attach argv "
-        "command that returns JSON, commonly including endpoint/url."
+        "Return attach/connect metadata for a sandbox from the built-in local "
+        "provider or a configured external remote provider. The selected "
+        "provider must define an attach argv command that returns JSON, "
+        "commonly including endpoint/url."
     ),
 )
 async def agy_sandbox_attach_tool(

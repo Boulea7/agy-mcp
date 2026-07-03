@@ -95,15 +95,15 @@ Sandbox launch providers are configured under `[sandbox]`:
 
 ```toml
 [sandbox]
-default_provider = "local-vm"
+default_provider = "local"
 default_timeout = 900
 
-[sandbox.providers.local-vm]
-start = ["sandboxctl", "start", "--target", "{target}", "--cwd", "{cwd}", "--json"]
-status = ["sandboxctl", "status", "--id", "{sandbox_id}", "--json"]
-stop = ["sandboxctl", "stop", "--id", "{sandbox_id}", "--json"]
-logs = ["sandboxctl", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
-attach = ["sandboxctl", "attach", "--id", "{sandbox_id}", "--json"]
+[sandbox.providers.local]
+start = ["agy-local-sandbox", "start", "--target", "{target}", "--cwd", "{cwd}", "--json"]
+status = ["agy-local-sandbox", "status", "--id", "{sandbox_id}", "--json"]
+stop = ["agy-local-sandbox", "stop", "--id", "{sandbox_id}", "--json"]
+logs = ["agy-local-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "--json"]
+attach = ["agy-local-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
 
 [sandbox.providers.external-remote]
 start = ["remote-sandbox", "start", "--target", "{target}", "--project", "{cwd}", "--json"]
@@ -113,11 +113,18 @@ logs = ["remote-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "-
 attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
 ```
 
-`agy_sandbox_start` treats both local and external remote providers the
-same way: run the configured command without a shell and expect JSON stdout
-with optional `sandbox_id`, `endpoint`, and `status` fields. The bridge does
-not encode any cloud vendor, company-internal service, device-farm API, or
-VM implementation detail.
+The `local` provider is built in and does not require TOML config unless an
+operator wants to override the command. For `target="pc"` it launches
+Playwright `run-server` and returns a `ws://` endpoint. For `target="android"`
+or `target="mobile"` it uses the local Android toolchain: attach to an online
+`adb` device, or boot an AVD through `emulator`; if `appium` is installed it
+also returns an Appium HTTP endpoint.
+
+`agy_sandbox_start` treats the built-in local provider and external remote
+providers the same way: run the provider command without a shell and expect
+JSON stdout with optional `sandbox_id`, `endpoint`, and `status` fields. The
+bridge does not encode any cloud vendor, company-internal service, device-farm
+API, or VM implementation detail.
 
 ### `session_store.py` — per-job filesystem layout
 
@@ -217,7 +224,7 @@ on canonical events so future agy event types survive without a schema bump).
 | `agy_result` | yes | Return the captured output for a finished background job |
 | `agy_cancel` | yes | Process-group cancel (POSIX `killpg` / Windows `CTRL_BREAK_EVENT`) |
 | `agy_sessions` | yes | List recent jobs with mtime / status / cwd summary |
-| `agy_sandbox_start` | yes | Launch configured local or external remote mobile / PC sandbox provider |
+| `agy_sandbox_start` | yes | Launch built-in local or configured external remote mobile / PC sandbox provider |
 | `agy_sandbox_status` | yes | Query provider status for a started sandbox |
 | `agy_sandbox_stop` | yes | Stop a started sandbox |
 | `agy_sandbox_logs` | yes | Fetch recent sandbox logs |
