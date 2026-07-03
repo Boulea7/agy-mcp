@@ -137,15 +137,13 @@ def _start_playwright(
 
     port = args.port or _free_tcp_port(args.host)
     log_path = sandbox_dir / "playwright.log"
-    pid = _spawn_detached(
-        [*command, "--host", args.host, "--port", str(port)],
-        cwd=cwd,
-        log_path=log_path,
-    )
+    launch_command = [*command, "--host", args.host, "--port", str(port)]
+    pid = _spawn_detached(launch_command, cwd=cwd, log_path=log_path)
+    process = _process_record(pid=pid, command=launch_command, log_path=log_path)
     try:
         _wait_for_tcp(args.host, port, args.startup_timeout, pid=pid)
     except LocalSandboxError:
-        _terminate_pid(pid)
+        _terminate_process(process, allow_unverified=True)
         raise
 
     endpoint = f"ws://{args.host}:{port}/"
@@ -161,12 +159,7 @@ def _start_playwright(
         "updated_at": now,
         "cwd": str(cwd),
         "scenario": args.scenario,
-        "processes": {
-            "playwright": {
-                "pid": pid,
-                "log": str(log_path),
-            }
-        },
+        "processes": {"playwright": process},
         "logs": {"playwright": str(log_path)},
         "metadata": {
             "playwright_ws_endpoint": endpoint,
@@ -195,7 +188,7 @@ def _start_android(
     serial = sorted(before)[0] if before else ""
     owns_emulator = False
     emulator_avd = ""
-    emulator_pid: int | None = None
+    emulator_process: dict[str, Any] | None = None
     logs: dict[str, str] = {}
 
     if not serial:
@@ -220,6 +213,7 @@ def _start_android(
         if args.headless or _env_true("AGY_LOCAL_SANDBOX_ANDROID_HEADLESS"):
             command.extend(["-no-window", "-no-audio"])
         emulator_pid = _spawn_detached(command, cwd=cwd, log_path=emulator_log)
+        emulator_process = _process_record(pid=emulator_pid, command=command, log_path=emulator_log)
         owns_emulator = True
         logs["emulator"] = str(emulator_log)
         serial = _wait_for_android_device(
@@ -232,13 +226,14 @@ def _start_android(
     _wait_for_android_boot(adb, serial=serial, timeout=args.startup_timeout)
     appium = _start_appium(args, sandbox_dir=sandbox_dir, cwd=cwd)
     logs.update(appium.pop("logs", {}))
+    appium_process = appium.pop("process", None)
     endpoint = appium.get("appium_url") or f"adb:{serial}"
     now = time.time()
     processes: dict[str, dict[str, Any]] = {}
-    if emulator_pid is not None:
-        processes["emulator"] = {"pid": emulator_pid, "log": logs.get("emulator")}
-    if appium.get("appium_pid"):
-        processes["appium"] = {"pid": appium["appium_pid"], "log": logs.get("appium")}
+    if emulator_process is not None:
+        processes["emulator"] = emulator_process
+    if isinstance(appium_process, dict):
+        processes["appium"] = appium_process
 
     return {
         "sandbox_id": sandbox_id,
@@ -277,15 +272,13 @@ def _start_appium(
 
     port = args.appium_port or _free_tcp_port(args.host)
     log_path = sandbox_dir / "appium.log"
-    pid = _spawn_detached(
-        [appium, "--address", args.host, "--port", str(port)],
-        cwd=cwd,
-        log_path=log_path,
-    )
+    command = [appium, "--address", args.host, "--port", str(port)]
+    pid = _spawn_detached(command, cwd=cwd, log_path=log_path)
+    process = _process_record(pid=pid, command=command, log_path=log_path)
     try:
         _wait_for_tcp(args.host, port, min(args.startup_timeout, 20), pid=pid)
     except LocalSandboxError:
-        _terminate_pid(pid)
+        _terminate_process(process, allow_unverified=True)
         return {
             "appium_status": "failed",
             "appium_error": "Appium process did not open its TCP port before timeout.",
@@ -298,6 +291,7 @@ def _start_appium(
         "appium_host": args.host,
         "appium_port": port,
         "logs": {"appium": str(log_path)},
+        "process": process,
     }
 
 
@@ -314,21 +308,15 @@ def _cmd_stop(args: argparse.Namespace) -> dict[str, Any]:
     processes = state.get("processes", {}) if isinstance(state.get("processes"), dict) else {}
 
     if kind == "android":
-        appium_pid = _process_pid(processes, "appium")
-        if appium_pid:
-            _terminate_pid(appium_pid)
+        _terminate_process(_process_info(processes, "appium"))
         metadata = state.get("metadata", {}) if isinstance(state.get("metadata"), dict) else {}
         if metadata.get("owns_emulator") and metadata.get("adb_serial"):
             adb = shutil.which("adb")
             if adb:
                 _run_quiet([adb, "-s", str(metadata["adb_serial"]), "emu", "kill"], timeout=5)
-        emulator_pid = _process_pid(processes, "emulator")
-        if emulator_pid:
-            _terminate_pid(emulator_pid)
+        _terminate_process(_process_info(processes, "emulator"))
     else:
-        playwright_pid = _process_pid(processes, "playwright")
-        if playwright_pid:
-            _terminate_pid(playwright_pid)
+        _terminate_process(_process_info(processes, "playwright"))
 
     state["status"] = "stopped"
     state["updated_at"] = time.time()
@@ -432,14 +420,12 @@ def _refresh_state(state: dict[str, Any]) -> None:
     processes = state.get("processes", {}) if isinstance(state.get("processes"), dict) else {}
     metadata = state.get("metadata", {}) if isinstance(state.get("metadata"), dict) else {}
     if kind == "playwright":
-        pid = _process_pid(processes, "playwright")
-        state["status"] = "running" if pid and _pid_running(pid) else "stopped"
+        state["status"] = "running" if _process_running(_process_info(processes, "playwright")) else "stopped"
     elif kind == "android":
         serial = str(metadata.get("adb_serial", ""))
         adb = shutil.which("adb")
         online = bool(adb and serial and serial in _online_android_devices(adb))
-        if metadata.get("appium_pid"):
-            metadata["appium_running"] = _pid_running(int(metadata["appium_pid"]))
+        metadata["appium_running"] = _process_running(_process_info(processes, "appium"))
         metadata["adb_online"] = online
         state["metadata"] = metadata
         state["status"] = "running" if online else "stopped"
@@ -506,8 +492,6 @@ def _wait_for_android_device(
         for serial in devices:
             if serial not in before:
                 return serial
-        if devices:
-            return devices[0]
         if not _pid_running(pid):
             raise LocalSandboxError("Android emulator exited before adb reported an online device")
         time.sleep(1)
@@ -630,36 +614,61 @@ def _popen_detached_windows(command: list[str], *, cwd: Path, log_path: Path) ->
     return proc.pid
 
 
-def _terminate_pid(pid: int) -> None:
+def _process_record(*, pid: int, command: list[str], log_path: Path) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "pid": pid,
+        "log": str(log_path),
+        "command": Path(command[0]).name,
+    }
+    pgid = _process_group_id(pid)
+    if pgid is not None:
+        record["pgid"] = pgid
+    start_token = _process_start_token(pid)
+    if start_token:
+        record["start_token"] = start_token
+    return record
+
+
+def _terminate_process(process: dict[str, Any] | None, *, allow_unverified: bool = False) -> bool:
+    pid = _process_record_pid(process)
+    if pid is None or not _pid_running(pid):
+        return False
+    if not allow_unverified and not _process_identity_matches(process):
+        return False
+    return _terminate_pid(pid, pgid=_process_record_pgid(process))
+
+
+def _terminate_pid(pid: int, *, pgid: int | None = None) -> bool:
     if pid <= 0 or not _pid_running(pid):
-        return
+        return False
     proc = _LIVE_PROCS.get(pid)
     try:
         if os.name == "nt":
             os.kill(pid, signal.SIGTERM)
         else:
-            os.killpg(pid, signal.SIGTERM)
+            os.killpg(pgid or pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
-        return
+        return False
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if proc is not None:
             try:
                 proc.wait(timeout=0.1)
                 _LIVE_PROCS.pop(pid, None)
-                return
+                return True
             except subprocess.TimeoutExpired:
                 continue
         if not _pid_running(pid):
-            return
+            return True
         time.sleep(0.1)
     try:
         if os.name == "nt":
             os.kill(pid, signal.SIGKILL)
         else:
-            os.killpg(pid, signal.SIGKILL)
+            os.killpg(pgid or pid, signal.SIGKILL)
     except (OSError, ProcessLookupError):
         pass
+    return True
 
 
 def _pid_running(pid: int) -> bool:
@@ -681,12 +690,65 @@ def _pid_running(pid: int) -> bool:
     return True
 
 
-def _process_pid(processes: dict[str, Any], name: str) -> int | None:
+def _process_info(processes: dict[str, Any], name: str) -> dict[str, Any] | None:
     raw = processes.get(name)
-    if not isinstance(raw, dict):
+    return raw if isinstance(raw, dict) else None
+
+
+def _process_running(process: dict[str, Any] | None) -> bool:
+    pid = _process_record_pid(process)
+    return bool(pid and _pid_running(pid) and _process_identity_matches(process))
+
+
+def _process_identity_matches(process: dict[str, Any] | None) -> bool:
+    pid = _process_record_pid(process)
+    if pid is None:
+        return False
+    proc = _LIVE_PROCS.get(pid)
+    if proc is not None and proc.poll() is None:
+        return True
+    expected = process.get("start_token") if isinstance(process, dict) else None
+    if not isinstance(expected, str) or not expected:
+        return False
+    return _process_start_token(pid) == expected
+
+
+def _process_record_pid(process: dict[str, Any] | None) -> int | None:
+    if not isinstance(process, dict):
         return None
-    pid = raw.get("pid")
+    pid = process.get("pid")
     return int(pid) if isinstance(pid, int) and pid > 0 else None
+
+
+def _process_record_pgid(process: dict[str, Any] | None) -> int | None:
+    if not isinstance(process, dict):
+        return None
+    pgid = process.get("pgid")
+    return int(pgid) if isinstance(pgid, int) and pgid > 0 else None
+
+
+def _process_group_id(pid: int) -> int | None:
+    if os.name == "nt":
+        return None
+    try:
+        return os.getpgid(pid)
+    except OSError:
+        return None
+
+
+def _process_start_token(pid: int) -> str:
+    proc_stat = Path(f"/proc/{pid}/stat")
+    try:
+        text = proc_stat.read_text(encoding="utf-8", errors="replace")
+        fields = text.rsplit(") ", 1)[1].split()
+        if len(fields) > 19:
+            return f"proc:{fields[19]}"
+    except (IndexError, OSError):
+        pass
+    result = _run_capture(["ps", "-p", str(pid), "-o", "lstart="], timeout=5)
+    if result.returncode == 0 and result.stdout.strip():
+        return f"ps:{result.stdout.strip()}"
+    return ""
 
 
 def _tail_log_files(state: dict[str, Any], *, tail: int) -> str:

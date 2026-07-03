@@ -130,3 +130,37 @@ else:
 
     stop = _run_json(capsys, "stop", "--id", start["sandbox_id"])
     assert stop["status"] == "stopped"
+
+
+def test_terminate_process_refuses_start_token_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(local_sandbox, "_pid_running", lambda pid: True)
+    monkeypatch.setattr(local_sandbox, "_process_start_token", lambda pid: "proc:new")
+    monkeypatch.setattr(local_sandbox.os, "killpg", lambda pgid, sig: signals.append((pgid, sig)))
+
+    stopped = local_sandbox._terminate_process(
+        {"pid": 123, "pgid": 123, "start_token": "proc:old"},
+    )
+
+    assert stopped is False
+    assert signals == []
+
+
+def test_wait_for_android_device_ignores_before_devices(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ticks = iter([0.0, 0.1, 0.2, 1.1])
+    monkeypatch.setattr(local_sandbox.time, "monotonic", lambda: next(ticks, 2.0))
+    monkeypatch.setattr(local_sandbox.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(local_sandbox, "_pid_running", lambda pid: True)
+    monkeypatch.setattr(local_sandbox, "_online_android_devices", lambda adb: ["emulator-5554"])
+
+    with pytest.raises(local_sandbox.LocalSandboxError, match="timed out"):
+        local_sandbox._wait_for_android_device(
+            "adb",
+            before={"emulator-5554"},
+            timeout=1,
+            pid=123,
+        )
