@@ -136,7 +136,7 @@ collaboration backend any MCP client can call. Two equivalent paths:
 | `agy_result` | Fetch a finished job result; omitting `job_id` returns the latest finished job |
 | `agy_cancel` | Cross-platform process-group cancel |
 | `agy_sessions` | List recent sessions |
-| `agy_sandbox_start` | Launch the built-in local (Playwright / Android) or a configured external remote mobile / PC sandbox provider and return sandbox_id / endpoint / status |
+| `agy_sandbox_start` | Launch the built-in local (browser / Android) or a configured external remote mobile / PC VM sandbox provider and return sandbox_id / endpoint / status |
 | `agy_sandbox_status` | Query provider status for a started sandbox |
 | `agy_sandbox_stop` | Stop a started sandbox |
 | `agy_sandbox_logs` | Fetch recent sandbox logs |
@@ -145,10 +145,11 @@ collaboration backend any MCP client can call. Two equivalent paths:
 | `agy_install_skill` | Install SKILL bundles into Claude / Codex / Antigravity dirs |
 | `agy_purge` | Prune local session-store directories (refuses `days <= 0`) |
 
-`provider="local"` is built in: `target="pc"` starts Playwright `run-server`
-and returns a `ws://` endpoint; `target="android"` / `"mobile"` uses local
-`adb` / `emulator` and starts Appium when it is installed. External device
-farms or cloud browsers remain configured under `[sandbox.providers.<name>]`.
+`provider="local"` is built in: `target="browser"` starts Playwright
+`run-server` and returns a `ws://` endpoint; `target="android"` / `"mobile"`
+uses local `adb` / `emulator` and starts Appium when it is installed.
+`target="pc"` is reserved for real PC / desktop VM providers, which remain
+configured under `[sandbox.providers.<name>]`.
 
 ## When to use / When NOT to use
 

@@ -136,7 +136,7 @@ Google の新しい Antigravity CLI（`agy`）を、任意の MCP client から
 | `agy_result` | finished job result を取得。`job_id` 省略時は最新の finished job を返す |
 | `agy_cancel` | cross-platform process-group cancel |
 | `agy_sessions` | 最近の session を一覧 |
-| `agy_sandbox_start` | built-in local（Playwright / Android）または設定済み external remote mobile / PC sandbox provider を起動し、sandbox_id / endpoint / status を返す |
+| `agy_sandbox_start` | built-in local（browser / Android）または設定済み external remote mobile / PC VM sandbox provider を起動し、sandbox_id / endpoint / status を返す |
 | `agy_sandbox_status` | 起動済み sandbox の provider status を取得 |
 | `agy_sandbox_stop` | 起動済み sandbox を停止 |
 | `agy_sandbox_logs` | sandbox の最近の logs を取得 |
@@ -145,11 +145,11 @@ Google の新しい Antigravity CLI（`agy`）を、任意の MCP client から
 | `agy_install_skill` | SKILL bundle を Claude / Codex / Antigravity dirs にインストール |
 | `agy_purge` | local session-store directories を掃除（`days <= 0` は拒否） |
 
-`provider="local"` は built-in provider です。`target="pc"` は Playwright
-`run-server` を起動して `ws://` endpoint を返し、`target="android"` /
-`"mobile"` は local `adb` / `emulator` を使い、Appium がある場合は HTTP
-endpoint も返します。External device farm や cloud browser は引き続き
-`[sandbox.providers.<name>]` で設定します。
+`provider="local"` は built-in provider です。`target="browser"` は
+Playwright `run-server` を起動して `ws://` endpoint を返し、
+`target="android"` / `"mobile"` は local `adb` / `emulator` を使い、
+Appium がある場合は HTTP endpoint も返します。`target="pc"` は実際の
+PC / desktop VM provider 用に予約し、`[sandbox.providers.<name>]` で設定します。
 
 ## いつ使うか / いつ使わないか
 

@@ -114,11 +114,12 @@ attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
 ```
 
 The `local` provider is built in and does not require TOML config unless an
-operator wants to override the command. For `target="pc"` it launches
+operator wants to override the command. For `target="browser"` it launches
 Playwright `run-server` and returns a `ws://` endpoint. For `target="android"`
 or `target="mobile"` it uses the local Android toolchain: attach to an online
 `adb` device, or boot an AVD through `emulator`; if `appium` is installed it
-also returns an Appium HTTP endpoint.
+also returns an Appium HTTP endpoint. `target="pc"` / `target="desktop"` is
+reserved for real VM providers configured under `[sandbox.providers.<name>]`.
 
 `agy_sandbox_start` treats the built-in local provider and external remote
 providers the same way: run the provider command without a shell and expect
@@ -224,7 +225,7 @@ on canonical events so future agy event types survive without a schema bump).
 | `agy_result` | yes | Return the captured output for a finished background job |
 | `agy_cancel` | yes | Process-group cancel (POSIX `killpg` / Windows `CTRL_BREAK_EVENT`) |
 | `agy_sessions` | yes | List recent jobs with mtime / status / cwd summary |
-| `agy_sandbox_start` | yes | Launch built-in local or configured external remote mobile / PC sandbox provider |
+| `agy_sandbox_start` | yes | Launch built-in local browser/Android provider or configured external mobile / PC VM sandbox provider |
 | `agy_sandbox_status` | yes | Query provider status for a started sandbox |
 | `agy_sandbox_stop` | yes | Stop a started sandbox |
 | `agy_sandbox_logs` | yes | Fetch recent sandbox logs |

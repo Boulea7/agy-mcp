@@ -892,9 +892,10 @@ def agy_sessions_tool(limit: int = 50) -> SessionsToolResponse:
     name="agy_sandbox_start",
     description=(
         "Launch the built-in local sandbox provider or a configured external "
-        "remote provider for mobile / PC testing. provider='local' starts "
-        "Playwright for PC/browser targets or local adb/emulator/Appium for "
-        "Android targets. External providers are configured under "
+        "remote provider for browser / mobile / PC-VM testing. provider='local' "
+        "starts Playwright for browser targets or local adb/emulator/Appium for "
+        "Android targets; PC/desktop VM targets require a configured provider. "
+        "External providers are configured under "
         "[sandbox.providers.<name>] in config.toml. The tool runs the provider "
         "command without a shell and parses JSON stdout into sandbox_id / "
         "endpoint / status."
@@ -902,7 +903,7 @@ def agy_sessions_tool(limit: int = 50) -> SessionsToolResponse:
 )
 async def agy_sandbox_start_tool(
     provider: str | None = None,
-    target: str = "pc",
+    target: str = "browser",
     cd: str = ".",
     scenario: str | None = None,
     timeout: int | None = None,

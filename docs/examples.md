@@ -178,14 +178,15 @@ where direct `agy` works.
 ## 6. Launch a local or external sandbox environment
 
 `agy-mcp` ships a built-in `local` provider backed by `agy-local-sandbox`.
-It can start a local Playwright `run-server` for PC/browser tests and can
-attach to an online Android device or boot a local Android Emulator through
-`adb` / `emulator`. If `appium` is installed, the Android provider also starts
-an Appium server and returns its HTTP endpoint.
+It can start a local Playwright `run-server` for browser tests and can attach
+to an online Android device or boot a local Android Emulator through `adb` /
+`emulator`. If `appium` is installed, the Android provider also starts an
+Appium server and returns its HTTP endpoint. PC / desktop VM targets are
+handled by configured VM providers, not by the built-in Playwright path.
 
 No local cloud or company-internal service is assumed. External device farms,
-VM pools, or cloud browsers remain ordinary configured providers that expose
-the same JSON contract.
+VM pools, device farms, or cloud browsers remain ordinary configured providers
+that expose the same JSON contract.
 
 ```toml
 [sandbox]
@@ -232,13 +233,13 @@ attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
 Then launch it through MCP:
 
 ```python
-local_box = agy_sandbox_start(
+browser_box = agy_sandbox_start(
     provider="local",
-    target="pc",
+    target="browser",
     cd="/Users/me/work/app",
     scenario="checkout-smoke",
 )
-# local_box["endpoint"] is a Playwright ws:// endpoint.
+# browser_box["endpoint"] is a Playwright ws:// endpoint.
 
 android_box = agy_sandbox_start(
     provider="local",
@@ -250,9 +251,9 @@ android_box = agy_sandbox_start(
 
 remote_box = agy_sandbox_start(
     provider="external-remote",
-    target="mobile",
+    target="pc-vm",
     cd="/Users/me/work/app",
-    scenario="checkout-smoke",
+    scenario="desktop-checkout-smoke",
 )
 # sandbox_id and endpoint come from provider JSON stdout.
 

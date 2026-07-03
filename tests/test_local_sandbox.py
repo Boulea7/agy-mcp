@@ -24,7 +24,7 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def test_local_playwright_provider_start_status_attach_logs_stop(
+def test_local_browser_provider_starts_playwright_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -59,7 +59,7 @@ while True:
         capsys,
         "start",
         "--target",
-        "pc",
+        "browser",
         "--cwd",
         str(tmp_path),
         "--startup-timeout",
@@ -69,6 +69,7 @@ while True:
     try:
         assert start["success"] is True
         assert start["provider"] == "local"
+        assert start["target"] == "browser"
         assert start["status"] == "running"
         assert start["endpoint"].startswith("ws://127.0.0.1:")
         assert start["metadata"]["playwright_ws_endpoint"] == start["endpoint"]
@@ -171,7 +172,7 @@ def test_start_rejects_non_loopback_host(tmp_path: Path, capsys: pytest.CaptureF
         [
             "start",
             "--target",
-            "pc",
+            "browser",
             "--cwd",
             str(tmp_path),
             "--host",
@@ -183,6 +184,23 @@ def test_start_rejects_non_loopback_host(tmp_path: Path, capsys: pytest.CaptureF
 
     assert code == 1
     assert "loopback" in captured.err
+
+
+def test_local_provider_rejects_pc_vm_target(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    code = local_sandbox.main(
+        [
+            "start",
+            "--target",
+            "pc",
+            "--cwd",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "VM provider" in captured.err
 
 
 def test_state_path_rejects_dot_segments():

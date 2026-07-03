@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any
 
 _ANDROID_TARGETS = {"android", "emulator", "mobile"}
-_PC_TARGETS = {"browser", "desktop", "pc", "playwright"}
+_BROWSER_TARGETS = {"browser", "playwright", "web"}
+_VM_TARGETS = {"desktop", "desktop-vm", "pc", "pc-vm", "vm"}
 _SANDBOX_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_STARTUP_TIMEOUT = 60
@@ -88,14 +89,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agy-local-sandbox",
         description=(
-            "Start and control local Playwright or Android emulator sandboxes. "
+            "Start and control local browser or Android emulator sandboxes. "
             "This provider uses only tools already installed on the local machine."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     start = subparsers.add_parser("start", help="start a local sandbox")
-    start.add_argument("--target", required=True, help="pc/playwright or mobile/android")
+    start.add_argument(
+        "--target",
+        required=True,
+        help="browser/playwright or mobile/android; PC/desktop VM targets require another provider",
+    )
     start.add_argument("--scenario", default="", help="optional scenario label")
     start.add_argument("--cwd", default=".", help="project working directory")
     start.add_argument("--host", default=_DEFAULT_HOST, help="loopback host for local servers")
@@ -139,7 +144,7 @@ def _cmd_start(args: argparse.Namespace) -> dict[str, Any]:
     except OSError:
         pass
 
-    if target == "pc":
+    if target == "browser":
         state = _start_playwright(args, sandbox_id=sandbox_id, sandbox_dir=sandbox_dir, cwd=cwd)
     else:
         state = _start_android(args, sandbox_id=sandbox_id, sandbox_dir=sandbox_dir, cwd=cwd)
@@ -178,7 +183,7 @@ def _start_playwright(
     return {
         "sandbox_id": sandbox_id,
         "provider": "local",
-        "target": "pc",
+        "target": "browser",
         "kind": "playwright",
         "status": "running",
         "endpoint": endpoint,
@@ -396,11 +401,16 @@ def _response(state: dict[str, Any]) -> dict[str, Any]:
 
 def _canonical_target(target: str) -> str:
     normalized = target.strip().lower()
-    if normalized in _PC_TARGETS:
-        return "pc"
+    if normalized in _BROWSER_TARGETS:
+        return "browser"
     if normalized in _ANDROID_TARGETS:
         return "mobile"
-    raise LocalSandboxError("target must be one of pc/playwright or mobile/android")
+    if normalized in _VM_TARGETS:
+        raise LocalSandboxError(
+            "the built-in local provider supports browser and Android targets only; "
+            "configure a VM provider for PC/desktop targets"
+        )
+    raise LocalSandboxError("target must be one of browser/playwright or mobile/android")
 
 
 def _validate_loopback_host(host: str) -> None:
