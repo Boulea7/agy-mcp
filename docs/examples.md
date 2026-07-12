@@ -185,7 +185,7 @@ Appium server and returns its HTTP endpoint. PC / desktop VM targets are
 handled by configured VM providers, not by the built-in Playwright path.
 
 No local cloud or company-internal service is assumed. External device farms,
-VM pools, device farms, or cloud browsers remain ordinary configured providers
+VM pools, or cloud browsers remain ordinary configured providers
 that expose the same JSON contract.
 
 ```toml

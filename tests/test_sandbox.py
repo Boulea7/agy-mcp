@@ -148,6 +148,40 @@ print(json.dumps({
     ]
 
 
+def test_start_sandbox_resolves_relative_cwd_for_argument_and_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    launcher = _write_launcher(
+        tmp_path,
+        """
+import json
+import os
+import sys
+
+cwd_arg = sys.argv[sys.argv.index("--cwd") + 1]
+print(json.dumps({"cwd_arg": cwd_arg, "process_cwd": os.getcwd()}))
+""".lstrip(),
+    )
+    config = _config_with_provider(launcher)
+    safety = SafetyPolicy.from_config(config)
+    monkeypatch.chdir(tmp_path)
+
+    out = start_sandbox(
+        config=config,
+        safety=safety,
+        provider="fake",
+        target="browser",
+        cwd="project",
+    )
+
+    expected = str(workdir.resolve())
+    assert out.metadata["cwd_arg"] == expected
+    assert out.metadata["process_cwd"] == expected
+
+
 def test_start_sandbox_coerces_scalar_provider_fields(tmp_path: Path):
     launcher = _write_launcher(
         tmp_path,

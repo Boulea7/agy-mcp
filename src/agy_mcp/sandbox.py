@@ -47,13 +47,14 @@ def start_sandbox(
     _validate_name("target", target, pattern=_TARGET_RE)
     if scenario is not None and len(scenario) > 256:
         raise ValueError("scenario exceeds 256 characters")
+    workdir = Path(cwd).expanduser().resolve()
 
     argv = _build_argv(
         _provider_command(provider_config, selected_provider, "start"),
         provider_name=selected_provider,
         action="start",
         target=target,
-        cwd=cwd,
+        cwd=str(workdir),
         scenario=scenario,
         sandbox_id=None,
         tail=None,
@@ -71,7 +72,6 @@ def start_sandbox(
             command_preview=safe_preview,
         )
 
-    workdir = Path(cwd).expanduser().resolve()
     if not workdir.is_dir():
         raise ValueError(f"cwd is not a directory: {cwd}")
 
@@ -228,12 +228,13 @@ def _control_sandbox(
 ) -> SandboxControlToolResponse:
     selected_provider, provider_config = _select_provider(config, provider)
     _validate_name("sandbox_id", sandbox_id, pattern=_SANDBOX_ID_RE)
+    workdir = Path(cwd).expanduser().resolve()
     argv = _build_argv(
         _provider_command(provider_config, selected_provider, action),
         provider_name=selected_provider,
         action=action,
         target=None,
-        cwd=cwd,
+        cwd=str(workdir),
         scenario=None,
         sandbox_id=sandbox_id,
         tail=tail,
@@ -250,7 +251,6 @@ def _control_sandbox(
             command_preview=safe_preview,
         )
 
-    workdir = Path(cwd).expanduser().resolve()
     if not workdir.is_dir():
         raise ValueError(f"cwd is not a directory: {cwd}")
     stdout, stderr, returncode = _run_provider(
