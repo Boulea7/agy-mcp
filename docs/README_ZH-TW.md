@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-596%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-630%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 
 語言：[`简体中文`](../README.md) · [`English`](README_EN.md) · [`日本語`](README_JA.md)
 
@@ -139,8 +139,11 @@ MCP client 都能呼叫的協作 agent backend。它提供兩條等價路徑：
 `provider="local"` 是內建 provider：`target="browser"` 會啟動 Playwright
 `run-server` 並回傳 `ws://` endpoint；`target="android"` / `"mobile"` 會使用
 本機 `adb` / `emulator`，若已安裝 Appium 也會啟動並回傳 HTTP endpoint。
-`target="pc"` 保留給真正的 PC / desktop VM provider，需透過
-`[sandbox.providers.<name>]` 設定接入。
+`provider="aws"` 也是內建 provider：`target="android-real"` 使用 AWS
+Device Farm 真機，`target="pc-vm"` 使用 EC2 Windows VM 與本機回環 SSM
+attach endpoint。它需要操作者自己的公開 AWS 帳號、資源與憑據設定，
+不假設任何公司內部雲。
+每個資源的 TTL 由 AWS EventBridge Scheduler 一次性任務強制執行。
 
 ## 何時呼叫 / 何時不要呼叫
 

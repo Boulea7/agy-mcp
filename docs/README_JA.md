@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-596%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-630%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 
 言語：[`简体中文`](../README.md) · [`繁體中文`](README_ZH-TW.md) · [`English`](README_EN.md)
 
@@ -148,8 +148,11 @@ Google の新しい Antigravity CLI（`agy`）を、任意の MCP client から
 `provider="local"` は built-in provider です。`target="browser"` は
 Playwright `run-server` を起動して `ws://` endpoint を返し、
 `target="android"` / `"mobile"` は local `adb` / `emulator` を使い、
-Appium がある場合は HTTP endpoint も返します。`target="pc"` は実際の
-PC / desktop VM provider 用に予約し、`[sandbox.providers.<name>]` で設定します。
+Appium がある場合は HTTP endpoint も返します。`provider="aws"` も built-in
+で、`target="android-real"` は AWS Device Farm の real device、
+`target="pc-vm"` は EC2 Windows VM と loopback SSM attach endpoint を使います。
+operator 自身の public AWS account / resources / credentials が必要です。
+各 resource の TTL は AWS EventBridge Scheduler の one-time action で強制されます。
 
 ## いつ使うか / いつ使わないか
 

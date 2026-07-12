@@ -28,6 +28,7 @@ DEFAULT_BACKEND = "auto"          # auto | agy | gemini
 DEFAULT_OUTPUT_PROTOCOL = "claude"  # raw | claude | codex
 DEFAULT_RETENTION_DAYS = 30
 BUILTIN_LOCAL_SANDBOX_PROVIDER = "local"
+BUILTIN_AWS_SANDBOX_PROVIDER = "aws"
 _BOOL_TRUE = {"1", "true", "yes", "on"}
 _BOOL_FALSE = {"0", "false", "no", "off"}
 
@@ -140,7 +141,30 @@ def builtin_sandbox_providers() -> dict[str, SandboxProviderConfig]:
                 "{sandbox_id}",
                 "--json",
             ],
-        )
+        ),
+        BUILTIN_AWS_SANDBOX_PROVIDER: SandboxProviderConfig(
+            start=[
+                "agy-aws-sandbox",
+                "start",
+                "--target",
+                "{target}",
+                "--scenario",
+                "{scenario}",
+                "--json",
+            ],
+            status=["agy-aws-sandbox", "status", "--id", "{sandbox_id}", "--json"],
+            stop=["agy-aws-sandbox", "stop", "--id", "{sandbox_id}", "--json"],
+            logs=[
+                "agy-aws-sandbox",
+                "logs",
+                "--id",
+                "{sandbox_id}",
+                "--tail",
+                "{tail}",
+                "--json",
+            ],
+            attach=["agy-aws-sandbox", "attach", "--id", "{sandbox_id}", "--json"],
+        ),
     }
 
 

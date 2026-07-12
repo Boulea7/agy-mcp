@@ -6,6 +6,29 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Added the built-in `aws` sandbox provider. `android-real` provisions AWS
+  Device Farm Remote Access sessions behind a loopback HTTP relay;
+  `pc-vm` provisions an EC2 instance from an operator-owned Launch Template
+  and attaches through an SSM RDP port forward.
+- Added read-only-by-default AWS expiry GC, redacted EC2 console diagnostics,
+  remote ownership verification, private atomic state, and per-sandbox
+  control locks.
+- Added mandatory EventBridge Scheduler one-time expiry actions for Device
+  Farm and EC2 resources, with fail-closed creation and compensation cleanup.
+- Added EC2 idempotency-token reconciliation for ambiguous create responses
+  and a 600-second minimum TTL aligned with Scheduler timing precision.
+
+### Security
+
+- AWS child processes no longer receive static credential environment
+  variables. Signed Device Farm endpoints and Session Manager session data
+  stay out of argv, state, stdout, stderr, logs, and MCP responses.
+- ECS task-role and EKS Pod Identity file references are accepted only through
+  validated local/container credential endpoints; raw authorization tokens
+  remain blocked.
+
 ## [0.1.8] — 2026-05-27
 
 ### Added

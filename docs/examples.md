@@ -230,6 +230,42 @@ logs = ["remote-sandbox", "logs", "--id", "{sandbox_id}", "--tail", "{tail}", "-
 attach = ["remote-sandbox", "attach", "--id", "{sandbox_id}", "--json"]
 ```
 
+The built-in `aws` provider needs no TOML stanza. Configure only non-secret
+resource selectors in the MCP server environment and use an AWS shared/SSO
+profile or workload identity for authentication:
+
+```bash
+aws configure sso --profile agy-sandbox
+
+export AGY_AWS_PROFILE=agy-sandbox
+export AGY_AWS_REGION=us-west-2
+export AGY_AWS_DEVICEFARM_PROJECT_ARN=arn:aws:devicefarm:us-west-2:123456789012:project:example
+export AGY_AWS_DEVICEFARM_DEVICE_ARN=arn:aws:devicefarm:us-west-2::device:example
+export AGY_AWS_EC2_LAUNCH_TEMPLATE_ID=lt-0123456789abcdef0
+export AGY_AWS_EC2_LAUNCH_TEMPLATE_VERSION='$Default'
+export AGY_AWS_SCHEDULER_ROLE_ARN=arn:aws:iam::123456789012:role/agy-sandbox-expiry
+```
+
+Static credential variables such as `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` are deliberately removed from
+the AWS CLI child environment. Device Farm remote access is limited to
+`us-west-2` and 9000 seconds. All AWS TTLs have a 600-second minimum
+because EventBridge Scheduler has minute-level invocation precision and the
+schedule is installed after resource creation. The Scheduler retry window is
+24 hours, so a failed expiry invocation can run later than the requested TTL.
+The EC2 launch template must describe a Windows instance with SSM Agent, an
+instance role that permits Session Manager, and RDP enabled inside the guest;
+inbound TCP/3389 does not need to be public.
+`agy_sandbox_attach` also requires the Session Manager plugin on the host that
+runs `agy-mcp`.
+
+Every AWS start must create an EventBridge Scheduler one-time expiry action
+before it can succeed. The caller needs `scheduler:CreateSchedule`,
+`scheduler:DeleteSchedule`, and `iam:PassRole`; the configured execution role
+must trust `scheduler.amazonaws.com` and permit `ec2:TerminateInstances` and/or
+`devicefarm:StopRemoteAccessSession` for the sandbox resources. Manual stop
+deletes the schedule after the remote resource enters shutdown.
+
 Then launch it through MCP:
 
 ```python
@@ -248,6 +284,34 @@ android_box = agy_sandbox_start(
     scenario="checkout-smoke",
 )
 # android_box["endpoint"] is Appium HTTP if appium is installed, otherwise adb:<serial>.
+
+real_phone = agy_sandbox_start(
+    provider="aws",
+    target="android-real",
+    cd="/Users/me/work/app",
+    scenario="checkout-smoke",
+)
+# Poll status until running, then attach. The returned HTTP endpoint is a
+# loopback relay for Device Farm remoteDriverEndpoint; the signed upstream URL
+# is never returned or persisted.
+phone_connection = agy_sandbox_attach(
+    provider="aws",
+    sandbox_id=real_phone["sandbox_id"],
+)
+
+pc_vm = agy_sandbox_start(
+    provider="aws",
+    target="pc-vm",
+    cd="/Users/me/work/app",
+    scenario="desktop-checkout-smoke",
+)
+# Poll until running. Attach starts an SSM port-forwarding session to guest
+# RDP and returns rdp://127.0.0.1:<port>; Windows credentials remain an
+# operator responsibility and are never handled by agy-mcp.
+pc_connection = agy_sandbox_attach(
+    provider="aws",
+    sandbox_id=pc_vm["sandbox_id"],
+)
 
 remote_box = agy_sandbox_start(
     provider="external-remote",
@@ -280,7 +344,24 @@ agy_sandbox_stop(
 ```
 
 Use `dry_run=True` to inspect the resolved command without starting
-anything.
+anything. Attach endpoints bind only to the loopback interface of the machine
+running the provider. If that machine is remote (for example `.21`), forward
+the returned port over SSH before connecting from a workstation.
+
+AWS Device Farm `logs` returns the remote session message/status only. EC2
+`logs` returns the bounded, redacted EC2 console output; application test logs
+still need an operator-configured CloudWatch or SSM sink. Preview and clean up
+expired AWS resources with:
+
+```bash
+agy-aws-sandbox gc --json
+agy-aws-sandbox gc --execute --json
+```
+
+The first command is read-only. The second re-checks the AWS account and all
+owner/sandbox/expiry tags before stopping a resource. It is a recovery tool;
+normal TTL expiry is enforced in AWS by EventBridge Scheduler and does not
+depend on the provider host remaining online.
 
 ---
 

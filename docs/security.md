@@ -189,6 +189,20 @@ deadlock.
   Android Emulator, and optionally Appium, records only local PID/endpoint
   state under `~/.agy-mcp/local-sandboxes/`, and does not assume or contact
   any company-internal cloud.
+- The built-in `aws` provider uses AWS CLI argv without a shell and removes
+  static AWS credential variables before every child process. Authentication
+  is limited to shared/SSO profiles, instance identity, or web identity file
+  references. EC2 termination and Device Farm stop require the current AWS
+  account plus exact remote `agy:owner`, `agy:sandbox-id`, and
+  `agy:expires-at` tags to match private local state. Control actions take a
+  per-sandbox cross-process file lock.
+- Device Farm signed endpoints never enter argv, environment, state, stdout,
+  stderr, or logs. The provider forks a loopback-only HTTP relay while the
+  signed URL remains in child-process memory; redirects and credential-like
+  response headers are suppressed, and textual response bodies are redacted.
+  EC2 attach sends Session Manager stdout/stderr to `/dev/null` and persists
+  only a PID/PGID/start-token plus loopback port. PID and process-group
+  identity are verified before signals are sent.
 - All sync tools route through `_structured_failure` on exception —
   never a bare traceback to the caller.
 
@@ -230,6 +244,36 @@ assuming protection that isn't there.
   intentionally does not refuse paths whose ancestors include such
   symlinks; the write-time `safe_write_text` walk under the resolved
   root provides the real defence.
+- **AWS availability, cost, and guest readiness.** Unit tests use a fake AWS
+  CLI. A real Device Farm/EC2 smoke requires the operator's account, quota,
+  IAM policy, paid resources, Launch Template, SSM Agent, Session Manager
+  plugin, and Windows credentials. EC2 lifecycle + an RDP tunnel does not by
+  itself prove a GUI test completed. Device Farm session messages and EC2
+  console output are not substitutes for an application log sink.
+- **AWS recovery after local-state loss.** EC2 ownership tags are atomic with
+  instance creation, but Device Farm tagging is a second API call. The
+  provider attempts immediate cleanup if tagging/state persistence fails and
+  requires an EventBridge Scheduler one-time expiry action before start
+  succeeds. The AWS-side action survives provider-host failure and bounds the
+  normal resource lifetime. A host crash in the short interval between
+  resource creation and schedule creation can still require manual cleanup;
+  ambiguous EC2 create responses are first retried with the same client token
+  and then reconciled with that token plus all ownership/expiry tags.
+  Device Farm has a service-side 150-minute session limit, while strict EC2
+  zero-orphan operation additionally requires an account-side janitor that
+  scans the atomic `agy:expires-at` tags. GC does not discover resources after
+  the local state directory is lost.
+- **AWS credential sources.** Static access-key and session-token environment
+  variables are removed before invoking AWS CLI. Shared/SSO profiles, IMDS,
+  web-identity files, ECS relative credential paths, and EKS Pod Identity
+  loopback/container endpoint plus token-file references are supported. Raw
+  container authorization tokens and arbitrary credential endpoint hosts are
+  not passed through.
+- **Loopback attach locality.** AWS attach endpoints exist only on the host
+  running the provider. A remote host such as `.21` needs a separate SSH port
+  forward before a workstation can connect. The Device Farm relay implements
+  bounded HTTP WebDriver/Appium traffic; it is not a general WebSocket or
+  browser proxy.
 
 ## Audit hooks
 

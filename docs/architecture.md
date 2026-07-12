@@ -121,11 +121,28 @@ or `target="mobile"` it uses the local Android toolchain: attach to an online
 also returns an Appium HTTP endpoint. `target="pc"` / `target="desktop"` is
 reserved for real VM providers configured under `[sandbox.providers.<name>]`.
 
+The `aws` provider is also registered by default, but remains isolated in
+`aws_sandbox.py`. It maps `android-real` to Device Farm Remote Access and
+`pc-vm` to an EC2 instance created from an operator-owned Launch Template.
+Attach never returns AWS signed endpoints: Device Farm is wrapped by a
+process-memory-only loopback HTTP relay, while EC2 starts a silent SSM RDP
+port forward and returns only a loopback `rdp://` endpoint. State under
+`~/.agy-mcp/aws-sandboxes/` contains resource IDs, account/region, ownership
+tags, expiry, and verified process identity, never AWS credentials, signed
+URLs, Session Manager tokens, or Windows passwords.
+
+Each successful AWS start also installs a one-time EventBridge Scheduler
+universal target. It calls `StopRemoteAccessSession` for Device Farm or
+`TerminateInstances` for EC2 at the requested expiry and self-deletes after
+completion. This cloud-side deadline remains active if the provider process or
+host exits; local `gc` is retained as an ownership-checked recovery path.
+
 `agy_sandbox_start` treats the built-in local provider and external remote
 providers the same way: run the provider command without a shell and expect
 JSON stdout with optional `sandbox_id`, `endpoint`, and `status` fields. The
-bridge does not encode any cloud vendor, company-internal service, device-farm
-API, or VM implementation detail.
+core bridge does not encode a cloud vendor, company-internal service,
+device-farm API, or VM implementation detail; vendor logic stays behind the
+same provider CLI contract.
 
 ### `session_store.py` — per-job filesystem layout
 

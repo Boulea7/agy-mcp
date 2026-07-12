@@ -29,6 +29,9 @@ def test_defaults_match_user_decision(isolated_env, tmp_path: Path, monkeypatch:
     assert config.session_store.root  # filled with default path
     assert "local" in config.sandbox.providers
     assert config.sandbox.providers["local"].start[:2] == ["agy-local-sandbox", "start"]
+    assert "aws" in config.sandbox.providers
+    assert config.sandbox.providers["aws"].start[:2] == ["agy-aws-sandbox", "start"]
+    assert config.sandbox.providers["aws"].attach[:2] == ["agy-aws-sandbox", "attach"]
 
 
 def test_toml_overrides_defaults(isolated_env, tmp_path: Path):
@@ -203,3 +206,4 @@ def test_pyproject_exposes_doctor_console_script():
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     assert data["project"]["scripts"]["agy-doctor"] == "agy_mcp.doctor:main"
     assert data["project"]["scripts"]["agy-local-sandbox"] == "agy_mcp.local_sandbox:main"
+    assert data["project"]["scripts"]["agy-aws-sandbox"] == "agy_mcp.aws_sandbox:main"

@@ -165,11 +165,42 @@ agy-doctor
 
 # Built-in local sandbox provider CLI; requires Playwright or Android tools only when starting one
 agy-local-sandbox --help
+
+# Built-in public AWS provider CLI; cloud calls still require operator-owned AWS setup
+agy-aws-sandbox --help
 ```
 
 You should see a JSON envelope with `success=true`, a `command_preview`
 field showing the would-be argv (in dry-run mode), no secrets in any
 field, and `auth.ok=true` once the interactive `agy` login flow has run.
+
+The AWS provider additionally requires
+[AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
+PC VM attach also requires the
+[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
+Authenticate with a shared/SSO profile (`aws configure sso`) or workload
+identity; the provider intentionally does not pass static
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` variables
+to child processes. ECS task-role and EKS Pod Identity file references are
+supported without copying raw credential values. Before a real smoke, provision:
+
+- a Device Farm project and device ARN in `us-west-2` for `android-real`; or
+- an EC2 Windows Launch Template with SSM Agent and a Session Manager-capable
+  instance role for `pc-vm`.
+- an EventBridge Scheduler execution role configured through
+  `AGY_AWS_SCHEDULER_ROLE_ARN`. It must trust `scheduler.amazonaws.com` and
+  be permitted to stop Device Farm sessions and/or terminate EC2 instances.
+
+The caller also needs `scheduler:CreateSchedule`,
+`scheduler:DeleteSchedule`, and `iam:PassRole`. Start fails closed and
+compensates the newly created remote resource if the one-time AWS-side expiry
+schedule cannot be created. AWS TTL values must be between 600 and 86400
+seconds; Scheduler is minute-precision and retries a failed expiry invocation
+for up to 24 hours.
+
+Run `agy-aws-sandbox gc --json` to preview locally tracked expired resources;
+add `--execute` only after reviewing the list. No AWS resource is created by
+`--help`, MCP `dry_run=True`, or the default GC preview.
 
 If direct terminal `agy` works but MCP calls report
 `FAILED_PRECONDITION` / `User location is not supported`, compare the

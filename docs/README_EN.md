@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](../pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-596%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-630%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 
 Languages: [`简体中文`](../README.md) · [`繁體中文`](README_ZH-TW.md) · [`日本語`](README_JA.md)
 
@@ -148,8 +148,12 @@ collaboration backend any MCP client can call. Two equivalent paths:
 `provider="local"` is built in: `target="browser"` starts Playwright
 `run-server` and returns a `ws://` endpoint; `target="android"` / `"mobile"`
 uses local `adb` / `emulator` and starts Appium when it is installed.
-`target="pc"` is reserved for real PC / desktop VM providers, which remain
-configured under `[sandbox.providers.<name>]`.
+`provider="aws"` is also built in: `target="android-real"` uses an AWS
+Device Farm real device and `target="pc-vm"` uses an EC2 Windows VM with a
+loopback SSM attach endpoint. It requires the operator's own public AWS
+account, resources, and credential configuration; no company-internal cloud
+is assumed.
+Each resource TTL is enforced by a one-time AWS EventBridge Scheduler action.
 
 ## When to use / When NOT to use
 

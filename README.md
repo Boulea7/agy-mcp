@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 [![CI](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-596%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-630%20passed-brightgreen.svg)](https://github.com/Boulea7/agy-mcp/actions/workflows/ci.yml)
 
 语言：[`English`](docs/README_EN.md) · [`繁體中文`](docs/README_ZH-TW.md) · [`日本語`](docs/README_JA.md)
 
@@ -138,8 +138,11 @@ agy-doctor
 `provider="local"` 是随包提供的本地 provider：`target="browser"` 会启动
 Playwright `run-server` 并返回 `ws://` endpoint；`target="android"` /
 `"mobile"` 会使用本机 `adb` / `emulator`，可用时再启动 Appium。`target="pc"`
-语义保留给真正的 PC / desktop VM provider，需要通过
-`[sandbox.providers.<name>]` 接入。
+语义保留给真正的 PC / desktop VM provider。`provider="aws"` 同样是内置
+provider：`target="android-real"` 使用 AWS Device Farm 真机，
+`target="pc-vm"` 使用 EC2 Windows VM，并通过 SSM 返回本机回环 attach
+endpoint；它需要操作者自己的公开 AWS 账号、资源和凭据配置，不依赖公司内部云。
+每个资源的 TTL 由 AWS EventBridge Scheduler 一次性任务强制执行。
 
 ## 何时调用 / 何时不调用
 
