@@ -672,6 +672,7 @@ def test_windows_process_api_declares_pointer_width_safe_signatures(monkeypatch)
 
     class _Kernel32:
         OpenProcess = _Function()
+        WaitForSingleObject = _Function()
         GetExitCodeProcess = _Function()
         GetProcessTimes = _Function()
         CloseHandle = _Function()
@@ -698,6 +699,11 @@ def test_windows_process_api_declares_pointer_width_safe_signatures(monkeypatch)
         wintypes.DWORD,
     )
     assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.WaitForSingleObject.argtypes == (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+    )
+    assert kernel32.WaitForSingleObject.restype is wintypes.DWORD
     assert kernel32.GetExitCodeProcess.argtypes == (
         wintypes.HANDLE,
         ctypes.POINTER(wintypes.DWORD),
@@ -729,7 +735,7 @@ def test_windows_process_probe_distinguishes_absent_from_open_failure(monkeypatc
     class _Kernel32:
         @staticmethod
         def OpenProcess(access: int, inherit: bool, pid: int):
-            assert access == 0x1000
+            assert access == 0x00101000
             assert inherit is False
             assert pid == 1234
             return None
@@ -750,7 +756,7 @@ def test_windows_process_probe_distinguishes_absent_from_open_failure(monkeypatc
         assert _Ctypes.last_error_calls == 1
 
 
-def test_windows_process_probe_preserves_handle_and_reads_creation_filetime(
+def test_windows_process_probe_treats_signaled_handle_as_dead_even_with_exit_259(
     monkeypatch,
 ):
     import ctypes
@@ -762,8 +768,16 @@ def test_windows_process_probe_preserves_handle_and_reads_creation_filetime(
     class _Kernel32:
         @staticmethod
         def OpenProcess(access: int, inherit: bool, pid: int):
-            assert (access, inherit, pid) == (0x1000, False, 4321)
+            assert inherit is False
+            assert pid == 4321
+            calls.append(("open", access))
             return handle
+
+        @staticmethod
+        def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+            assert timeout_ms == 0
+            calls.append(("wait", received_handle))
+            return 0
 
         @staticmethod
         def GetExitCodeProcess(received_handle: int, exit_code_pointer) -> int:
@@ -773,6 +787,66 @@ def test_windows_process_probe_preserves_handle_and_reads_creation_filetime(
                 ctypes.POINTER(wintypes.DWORD),
             ).contents.value = 259
             return 1
+
+        @staticmethod
+        def GetProcessTimes(
+            received_handle: int,
+            creation_pointer,
+            exit_pointer,
+            kernel_pointer,
+            user_pointer,
+        ) -> int:
+            del exit_pointer, kernel_pointer, user_pointer
+            calls.append(("times", received_handle))
+            creation = ctypes.cast(
+                creation_pointer,
+                ctypes.POINTER(wintypes.FILETIME),
+            ).contents
+            creation.dwHighDateTime = 1
+            creation.dwLowDateTime = 2
+            return 1
+
+        @staticmethod
+        def CloseHandle(received_handle: int) -> int:
+            calls.append(("close", received_handle))
+            return 1
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (ctypes, wintypes, _Kernel32()),
+    )
+
+    exists, signature = _windows_process_info(4321)
+
+    assert exists is False
+    assert signature is None
+    assert calls == [
+        ("open", 0x00101000),
+        ("wait", handle),
+        ("close", handle),
+    ]
+
+
+def test_windows_process_probe_treats_wait_timeout_as_live(monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+    calls: list[tuple[str, int]] = []
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert inherit is False
+            assert pid == 4321
+            calls.append(("open", access))
+            return handle
+
+        @staticmethod
+        def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+            assert timeout_ms == 0
+            calls.append(("wait", received_handle))
+            return 258
 
         @staticmethod
         def GetProcessTimes(
@@ -807,7 +881,134 @@ def test_windows_process_probe_preserves_handle_and_reads_creation_filetime(
     expected_filetime = (0x0123_4567 << 32) | 0x89AB_CDEF
     assert exists is True
     assert signature == f"win-filetime:{expected_filetime}"
-    assert calls == [("exit", handle), ("times", handle), ("close", handle)]
+    assert calls == [
+        ("open", 0x00101000),
+        ("wait", handle),
+        ("times", handle),
+        ("close", handle),
+    ]
+
+
+def test_windows_process_probe_treats_failed_or_unknown_wait_as_inconclusive(
+    monkeypatch,
+):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+
+    def _probe(wait_result: int):
+        calls: list[tuple[str, int]] = []
+
+        class _Kernel32:
+            @staticmethod
+            def OpenProcess(access: int, inherit: bool, pid: int):
+                assert inherit is False
+                assert pid == 4321
+                calls.append(("open", access))
+                return handle
+
+            @staticmethod
+            def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+                assert timeout_ms == 0
+                calls.append(("wait", received_handle))
+                return wait_result
+
+            @staticmethod
+            def GetProcessTimes(
+                received_handle: int,
+                creation_pointer,
+                exit_pointer,
+                kernel_pointer,
+                user_pointer,
+            ) -> int:
+                del exit_pointer, kernel_pointer, user_pointer
+                calls.append(("times", received_handle))
+                creation = ctypes.cast(
+                    creation_pointer,
+                    ctypes.POINTER(wintypes.FILETIME),
+                ).contents
+                creation.dwHighDateTime = 1
+                creation.dwLowDateTime = 2
+                return 1
+
+            @staticmethod
+            def CloseHandle(received_handle: int) -> int:
+                calls.append(("close", received_handle))
+                return 1
+
+        monkeypatch.setattr(
+            "agy_mcp.supervisor._load_windows_process_api",
+            lambda: (ctypes, wintypes, _Kernel32()),
+        )
+        return _windows_process_info(4321), calls
+
+    for wait_result in (0xFFFF_FFFF, 1):
+        result, calls = _probe(wait_result)
+
+        assert result == (None, None)
+        assert calls == [
+            ("open", 0x00101000),
+            ("wait", handle),
+            ("close", handle),
+        ]
+
+
+def test_windows_process_probe_preserves_handle_and_reads_creation_filetime(
+    monkeypatch,
+):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+    calls: list[tuple[str, int]] = []
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert (access, inherit, pid) == (0x00101000, False, 4321)
+            return handle
+
+        @staticmethod
+        def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+            assert timeout_ms == 0
+            calls.append(("wait", received_handle))
+            return 258
+
+        @staticmethod
+        def GetProcessTimes(
+            received_handle: int,
+            creation_pointer,
+            exit_pointer,
+            kernel_pointer,
+            user_pointer,
+        ) -> int:
+            del exit_pointer, kernel_pointer, user_pointer
+            calls.append(("times", received_handle))
+            creation = ctypes.cast(
+                creation_pointer,
+                ctypes.POINTER(wintypes.FILETIME),
+            ).contents
+            creation.dwHighDateTime = 0x0123_4567
+            creation.dwLowDateTime = 0x89AB_CDEF
+            return 1
+
+        @staticmethod
+        def CloseHandle(received_handle: int) -> int:
+            calls.append(("close", received_handle))
+            return 1
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (ctypes, wintypes, _Kernel32()),
+    )
+
+    exists, signature = _windows_process_info(4321)
+
+    expected_filetime = (0x0123_4567 << 32) | 0x89AB_CDEF
+    assert exists is True
+    assert signature == f"win-filetime:{expected_filetime}"
+    assert calls == [("wait", handle), ("times", handle), ("close", handle)]
 
 
 def test_status_reconciles_windows_owner_when_creation_filetime_changed(

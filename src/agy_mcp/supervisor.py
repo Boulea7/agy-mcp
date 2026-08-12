@@ -830,6 +830,12 @@ def _posix_pid_exists(pid: int) -> bool | None:
     return True
 
 
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
+_SYNCHRONIZE = 0x00100000
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
+
+
 def _load_windows_process_api():
     """Load Kernel32 process APIs with explicit pointer-safe signatures."""
 
@@ -843,6 +849,11 @@ def _load_windows_process_api():
         wintypes.DWORD,
     )
     kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+    )
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.GetExitCodeProcess.argtypes = (
         wintypes.HANDLE,
         ctypes.POINTER(wintypes.DWORD),
@@ -869,7 +880,11 @@ def _windows_process_info(pid: int) -> tuple[bool | None, str | None]:
         return False, None
     try:
         ctypes, wintypes, kernel32 = _load_windows_process_api()
-        handle = kernel32.OpenProcess(0x1000, False, pid)
+        handle = kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE,
+            False,
+            pid,
+        )
     except (AttributeError, ImportError, OSError, TypeError):
         return None, None
     if not handle:
@@ -882,14 +897,14 @@ def _windows_process_info(pid: int) -> tuple[bool | None, str | None]:
         return (False, None) if last_error == 87 else (None, None)
 
     try:
-        exit_code = wintypes.DWORD()
         try:
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return None, None
+            wait_result = kernel32.WaitForSingleObject(handle, 0)
         except (AttributeError, OSError, TypeError):
             return None, None
-        if exit_code.value != 259:
+        if wait_result == _WAIT_OBJECT_0:
             return False, None
+        if wait_result != _WAIT_TIMEOUT:
+            return None, None
 
         creation_time = wintypes.FILETIME()
         exit_time = wintypes.FILETIME()
