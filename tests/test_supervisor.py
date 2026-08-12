@@ -24,9 +24,13 @@ from agy_mcp.supervisor import (
     StoreEventSink,
     Supervisor,
     _linux_process_start_signature,
+    _load_windows_process_api,
     _migrate_if_present,
     _pid_exists,
     _process_start_signature,
+    _windows_pid_exists,
+    _windows_process_info,
+    _windows_process_start_signature,
     _worktree_slug,
 )
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
@@ -615,6 +619,30 @@ def test_process_start_signature_uses_timezone_stable_ps_env(monkeypatch):
     assert captured["env"]["LC_ALL"] == "C"
 
 
+def test_process_start_signature_uses_filetime_on_windows(monkeypatch):
+    calls: list[int] = []
+
+    def _fake_windows_signature(pid: int) -> str:
+        calls.append(pid)
+        return "win-filetime:123456789"
+
+    def _forbid_linux_signature(pid: int):
+        raise AssertionError(f"Linux process identity used for Windows PID {pid}")
+
+    monkeypatch.setattr("agy_mcp.supervisor.os.name", "nt")
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_process_start_signature",
+        _fake_windows_signature,
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._linux_process_start_signature",
+        _forbid_linux_signature,
+    )
+
+    assert _process_start_signature(4321) == "win-filetime:123456789"
+    assert calls == [4321]
+
+
 def test_linux_process_start_signature_uses_boot_id_and_start_ticks(tmp_path: Path):
     proc_root = tmp_path / "proc"
     proc_pid = proc_root / "123"
@@ -632,6 +660,188 @@ def test_linux_process_start_signature_uses_boot_id_and_start_ticks(tmp_path: Pa
     assert _linux_process_start_signature(123, proc_root=proc_root) == (
         "proc-stat:boot-id-123:42424242"
     )
+
+
+def test_windows_process_api_declares_pointer_width_safe_signatures(monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    class _Function:
+        argtypes = None
+        restype = None
+
+    class _Kernel32:
+        OpenProcess = _Function()
+        GetExitCodeProcess = _Function()
+        GetProcessTimes = _Function()
+        CloseHandle = _Function()
+
+    kernel32 = _Kernel32()
+    loaded: dict[str, object] = {}
+
+    def _fake_win_dll(name: str, *, use_last_error: bool):
+        loaded["name"] = name
+        loaded["use_last_error"] = use_last_error
+        return kernel32
+
+    monkeypatch.setattr(ctypes, "WinDLL", _fake_win_dll, raising=False)
+
+    loaded_ctypes, loaded_wintypes, loaded_kernel32 = _load_windows_process_api()
+
+    assert loaded == {"name": "kernel32", "use_last_error": True}
+    assert loaded_ctypes is ctypes
+    assert loaded_wintypes is wintypes
+    assert loaded_kernel32 is kernel32
+    assert kernel32.OpenProcess.argtypes == (
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.GetExitCodeProcess.argtypes == (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    assert kernel32.GetExitCodeProcess.restype is wintypes.BOOL
+    filetime_pointer = ctypes.POINTER(wintypes.FILETIME)
+    assert kernel32.GetProcessTimes.argtypes == (
+        wintypes.HANDLE,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+    )
+    assert kernel32.GetProcessTimes.restype is wintypes.BOOL
+    assert kernel32.CloseHandle.argtypes == (wintypes.HANDLE,)
+    assert kernel32.CloseHandle.restype is wintypes.BOOL
+
+
+def test_windows_process_probe_distinguishes_absent_from_open_failure(monkeypatch):
+    class _Ctypes:
+        last_error = 0
+        last_error_calls = 0
+
+        @classmethod
+        def get_last_error(cls) -> int:
+            cls.last_error_calls += 1
+            return cls.last_error
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert access == 0x1000
+            assert inherit is False
+            assert pid == 1234
+            return None
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (_Ctypes, object(), _Kernel32()),
+    )
+
+    for last_error, expected in ((5, None), (123, None), (87, False)):
+        _Ctypes.last_error = last_error
+        _Ctypes.last_error_calls = 0
+
+        exists, signature = _windows_process_info(1234)
+
+        assert exists is expected
+        assert signature is None
+        assert _Ctypes.last_error_calls == 1
+
+
+def test_windows_process_probe_preserves_handle_and_reads_creation_filetime(
+    monkeypatch,
+):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+    calls: list[tuple[str, int]] = []
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert (access, inherit, pid) == (0x1000, False, 4321)
+            return handle
+
+        @staticmethod
+        def GetExitCodeProcess(received_handle: int, exit_code_pointer) -> int:
+            calls.append(("exit", received_handle))
+            ctypes.cast(
+                exit_code_pointer,
+                ctypes.POINTER(wintypes.DWORD),
+            ).contents.value = 259
+            return 1
+
+        @staticmethod
+        def GetProcessTimes(
+            received_handle: int,
+            creation_pointer,
+            exit_pointer,
+            kernel_pointer,
+            user_pointer,
+        ) -> int:
+            del exit_pointer, kernel_pointer, user_pointer
+            calls.append(("times", received_handle))
+            creation = ctypes.cast(
+                creation_pointer,
+                ctypes.POINTER(wintypes.FILETIME),
+            ).contents
+            creation.dwHighDateTime = 0x0123_4567
+            creation.dwLowDateTime = 0x89AB_CDEF
+            return 1
+
+        @staticmethod
+        def CloseHandle(received_handle: int) -> int:
+            calls.append(("close", received_handle))
+            return 1
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (ctypes, wintypes, _Kernel32()),
+    )
+
+    exists, signature = _windows_process_info(4321)
+
+    expected_filetime = (0x0123_4567 << 32) | 0x89AB_CDEF
+    assert exists is True
+    assert signature == f"win-filetime:{expected_filetime}"
+    assert calls == [("exit", handle), ("times", handle), ("close", handle)]
+
+
+def test_status_reconciles_windows_owner_when_creation_filetime_changed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_process_info",
+        lambda pid: (True, "win-filetime:222"),
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        _windows_process_start_signature,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_windows_reused",
+        cwd=str(tmp_path),
+        pid=4321,
+        extra={
+            "supervisor": {
+                "pid": 4321,
+                "instance_id": "foreign",
+                "process_start_signature": "win-filetime:111",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
 
 
 def test_pid_exists_uses_non_destructive_windows_probe(monkeypatch):
@@ -653,6 +863,42 @@ def test_pid_exists_uses_non_destructive_windows_probe(monkeypatch):
 
     assert _pid_exists(123) is True
     assert calls == [123]
+
+
+def test_status_keeps_foreign_owner_when_windows_probe_is_inconclusive(
+    tmp_path: Path,
+    monkeypatch,
+):
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_process_info",
+        lambda pid: (None, None),
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._pid_exists",
+        _windows_pid_exists,
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        _windows_process_start_signature,
+    )
+
+    for suffix, signature in (("unsigned", None), ("signed", "win-filetime:111")):
+        owner = {"pid": 4321, "instance_id": "foreign"}
+        if signature is not None:
+            owner["process_start_signature"] = signature
+        record = supervisor.store.create_job(
+            job_id=f"job_foreign_windows_unknown_{suffix}",
+            cwd=str(tmp_path),
+            pid=4321,
+            extra={"supervisor": owner},
+        )
+
+        public = supervisor.status(record.job_id)
+
+        assert public.status == "running"
+        assert supervisor.store.get_job(record.job_id).status == "running"
 
 
 def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):

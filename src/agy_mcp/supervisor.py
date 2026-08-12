@@ -731,7 +731,7 @@ def _owned_by_foreign_live_supervisor(
     record: JobRecord,
     current_instance_id: str,
 ) -> bool:
-    """Return True when another live supervisor owns the running record."""
+    """Return True unless a foreign supervisor owner is provably stale."""
 
     owner = record.extra.get("supervisor")
     if not isinstance(owner, dict):
@@ -744,7 +744,7 @@ def _owned_by_foreign_live_supervisor(
     signature = owner.get("process_start_signature")
     if isinstance(signature, str) and signature:
         return _pid_matches_start_signature(pid, signature)
-    return _pid_exists(pid)
+    return _pid_exists(pid) is not False
 
 
 def _pid_matches_start_signature(pid: int, expected: str) -> bool:
@@ -752,18 +752,22 @@ def _pid_matches_start_signature(pid: int, expected: str) -> bool:
 
     current = _process_start_signature(pid)
     if current is None:
-        return _pid_exists(pid)
+        return _pid_exists(pid) is not False
     return current == expected
 
 
 def _process_start_signature(pid: int) -> str | None:
-    """Return a best-effort non-reusable process start signature."""
+    """Return the strongest process start signature available on this host."""
 
     if pid <= 0:
         return None
+    if os.name == "nt":
+        return _windows_process_start_signature(pid)
     linux_signature = _linux_process_start_signature(pid)
     if linux_signature is not None:
         return linux_signature
+    # Portable ps only exposes whole-second lstart values. Keep this as a
+    # best-effort fallback; same-second PID reuse cannot be disproved here.
     try:
         result = subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(pid)],
@@ -802,8 +806,8 @@ def _linux_process_start_signature(
     return f"proc-stat:{boot_id}:{start_ticks}"
 
 
-def _pid_exists(pid: int) -> bool:
-    """Return whether ``pid`` appears alive on this host."""
+def _pid_exists(pid: int) -> bool | None:
+    """Return PID liveness, or None when the probe is inconclusive."""
 
     if pid <= 0:
         return False
@@ -812,7 +816,7 @@ def _pid_exists(pid: int) -> bool:
     return _posix_pid_exists(pid)
 
 
-def _posix_pid_exists(pid: int) -> bool:
+def _posix_pid_exists(pid: int) -> bool | None:
     """Return whether ``pid`` exists using POSIX signal-0 semantics."""
 
     try:
@@ -822,31 +826,110 @@ def _posix_pid_exists(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
-        return False
+        return None
     return True
 
 
-def _windows_pid_exists(pid: int) -> bool:
-    """Return whether ``pid`` exists on Windows without signalling it."""
+def _load_windows_process_api():
+    """Load Kernel32 process APIs with explicit pointer-safe signatures."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    filetime_pointer = ctypes.POINTER(wintypes.FILETIME)
+    kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+    )
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return ctypes, wintypes, kernel32
+
+
+def _windows_process_info(pid: int) -> tuple[bool | None, str | None]:
+    """Return Windows process liveness and identity when they are knowable."""
+
+    if pid <= 0:
+        return False, None
+    try:
+        ctypes, wintypes, kernel32 = _load_windows_process_api()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+    except (AttributeError, ImportError, OSError, TypeError):
+        return None, None
+    if not handle:
+        try:
+            last_error = ctypes.get_last_error()
+        except (AttributeError, OSError):
+            return None, None
+        # OpenProcess reports ERROR_INVALID_PARAMETER for an invalid PID.
+        # Access denied and every other failure leave liveness unknown.
+        return (False, None) if last_error == 87 else (None, None)
 
     try:
-        import ctypes
-    except ImportError:
-        return False
-    try:
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return False
+        exit_code = wintypes.DWORD()
         try:
-            exit_code = ctypes.c_ulong()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == 259
-        finally:
+                return None, None
+        except (AttributeError, OSError, TypeError):
+            return None, None
+        if exit_code.value != 259:
+            return False, None
+
+        creation_time = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        try:
+            has_times = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation_time),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            )
+        except (AttributeError, OSError, TypeError):
+            return True, None
+        if not has_times:
+            return True, None
+        creation_filetime = (
+            (int(creation_time.dwHighDateTime) & 0xFFFF_FFFF) << 32
+        ) | (int(creation_time.dwLowDateTime) & 0xFFFF_FFFF)
+        return True, f"win-filetime:{creation_filetime}"
+    finally:
+        try:
             kernel32.CloseHandle(handle)
-    except (AttributeError, OSError):
-        return False
+        except (AttributeError, OSError, TypeError):
+            pass
+
+
+def _windows_process_start_signature(pid: int) -> str | None:
+    """Return the Windows creation FILETIME identity for ``pid``."""
+
+    _, signature = _windows_process_info(pid)
+    return signature
+
+
+def _windows_pid_exists(pid: int) -> bool | None:
+    """Return Windows PID liveness, or None when the probe is inconclusive."""
+
+    exists, _ = _windows_process_info(pid)
+    return exists
 
 
 def _migrate_if_present(src: Path, dst: Path) -> None:
