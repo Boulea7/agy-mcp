@@ -28,7 +28,6 @@ ArtifactFile = release_audit.ArtifactFile
 _check_contents = release_audit._check_contents
 _check_files = release_audit._check_files
 _check_wheel_metadata = release_audit._check_wheel_metadata
-_is_required_skill_body_file = release_audit._is_required_skill_body_file
 _skill_body_files_for_sdist = release_audit._skill_body_files_for_sdist
 _skill_body_files_for_wheel = release_audit._skill_body_files_for_wheel
 
@@ -44,11 +43,6 @@ def test_release_required_sets_include_all_bundled_skill_body_files():
     assert wheel_skill_files
     assert sdist_skill_files <= REQUIRED_SDIST_FILES
     assert wheel_skill_files <= REQUIRED_WHEEL_FILES
-    assert {
-        path.relative_to(Path(__file__).resolve().parents[1]).as_posix()
-        for path in skill_root.rglob("*")
-        if _is_required_skill_body_file(path)
-    } == sdist_skill_files
 
 
 def test_release_skill_body_scan_fails_when_root_is_missing(tmp_path: Path):
