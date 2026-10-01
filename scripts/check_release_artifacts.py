@@ -16,6 +16,8 @@ artefacts existing under ``dist/``.
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 import subprocess
 import sys
@@ -144,7 +146,11 @@ _REQUIRED_SDIST_BASE_FILES: set[str] = {
     "src/agy_mcp/adapters/base.py",
     "src/agy_mcp/adapters/gemini.py",
     "src/agy_mcp/adapters/protocol.py",
+    "src/agy_mcp/_skill_bodies/claude/SKILL.md",
+    "src/agy_mcp/_skill_bodies/codex/SKILL.md",
+    "src/agy_mcp/_skill_bodies/antigravity/SKILL.md",
 }
+# Preserve the runtime floor even when required source files are missing.
 REQUIRED_SDIST_FILES: set[str] = _REQUIRED_SDIST_BASE_FILES | _skill_body_files_for_sdist()
 
 ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
@@ -182,6 +188,18 @@ _REQUIRED_WHEEL_BASE_FILES: set[str] = {
     "agy_mcp/adapters/base.py",
     "agy_mcp/adapters/gemini.py",
     "agy_mcp/adapters/protocol.py",
+    "agy_mcp/_skill_bodies/claude/SKILL.md",
+    "agy_mcp/_skill_bodies/claude/scripts/agy_bridge.py",
+    "agy_mcp/_skill_bodies/claude/references/usage.md",
+    "agy_mcp/_skill_bodies/claude/references/prompt-patterns.md",
+    "agy_mcp/_skill_bodies/claude/references/security.md",
+    "agy_mcp/_skill_bodies/codex/SKILL.md",
+    "agy_mcp/_skill_bodies/codex/scripts/agy_bridge.py",
+    "agy_mcp/_skill_bodies/codex/references/usage.md",
+    "agy_mcp/_skill_bodies/codex/references/prompt-patterns.md",
+    "agy_mcp/_skill_bodies/codex/references/security.md",
+    "agy_mcp/_skill_bodies/antigravity/SKILL.md",
+    "agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
 }
 REQUIRED_WHEEL_FILES: set[str] = _REQUIRED_WHEEL_BASE_FILES | _skill_body_files_for_wheel()
 
@@ -454,17 +472,23 @@ def _check_wheel_metadata(label: str, files: list[ArtifactFile]) -> list[str]:
     )
     if record is not None:
         try:
-            entries = record.data.decode("utf-8").splitlines()
+            rows = csv.reader(io.StringIO(record.data.decode("utf-8"), newline=""), strict=True)
+            recorded_paths = {row[0] for row in rows if row}
         except UnicodeDecodeError:
-            entries = []
-        recorded_paths = {line.split(",", 1)[0] for line in entries if line}
-        # Every shipped python file must be listed in RECORD. Skipping
-        # the dist-info entries themselves keeps the check honest about
-        # the wheel payload rather than the metadata bookkeeping.
-        payload_paths = {
-            f.path for f in files if not _DIST_INFO_RE.match(f.path)
+            recorded_paths = set()
+        except csv.Error:
+            problems.append(f"[{label}] RECORD is not valid CSV")
+            recorded_paths = set()
+        # RECORD must cover all ordinary files, including dist-info metadata.
+        # Its own row and the legacy wheel signatures may be omitted.
+        record_dir = record.path.rsplit("/", 1)[0]
+        exempt_paths = {
+            record.path,
+            f"{record_dir}/RECORD.jws",
+            f"{record_dir}/RECORD.p7s",
         }
-        missing_from_record = sorted(payload_paths - recorded_paths)
+        required_record_paths = {f.path for f in files} - exempt_paths
+        missing_from_record = sorted(required_record_paths - recorded_paths)
         for path in missing_from_record:
             problems.append(
                 f"[{label}] wheel ships {path} but RECORD does not list it",
