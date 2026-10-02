@@ -145,12 +145,22 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
 
     ok = False
     hint = "Check the agy-mcp installation and dependencies in this Python environment."
+    python_flags = ["-I"] if sys.flags.isolated else [
+        flag for flag, enabled in (
+            ("-E", sys.flags.ignore_environment),
+            ("-s", sys.flags.no_user_site),
+            ("-P", sys.flags.safe_path),
+        ) if enabled
+    ]
+    # Isolated mode does not imply -S; preserve that separate site restriction.
+    if sys.flags.no_site:
+        python_flags.append("-S")
     try:
         with tempfile.TemporaryDirectory(prefix="agy-mcp-doctor-") as directory:
             result_path = Path(directory) / "result.json"
             completed = subprocess.run(
                 [
-                    sys.executable, *(["-P"] if sys.flags.safe_path else []),
+                    sys.executable, *python_flags,
                     "-c", _SERVER_IMPORT_PROBE,
                     str(Path(__file__).resolve().parent.parent),
                     sys.path[0] if sys.path else "", str(result_path),

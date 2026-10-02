@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import venv
 from pathlib import Path
 
 import pytest
@@ -523,3 +524,127 @@ print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
     assert result.returncode == 0 and result.stderr == ""
     assert check["ok"] is False and check["severity"] == "error"
     assert "ImportError: new broken SDK override" in check["detail"]
+
+
+def _copy_probe_package(tmp_path: Path) -> Path:
+    source = Path(__file__).resolve().parents[1] / "src" / "agy_mcp"
+    package_root = tmp_path / "package"
+    shutil.copytree(
+        source, package_root / "agy_mcp",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    return package_root
+
+
+@pytest.mark.parametrize("flag", ["-E", "-I"])
+def test_probe_preserves_caller_environment_isolation(probe_environment: Path, flag: str):
+    package_root = _copy_probe_package(probe_environment)
+    dependency = _mcp_fixture(
+        probe_environment, "raise ImportError('SDK from excluded PYTHONPATH')\n",
+    )
+    marker = probe_environment / "excluded-sdk-imported"
+    (dependency / "mcp" / "__init__.py").write_text(f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("imported", encoding="utf-8")
+""", encoding="utf-8")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(dependency)
+    env["PYTHONSAFEPATH"] = ""
+    result = subprocess.run(
+        [sys.executable, "-B", flag, "-c", """
+import json
+import sys
+from pathlib import Path
+package_root, flag, marker = sys.argv[1:]
+assert sys.flags.ignore_environment
+assert bool(sys.flags.isolated) == (flag == "-I")
+# Bootstrap this package without adding excluded SDK paths.
+sys.path.insert(1 if not sys.flags.safe_path else 0, package_root)
+from agy_mcp import doctor, server
+from agy_mcp.safety import SafetyPolicy
+assert not Path(marker).exists()
+assert server._config is None and server._store is None and server._supervisor is None
+print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
+""", str(package_root), flag, str(marker)],
+        capture_output=True, text=True, env=env, cwd=probe_environment, timeout=15,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    check = json.loads(result.stdout)
+
+    assert check["ok"] is True
+    assert not marker.exists()
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
+@pytest.mark.parametrize("flag", ["normal", "-s", "-S"])
+def test_probe_preserves_caller_site_exclusions(probe_environment: Path, flag: str):
+    package_root = _copy_probe_package(probe_environment)
+    runtime = probe_environment / "interpreter"
+    venv.EnvBuilder(with_pip=False, system_site_packages=True).create(runtime)
+    executable = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    dependency = _mcp_fixture(probe_environment, """
+import agy_doctor_user_site_fixture
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+""")
+    dependencies = Path(importlib.util.find_spec("pydantic").origin).parent.parent
+    userbase = probe_environment / "userbase"
+    marker = probe_environment / "user-site-imported"
+    env = dict(os.environ)
+    env.update({
+        "PYTHONPATH": os.pathsep.join([str(dependency), str(package_root), str(dependencies)]),
+        "PYTHONUSERBASE": str(userbase),
+        "PYTHONNOUSERSITE": "",
+        "PYTHONSAFEPATH": "",
+    })
+    location = subprocess.run(
+        [str(executable), "-B", "-S", "-c", "import site; print(site.getusersitepackages())"],
+        capture_output=True, text=True, env=env, timeout=15,
+    )
+    assert location.returncode == 0 and location.stderr == ""
+    user_site = Path(location.stdout.strip())
+    assert user_site.is_relative_to(userbase)
+    user_site.mkdir(parents=True)
+    (user_site / "agy_doctor_user_site_fixture.py").write_text(f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("imported", encoding="utf-8")
+""", encoding="utf-8")
+    result = subprocess.run(
+        [str(executable), "-B", *([] if flag == "normal" else [flag]), "-c", """
+import json
+import sys
+from pathlib import Path
+flag, marker = sys.argv[1:]
+assert bool(sys.flags.no_user_site) == (flag == "-s")
+assert bool(sys.flags.no_site) == (flag == "-S")
+from agy_mcp import doctor
+from agy_mcp.safety import SafetyPolicy
+try:
+    import agy_mcp.server
+except ModuleNotFoundError as exc:
+    assert exc.name == "agy_doctor_user_site_fixture"
+    caller_failed = True
+else:
+    caller_failed = False
+    assert agy_mcp.server._config is None
+    assert agy_mcp.server._store is None
+    assert agy_mcp.server._supervisor is None
+assert caller_failed == (flag != "normal")
+assert Path(marker).exists() == (flag == "normal")
+print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
+""", flag, str(marker)],
+        capture_output=True, text=True, env=env, cwd=probe_environment, timeout=15,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    check = json.loads(result.stdout)
+
+    assert check["ok"] is (flag == "normal")
+    assert marker.exists() is (flag == "normal")
+    if flag != "normal":
+        assert "ModuleNotFoundError: No module named 'agy_doctor_user_site_fixture'" in check["detail"]
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
