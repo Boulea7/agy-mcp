@@ -11,7 +11,11 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
+
+import pytest
 
 from agy_mcp.adapters.agy import (
     AGY_AUTH_LOG_LOOKBACK_S,
@@ -22,6 +26,7 @@ from agy_mcp.adapters.agy import (
 )
 from agy_mcp.adapters.base import detect_flags, has_flag
 from agy_mcp.adapters.gemini import GeminiCliBackend
+from agy_mcp.models import Capability
 
 HERE = Path(__file__).parent
 FIXTURES = HERE / "fixtures"
@@ -385,3 +390,60 @@ def test_detect_caches_until_refresh(tmp_path, monkeypatch):
     backend.detect()
     backend.detect(refresh=True)
     assert calls["n"] == 2
+
+
+def test_concurrent_detect_shares_one_cold_probe(monkeypatch):
+    backend = AgyPrintBackend()
+    probe_started = Event()
+    second_call_started = Event()
+    second_probe_started = Event()
+    release_probe = Event()
+    calls = []
+
+    def probe():
+        calls.append(None)
+        if len(calls) > 1:
+            second_probe_started.set()
+        probe_started.set()
+        assert release_probe.wait(timeout=3)
+        return Capability(backend="agy", bin_path="fixture-agy")
+
+    def second_call():
+        second_call_started.set()
+        return backend.detect()
+
+    monkeypatch.setattr(backend, "_probe", probe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(backend.detect)
+        try:
+            assert probe_started.wait(timeout=3)
+            second = pool.submit(second_call)
+            assert second_call_started.wait(timeout=3)
+            second_probe_started.wait(timeout=0.2)
+        finally:
+            release_probe.set()
+        first_result = first.result(timeout=3)
+        second_result = second.result(timeout=3)
+
+    assert len(calls) == 1
+    assert first_result is second_result
+    assert backend.detect() is first_result
+
+
+def test_detect_retries_after_probe_failure(monkeypatch):
+    backend = AgyPrintBackend()
+    capability = Capability(backend="agy", bin_path="fixture-agy")
+    calls = []
+
+    def probe():
+        calls.append(None)
+        if len(calls) == 1:
+            raise RuntimeError("fixture probe failure")
+        return capability
+
+    monkeypatch.setattr(backend, "_probe", probe)
+    with pytest.raises(RuntimeError, match="fixture probe failure"):
+        backend.detect()
+    assert backend.detect() is capability
+    assert backend.detect() is capability
+    assert len(calls) == 2
