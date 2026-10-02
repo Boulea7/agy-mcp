@@ -40,9 +40,8 @@ _SERVER_IMPORT_PROBE = """
 import sys
 
 if sys.path and sys.path[0] == "":
-    sys.path[0] = sys.argv[1]
-else:
-    sys.path.insert(0, sys.argv[1])
+    sys.path[0] = sys.argv[2]
+sys.path.insert(0, sys.argv[1])
 # Pin this package, then restore the caller's dependency search order.
 import agy_mcp
 sys.path.pop(0)
@@ -57,7 +56,7 @@ except BaseException as exc:
     result = {"ok": False, "detail": safety.redact(f"{type(exc).__name__}: {exc}")[:256]}
 else:
     result = {"ok": True}
-with open(sys.argv[2], "w", encoding="utf-8") as output:
+with open(sys.argv[3], "w", encoding="utf-8") as output:
     json.dump(result, output)
 """
 
@@ -151,8 +150,10 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
             result_path = Path(directory) / "result.json"
             completed = subprocess.run(
                 [
-                    sys.executable, "-c", _SERVER_IMPORT_PROBE,
-                    str(Path(__file__).resolve().parent.parent), str(result_path),
+                    sys.executable, *(["-P"] if sys.flags.safe_path else []),
+                    "-c", _SERVER_IMPORT_PROBE,
+                    str(Path(__file__).resolve().parent.parent),
+                    sys.path[0] if sys.path else "", str(result_path),
                 ],
                 input=json.dumps(list(safety.config.redact_extra_patterns)).encode(),
                 stdout=subprocess.DEVNULL,

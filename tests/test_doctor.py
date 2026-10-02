@@ -434,3 +434,92 @@ print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
     assert result.returncode == 0 and result.stderr == ""
     assert check["ok"] is False and check["severity"] == "error"
     assert "ImportError: explicit broken SDK" in check["detail"]
+
+
+@pytest.mark.parametrize("mode", ["command", "module", "console"])
+@pytest.mark.parametrize("safe_path", [False, True])
+def test_probe_matches_entrypoint_dependency_search(
+    probe_environment: Path, mode: str, safe_path: bool,
+):
+    cwd = _mcp_fixture(probe_environment, "raise ImportError('cwd-only broken SDK')\n")
+    caller = probe_environment / "entrypoint"
+    caller.mkdir()
+    code = """
+import json
+from agy_mcp import doctor
+from agy_mcp.safety import SafetyPolicy
+try:
+    import agy_mcp.server
+except ImportError as exc:
+    assert str(exc) == "cwd-only broken SDK"
+    caller_failed = True
+else:
+    caller_failed = False
+    assert agy_mcp.server._config is None
+    assert agy_mcp.server._store is None
+    assert agy_mcp.server._supervisor is None
+print(json.dumps({
+    "caller_failed": caller_failed,
+    "probe": doctor._check_mcp_server(SafetyPolicy()).to_dict(),
+}))
+"""
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = ""
+    env["PYTHONPATH"] = str(caller) + os.pathsep + env["PYTHONPATH"]
+    argv = [sys.executable, *(["-P"] if safe_path else [])]
+    if mode == "command":
+        argv.extend(["-c", code])
+    elif mode == "module":
+        (caller / "doctor_path_caller.py").write_text(code, encoding="utf-8")
+        argv.extend(["-m", "doctor_path_caller"])
+    else:
+        script = caller / "agy-doctor"
+        script.write_text(code, encoding="utf-8")
+        argv.append(str(script))
+    result = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=cwd, timeout=15)
+    data = json.loads(result.stdout)
+
+    assert result.returncode == 0 and result.stderr == ""
+    expected_failure = mode != "console" and not safe_path
+    assert data["caller_failed"] is expected_failure
+    assert data["probe"]["ok"] is not expected_failure
+    if expected_failure:
+        assert "ImportError: cwd-only broken SDK" in data["probe"]["detail"]
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
+def test_safe_path_probe_preserves_new_override_with_adjacent_installed_sdk(
+    probe_environment: Path,
+):
+    dependency = _mcp_fixture(probe_environment, "raise ImportError('new broken SDK override')\n")
+    installed = probe_environment / "site-packages"
+    source = Path(__file__).resolve().parents[1] / "src" / "agy_mcp"
+    mcp_source = Path(importlib.util.find_spec("mcp").origin).parent
+    for package, destination in ((source, "agy_mcp"), (mcp_source, "mcp")):
+        shutil.copytree(
+            package, installed / destination,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = ""
+    env["PYTHONPATH"] = str(installed)
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", f"""
+import json
+import os
+import sys
+from agy_mcp import doctor, server
+from agy_mcp.safety import SafetyPolicy
+assert sys.flags.safe_path and sys.path[0] == {str(installed)!r}
+assert server._config is None and server._store is None and server._supervisor is None
+os.environ["PYTHONPATH"] = {str(dependency)!r} + os.pathsep + os.environ["PYTHONPATH"]
+print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
+"""],
+        capture_output=True, text=True, env=env, timeout=15,
+    )
+    check = json.loads(result.stdout)
+
+    assert result.returncode == 0 and result.stderr == ""
+    assert check["ok"] is False and check["severity"] == "error"
+    assert "ImportError: new broken SDK override" in check["detail"]
