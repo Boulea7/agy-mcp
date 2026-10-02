@@ -1,6 +1,6 @@
-"""Thin forwarder so the Claude skill can shell out to agy-bridge.
+"""Thin forwarder so the Codex skill can shell out to agy-bridge.
 
-The skill is checked into Claude's user-scope skill directory and runs
+The skill is checked into Codex's user-scope skill directory and runs
 in whatever Python the host environment provides. We don't ship the
 agy-mcp package alongside the skill; instead we prefer ``uvx`` which
 installs the wheel on demand from the user's pinned source.
@@ -18,7 +18,7 @@ Selection order:
      deployed copy carries a real version even on a wheel-less host.
 
 All argv is forwarded verbatim. We do NOT parse the bridge response —
-the caller (the Claude agent) reads the JSON line and decides what to do.
+the caller (the Codex agent) reads the JSON line and decides what to do.
 """
 
 from __future__ import annotations

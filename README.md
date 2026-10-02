@@ -121,10 +121,10 @@ MCP 工具是否齐、SKILL 落地路径、剩余可选项。
 | `agy` | 同步一次性调用（PROMPT / cd / sandbox / SESSION_ID + `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`） |
 | `agy_continue` | 续 `SESSION_ID` |
 | `agy_start` | 后台启动长任务，立即返回 `job_id` |
-| `agy_status` | 查 job 状态：running / completed / failed / cancelled / upstream_error |
-| `agy_read` | 读 job 事件流（raw / claude / codex 三协议） |
-| `agy_result` | 取已完成 job 的结果；不传 `job_id` 时返回最近完成任务 |
-| `agy_cancel` | 跨平台 process group 终止 |
+| `agy_status` | 查 job 状态：running / completed / failed / cancelled / upstream_error；`job_id` 可用唯一前缀 |
+| `agy_read` | 读 job 事件流（raw / claude / codex 三协议）；`job_id` 可用唯一前缀 |
+| `agy_result` | 取已完成 job 的结果；不传 `job_id` 时返回最近完成任务；传参可用唯一前缀 |
+| `agy_cancel` | 跨平台 process group 终止；`job_id` 可用唯一前缀 |
 | `agy_sessions` | 列最近 session |
 | `agy_doctor` | 环境 + 鉴权 + capability 探测（不泄漏 secrets） |
 | `agy_install_skill` | 把 SKILL bundle 装到 Claude / Codex / Antigravity 目录 |

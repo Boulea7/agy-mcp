@@ -16,19 +16,100 @@ artefacts existing under ``dist/``.
 
 from __future__ import annotations
 
+import csv
+import io
 import re
+import subprocess
 import sys
 import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-DIST_DIR = Path(__file__).resolve().parent.parent / "dist"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DIST_DIR = PROJECT_ROOT / "dist"
+SRC_ROOT = PROJECT_ROOT / "src"
+SKILL_BODIES_ROOT = SRC_ROOT / "agy_mcp" / "_skill_bodies"
+SKILL_BODY_EXCLUDED_COMPONENTS = frozenset({"__pycache__"})
+SKILL_BODY_EXCLUDED_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_required_skill_body_file(path: Path) -> bool:
+    """Return whether a source skill-body file should ship to users."""
+
+    if not path.is_file():
+        return False
+    if any(component in SKILL_BODY_EXCLUDED_COMPONENTS for component in path.parts):
+        return False
+    if path.name in {".DS_Store", "Thumbs.db"}:
+        return False
+    return not path.name.endswith(SKILL_BODY_EXCLUDED_SUFFIXES)
+
+
+def _tracked_files_under(root: Path, project_root: Path) -> set[Path] | None:
+    """Return git-tracked files under ``root``, or None outside a git checkout."""
+
+    try:
+        relative_root = root.relative_to(project_root).as_posix()
+    except ValueError:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "ls-files", "-z", "--", relative_root],
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return {
+        project_root / raw.decode("utf-8")
+        for raw in result.stdout.split(b"\0")
+        if raw
+    }
+
+
+def _required_skill_body_source_files(root: Path, project_root: Path) -> set[Path]:
+    """Return source skill-body files that should be present in release outputs."""
+
+    if not root.is_dir():
+        raise RuntimeError(f"required skill body directory is missing: {root}")
+    candidates = _tracked_files_under(root, project_root)
+    if candidates is None:
+        candidates = set(root.rglob("*"))
+    return {
+        path
+        for path in candidates
+        if _is_required_skill_body_file(path)
+    }
+
+
+def _skill_body_files_for_sdist(
+    root: Path = SKILL_BODIES_ROOT,
+    project_root: Path = PROJECT_ROOT,
+) -> set[str]:
+    """Return every bundled skill file path as it appears in the sdist."""
+
+    return {
+        path.relative_to(project_root).as_posix()
+        for path in _required_skill_body_source_files(root, project_root)
+    }
+
+
+def _skill_body_files_for_wheel(
+    root: Path = SKILL_BODIES_ROOT,
+    src_root: Path = SRC_ROOT,
+) -> set[str]:
+    """Return every bundled skill file path as it appears in the wheel."""
+
+    return {
+        path.relative_to(src_root).as_posix()
+        for path in _required_skill_body_source_files(root, src_root.parent)
+    }
 
 # Files we positively require in the sdist. Missing any of these is a release
 # blocker because skill bundles, public docs, and licence are part of the
 # product surface — losing them silently would ship a broken install.
-REQUIRED_SDIST_FILES: set[str] = {
+_REQUIRED_SDIST_BASE_FILES: set[str] = {
     "LICENSE",
     "PKG-INFO",
     "README.md",
@@ -69,6 +150,8 @@ REQUIRED_SDIST_FILES: set[str] = {
     "src/agy_mcp/_skill_bodies/codex/SKILL.md",
     "src/agy_mcp/_skill_bodies/antigravity/SKILL.md",
 }
+# Preserve the runtime floor even when required source files are missing.
+REQUIRED_SDIST_FILES: set[str] = _REQUIRED_SDIST_BASE_FILES | _skill_body_files_for_sdist()
 
 ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
     # Hatchling includes the root .gitignore in sdists even when public
@@ -77,15 +160,6 @@ ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
     # forbidden below.
     ".gitignore",
     "src/agy_mcp/py.typed",
-    "src/agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
-    "src/agy_mcp/_skill_bodies/claude/references/prompt-patterns.md",
-    "src/agy_mcp/_skill_bodies/claude/references/security.md",
-    "src/agy_mcp/_skill_bodies/claude/references/usage.md",
-    "src/agy_mcp/_skill_bodies/claude/scripts/agy_bridge.py",
-    "src/agy_mcp/_skill_bodies/codex/references/prompt-patterns.md",
-    "src/agy_mcp/_skill_bodies/codex/references/security.md",
-    "src/agy_mcp/_skill_bodies/codex/references/usage.md",
-    "src/agy_mcp/_skill_bodies/codex/scripts/agy_bridge.py",
 }
 
 # Files we positively require in the wheel. The wheel is what users install,
@@ -93,7 +167,7 @@ ALLOWED_SDIST_FILES: set[str] = REQUIRED_SDIST_FILES | {
 # crash at runtime with ``FileNotFoundError`` and the user never finds out
 # until they invoke the tool. Phase 8 review P3: gate on the wheel surface
 # explicitly rather than trusting hatch to mirror the sdist whitelist.
-REQUIRED_WHEEL_FILES: set[str] = {
+_REQUIRED_WHEEL_BASE_FILES: set[str] = {
     "agy_mcp/__init__.py",
     "agy_mcp/__main__.py",
     "agy_mcp/bridge.py",
@@ -127,6 +201,7 @@ REQUIRED_WHEEL_FILES: set[str] = {
     "agy_mcp/_skill_bodies/antigravity/SKILL.md",
     "agy_mcp/_skill_bodies/antigravity/references/collaboration.md",
 }
+REQUIRED_WHEEL_FILES: set[str] = _REQUIRED_WHEEL_BASE_FILES | _skill_body_files_for_wheel()
 
 # Files / patterns that MUST NOT appear in any artefact. A match here aborts
 # the release. Patterns use simple substring + path-component checks so we
@@ -397,17 +472,23 @@ def _check_wheel_metadata(label: str, files: list[ArtifactFile]) -> list[str]:
     )
     if record is not None:
         try:
-            entries = record.data.decode("utf-8").splitlines()
+            rows = csv.reader(io.StringIO(record.data.decode("utf-8"), newline=""), strict=True)
+            recorded_paths = {row[0] for row in rows if row}
         except UnicodeDecodeError:
-            entries = []
-        recorded_paths = {line.split(",", 1)[0] for line in entries if line}
-        # Every shipped python file must be listed in RECORD. Skipping
-        # the dist-info entries themselves keeps the check honest about
-        # the wheel payload rather than the metadata bookkeeping.
-        payload_paths = {
-            f.path for f in files if not _DIST_INFO_RE.match(f.path)
+            recorded_paths = set()
+        except csv.Error:
+            problems.append(f"[{label}] RECORD is not valid CSV")
+            recorded_paths = set()
+        # RECORD must cover all ordinary files, including dist-info metadata.
+        # Its own row and the legacy wheel signatures may be omitted.
+        record_dir = record.path.rsplit("/", 1)[0]
+        exempt_paths = {
+            record.path,
+            f"{record_dir}/RECORD.jws",
+            f"{record_dir}/RECORD.p7s",
         }
-        missing_from_record = sorted(payload_paths - recorded_paths)
+        required_record_paths = {f.path for f in files} - exempt_paths
+        missing_from_record = sorted(required_record_paths - recorded_paths)
         for path in missing_from_record:
             problems.append(
                 f"[{label}] wheel ships {path} but RECORD does not list it",

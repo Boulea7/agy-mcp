@@ -131,10 +131,10 @@ Google の新しい Antigravity CLI（`agy`）を、任意の MCP client から
 | `agy` | 同期 one-shot call（PROMPT / cd / sandbox / SESSION_ID + `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`） |
 | `agy_continue` | 既存の `SESSION_ID` を再開 |
 | `agy_start` | background long job を開始し、すぐ `job_id` を返す |
-| `agy_status` | job state を確認：running / completed / failed / cancelled / upstream_error |
-| `agy_read` | job event stream を読む（raw / claude / codex protocols） |
-| `agy_result` | finished job result を取得。`job_id` 省略時は最新の finished job を返す |
-| `agy_cancel` | cross-platform process-group cancel |
+| `agy_status` | job state を確認：running / completed / failed / cancelled / upstream_error。`job_id` は一意な prefix でも可 |
+| `agy_read` | job event stream を読む（raw / claude / codex protocols）。`job_id` は一意な prefix でも可 |
+| `agy_result` | finished job result を取得。`job_id` 省略時は最新の finished job を返す。指定時は一意な prefix でも可 |
+| `agy_cancel` | cross-platform process-group cancel。`job_id` は一意な prefix でも可 |
 | `agy_sessions` | 最近の session を一覧 |
 | `agy_doctor` | env + auth + capability probe（secrets は出さない） |
 | `agy_install_skill` | SKILL bundle を Claude / Codex / Antigravity dirs にインストール |

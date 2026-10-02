@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -98,6 +101,43 @@ class _RecordingAdapter(BaseAdapter):
             log_path=None,
             artifacts=[],
         )
+
+
+class _CancelBarrierAdapter(_RecordingAdapter):
+    """Run owned child processes, pausing after exit but before metadata writes."""
+
+    def __init__(self) -> None:
+        super().__init__(cap=_capability(), events=[])
+        self.started = {key: threading.Event() for key in ("a", "b")}
+        self.stopped = {key: threading.Event() for key in ("a", "b")}
+        self.finish = {key: threading.Event() for key in ("a", "b")}
+        self.processes: dict[str, subprocess.Popen] = {}
+
+    def run(self, request: BridgeRequest, **kwargs) -> AdapterRunResult:
+        key = request.session_id.removeprefix("sess-cancel-")
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": os.defpath, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.processes[key] = process
+        self.started[key].set()
+        try:
+            assert kwargs["cancel_event"].wait(timeout=15)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            self.stopped[key].set()
+        # Cancellation has stopped the real child. Keep finalize() from
+        # writing misplaced metadata until the test has observed both jobs.
+        self.finish[key].wait(timeout=15)
+        return super().run(request, **kwargs)
 
 
 def _capability() -> Capability:
@@ -498,6 +538,269 @@ def test_agy_read_rejects_negative_since(reset_state):
     assert "since" in (out["error"] or "")
 
 
+@pytest.fixture
+def cancel_workers(tmp_path: Path, monkeypatch, request):
+    adapter = _CancelBarrierAdapter()
+    supervisor = _stage_supervisor(tmp_path, adapter)
+    for name, value in (
+        ("_config", supervisor.config), ("_safety", supervisor.safety),
+        ("_store", supervisor.store), ("_supervisor", supervisor),
+    ):
+        monkeypatch.setattr(server, name, value)
+    handles = {}
+    job_b = "job_alias_a_longer" if getattr(request, "param", False) else "job_live_b"
+    try:
+        for key, job_id in (("a", "job_alias_a"), ("b", job_b)):
+            response = supervisor.start(
+                BridgeRequest(
+                    mode="ask", cwd=str(tmp_path), prompt="wait for cancellation",
+                    session_id=f"sess-cancel-{key}", worktree=False, timeout=86_400,
+                ),
+                job_id=job_id,
+            )
+            assert response.success, response.error
+            handles[key] = supervisor._jobs[job_id]
+            assert adapter.started[key].wait(timeout=5)
+            assert adapter.processes[key].poll() is None
+        yield supervisor, adapter, handles
+    finally:
+        for key, handle in handles.items():
+            supervisor.cancel(handle.job_id)
+            adapter.finish[key].set()
+        for key, handle in handles.items():
+            handle.thread.join(timeout=5)
+            assert not handle.thread.is_alive()
+            assert adapter.stopped[key].is_set()
+            assert adapter.processes[key].poll() is not None
+
+
+@pytest.mark.parametrize("reference", ["job_alias_a", "job_alias"])
+def test_agy_cancel_misplaced_metadata_does_not_stop_other_active_job(
+    cancel_workers, reference: str,
+):
+    supervisor, adapter, handles = cancel_workers
+    meta_a = supervisor.store.root / "job_alias_a" / "meta.json"
+    meta_b = supervisor.store.root / "job_live_b" / "meta.json"
+    original_a, original_b = meta_a.read_bytes(), meta_b.read_bytes()
+    meta_a.write_bytes(original_b)
+    try:
+        out = server.agy_cancel_tool(reference)
+        for key, handle in handles.items():
+            if handle.cancel_event.is_set():
+                assert adapter.stopped[key].wait(timeout=5)
+                assert adapter.processes[key].poll() is not None
+        assert meta_b.read_bytes() == original_b
+        assert adapter.processes["b"].poll() is None, "cancel stopped the other live job"
+        assert handles["a"].cancel_event.is_set() == (reference == "job_alias_a")
+        if reference == "job_alias_a":
+            assert adapter.stopped["a"].is_set()
+            assert adapter.processes["a"].poll() is not None
+        else:
+            assert adapter.processes["a"].poll() is None
+        assert out["signalled"] == (reference == "job_alias_a")
+    finally:
+        meta_a.write_bytes(original_a)
+
+
+@pytest.mark.parametrize("reference", ["job_alias_a", "job_alias"])
+def test_agy_cancel_misplaced_metadata_without_local_handle_does_not_stop_live_job(
+    cancel_workers, reference: str,
+):
+    supervisor, adapter, handles = cancel_workers
+    assert supervisor.cancel("job_alias_a")
+    assert adapter.stopped["a"].wait(timeout=5)
+    adapter.finish["a"].set()
+    handles["a"].thread.join(timeout=5)
+    assert not handles["a"].thread.is_alive()
+    assert "job_alias_a" not in supervisor._jobs
+    meta_a = supervisor.store.root / "job_alias_a" / "meta.json"
+    meta_b = supervisor.store.root / "job_live_b" / "meta.json"
+    original_a, original_b = meta_a.read_bytes(), meta_b.read_bytes()
+    meta_a.write_bytes(original_b)
+    try:
+        out = server.agy_cancel_tool(reference)
+        if handles["b"].cancel_event.is_set():
+            assert adapter.stopped["b"].wait(timeout=5)
+        assert adapter.processes["b"].poll() is None, "cancel stopped the other live job"
+        assert not handles["b"].cancel_event.is_set()
+        assert meta_b.read_bytes() == original_b
+        assert out["signalled"] is False
+    finally:
+        meta_a.write_bytes(original_a)
+
+
+def test_agy_cancel_prefix_skips_misplaced_metadata_and_stops_unique_valid_job(
+    cancel_workers,
+):
+    supervisor, adapter, handles = cancel_workers
+    misplaced = supervisor.store.root / "job_live_misplaced"
+    misplaced.mkdir()
+    misplaced.joinpath("meta.json").write_bytes(
+        supervisor.store.root.joinpath("job_live_b", "meta.json").read_bytes(),
+    )
+    out = server.agy_cancel_tool("job_live")
+    assert out["success"] is True
+    assert out["signalled"] is True
+    assert adapter.stopped["b"].wait(timeout=5)
+    assert adapter.processes["b"].poll() is not None
+    assert adapter.processes["a"].poll() is None
+    assert not handles["a"].cancel_event.is_set()
+
+
+@pytest.mark.parametrize("cancel_workers", [True], indirect=True)
+def test_agy_cancel_misplaced_exact_directory_does_not_stop_longer_job(cancel_workers):
+    supervisor, adapter, handles = cancel_workers
+    meta_a = supervisor.store.root / handles["a"].job_id / "meta.json"
+    meta_b = supervisor.store.root / handles["b"].job_id / "meta.json"
+    original_a, original_b = meta_a.read_bytes(), meta_b.read_bytes()
+    meta_a.write_bytes(original_b)
+    try:
+        out = server.agy_cancel_tool(handles["a"].job_id)
+        for key, handle in handles.items():
+            if handle.cancel_event.is_set():
+                assert adapter.stopped[key].wait(timeout=5)
+                assert adapter.processes[key].poll() is not None
+        assert meta_b.read_bytes() == original_b
+        assert adapter.processes["b"].poll() is None, "exact cancel stopped the longer job"
+        assert adapter.stopped["a"].is_set()
+        assert adapter.processes["a"].poll() is not None
+        assert out["signalled"] is True
+    finally:
+        meta_a.write_bytes(original_a)
+
+
+@pytest.mark.parametrize("cancel_workers", [True], indirect=True)
+@pytest.mark.parametrize(
+    "a_finishing, ambiguous_store",
+    [(False, False), (True, False), (False, True)],
+)
+def test_agy_cancel_exact_active_job_after_public_purge(
+    cancel_workers, a_finishing: bool, ambiguous_store: bool,
+):
+    supervisor, adapter, handles = cancel_workers
+    job_a, job_b = handles["a"].job_id, handles["b"].job_id
+    dir_a, dir_b = supervisor.store.root / job_a, supervisor.store.root / job_b
+    meta_a, meta_b = dir_a / "meta.json", dir_b / "meta.json"
+    original_a, original_b = meta_a.read_bytes(), meta_b.read_bytes()
+    if a_finishing:
+        assert server.agy_cancel_tool(job_a).signalled
+        assert adapter.stopped["a"].wait(timeout=5)
+        assert adapter.processes["a"].poll() is not None
+    if ambiguous_store:
+        archived = supervisor.store.create_job(job_id="job_alias_a_archived")
+        supervisor.store.finalize_job(archived.job_id, status="completed", exit_code=0)
+    assert handles["a"].thread.is_alive()
+    assert adapter.processes["b"].poll() is None
+
+    # Simulate elapsed wall time through directory mtimes; purge and cancel
+    # still run through their public tools against real supervisor workers.
+    now = time.time()
+    os.utime(dir_a, (now - 86_401, now - 86_401))
+    os.utime(dir_b, (now, now))
+    try:
+        purge = server.agy_purge_tool(days=1)
+        assert purge.success
+        assert purge.removed == [job_a]
+        assert purge.remaining == (2 if ambiguous_store else 1)
+        assert not dir_a.exists()
+        assert handles["a"].thread.is_alive()
+
+        out = server.agy_cancel_tool(job_a)
+        for key, handle in handles.items():
+            if handle.cancel_event.is_set():
+                assert adapter.stopped[key].wait(timeout=5)
+                assert adapter.processes[key].poll() is not None
+        assert meta_b.read_bytes() == original_b
+        assert adapter.processes["b"].poll() is None, "exact cancel stopped the longer job"
+        assert out.success
+        assert out.job_id == job_a
+        assert out.signalled
+        assert adapter.processes["a"].poll() is not None
+    finally:
+        # Restore only the purged fixture metadata before releasing finalize.
+        dir_a.mkdir(exist_ok=True)
+        meta_a.write_bytes(original_a)
+
+
+@pytest.mark.parametrize("cancel_workers", [True], indirect=True)
+@pytest.mark.parametrize("tool_name", ["agy_status_tool", "agy_read_tool", "agy_result_tool"])
+def test_job_tools_exact_active_job_after_public_purge(cancel_workers, tool_name: str):
+    supervisor, adapter, handles = cancel_workers
+    job_a, job_b = handles["a"].job_id, handles["b"].job_id
+    dir_a, dir_b = supervisor.store.root / job_a, supervisor.store.root / job_b
+    meta_a = dir_a / "meta.json"
+    original_a = meta_a.read_bytes()
+
+    # Let B's real worker finish with output distinct from A.
+    assert server.agy_cancel_tool(job_b).signalled
+    assert adapter.stopped["b"].wait(timeout=5)
+    assert adapter.processes["b"].poll() is not None
+    adapter._events = [
+        CanonicalEvent(type="assistant", text="distinct B answer"),
+        CanonicalEvent(type="result", subtype="success"),
+    ]
+    adapter.finish["b"].set()
+    handles["b"].thread.join(timeout=5)
+    adapter._events = []
+    assert not handles["b"].thread.is_alive()
+    assert supervisor.status(job_b).status == "completed"
+    assert supervisor.read_events(job_b)[0].text == "distinct B answer"
+    original_b = (dir_b / "meta.json").read_bytes()
+
+    # Simulate elapsed wall time through mtimes, then use the public purge.
+    now = time.time()
+    os.utime(dir_a, (now - 86_401, now - 86_401))
+    os.utime(dir_b, (now, now))
+    try:
+        purge = server.agy_purge_tool(days=1)
+        assert purge.success
+        assert purge.removed == [job_a]
+        assert purge.remaining == 1
+        assert not dir_a.exists()
+        assert handles["a"].thread.is_alive()
+
+        out = getattr(server, tool_name)(job_a)
+        assert not handles["a"].cancel_event.is_set()
+        assert adapter.processes["a"].poll() is None
+        assert not out.success, "exact read returned the longer job"
+        assert "not found" in (out.error or "")
+        assert job_a in out.error
+        if tool_name != "agy_status_tool":
+            assert out.job_id == job_a
+
+        cancel = server.agy_cancel_tool(job_a)
+        assert cancel.success and cancel.signalled and cancel.job_id == job_a
+        assert adapter.stopped["a"].wait(timeout=5)
+        assert adapter.processes["a"].poll() is not None
+        assert (dir_b / "meta.json").read_bytes() == original_b
+    finally:
+        dir_a.mkdir(exist_ok=True)
+        meta_a.write_bytes(original_a)
+
+
+@pytest.mark.parametrize("cancel_workers", [True], indirect=True)
+@pytest.mark.parametrize("reference, ambiguous", [("job_alias_a_lon", False), ("job_alias", True)])
+def test_agy_cancel_without_exact_handle_preserves_prefix_rules(
+    cancel_workers, reference: str, ambiguous: bool,
+):
+    _supervisor, adapter, handles = cancel_workers
+    out = server.agy_cancel_tool(reference)
+    if handles["b"].cancel_event.is_set():
+        assert adapter.stopped["b"].wait(timeout=5)
+    assert adapter.processes["a"].poll() is None
+    assert not handles["a"].cancel_event.is_set()
+    if ambiguous:
+        assert not out.success
+        assert "ambiguous" in (out.error or "")
+        assert not out.signalled
+        assert adapter.processes["b"].poll() is None
+    else:
+        assert out.success
+        assert out.job_id == handles["b"].job_id
+        assert out.signalled
+        assert adapter.processes["b"].poll() is not None
+
+
 def test_agy_cancel_unknown_job_signalled_false(reset_state):
     out = server.agy_cancel_tool("job_does_not_exist_67890")
     assert out["success"] is True
@@ -512,6 +815,107 @@ def test_agy_cancel_rejects_invalid_job_id_without_echo(reset_state):
     assert out["job_id"] is None
     assert raw not in payload
     assert "ctrlbytes" not in payload
+
+
+def test_job_tools_accept_unique_job_id_prefix(reset_state):
+    record = reset_state.store.create_job(job_id="job_prefix_server_target")
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="assistant", text="prefix resolved"),
+    )
+    reset_state.store.append_event(
+        record.job_id,
+        CanonicalEvent(type="result", subtype="success"),
+    )
+    reset_state.store.finalize_job(record.job_id, status="completed", exit_code=0)
+
+    status = server.agy_status_tool("job_prefix_server")
+    assert status["success"] is True
+    assert status["record"]["job_id"] == record.job_id
+
+    read = server.agy_read_tool("job_prefix_server")
+    assert read["success"] is True
+    assert read["job_id"] == record.job_id
+    assert read["count"] == 2
+
+    result = server.agy_result_tool("job_prefix_server")
+    assert result["success"] is True
+    assert result["job_id"] == record.job_id
+    assert result["result_text"] == "prefix resolved"
+
+    cancel = server.agy_cancel_tool("job_prefix_server")
+    assert cancel["success"] is True
+    assert cancel["job_id"] == record.job_id
+    assert cancel["signalled"] is False
+
+
+def test_job_tools_reject_ambiguous_job_id_prefix(reset_state):
+    reset_state.store.create_job(job_id="job_prefix_ambiguous_alpha")
+    reset_state.store.create_job(job_id="job_prefix_ambiguous_beta")
+
+    out = server.agy_status_tool("job_prefix_ambiguous")
+
+    assert out["success"] is False
+    assert "ambiguous" in (out["error"] or "")
+    assert out["record"] is None
+
+
+def test_job_tools_reject_bare_job_id_prefix(reset_state):
+    reset_state.store.create_job(job_id="job_bare_prefix_target")
+
+    out = server.agy_status_tool("job_")
+
+    assert out["success"] is False
+    assert out["record"] is None
+    assert "^job_[A-Za-z0-9_-]{1,80}$" in (out["error"] or "")
+
+
+@pytest.mark.parametrize(
+    "tool_name", ["agy_status_tool", "agy_read_tool", "agy_result_tool", "agy_cancel_tool"],
+)
+@pytest.mark.parametrize(
+    "reference",
+    ["job_invalid\n", "job_" + "a" * 81, "job_" "sk" "-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    ids=["invalid_charset", "oversized", "secret_shaped"],
+)
+def test_job_tools_validate_reference_before_lookup(
+    reset_state, monkeypatch, tool_name: str, reference: str,
+):
+    lookups = []
+
+    def unexpected_lookup(job_id):
+        lookups.append(job_id)
+        raise AssertionError("invalid reference reached a job lookup")
+
+    monkeypatch.setattr(reset_state, "has_active_job", unexpected_lookup)
+    monkeypatch.setattr(reset_state.store, "resolve_job_reference", unexpected_lookup)
+    monkeypatch.setattr(reset_state, "cancel", unexpected_lookup)
+
+    out = getattr(server, tool_name)(reference)
+
+    assert not out.success
+    assert not lookups
+
+
+def test_job_tools_return_structured_error_when_prefix_lookup_fails(
+    reset_state,
+    monkeypatch,
+):
+    def _raise_lookup_error(reference: str):
+        raise OSError(f"lookup failed for {reference}")
+
+    monkeypatch.setattr(
+        reset_state.store,
+        "resolve_job_reference",
+        _raise_lookup_error,
+    )
+
+    out = server.agy_status_tool("job_lookup_failure")
+
+    assert out["success"] is False
+    assert out["record"] is None
+    assert "job_id reference lookup failed" in (out["error"] or "")
+    assert "job_lookup_failure" in (out["error"] or "")
 
 
 def test_agy_sessions_lists_recent_jobs(reset_state, tmp_path: Path):

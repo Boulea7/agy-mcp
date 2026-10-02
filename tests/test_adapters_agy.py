@@ -451,6 +451,38 @@ def test_klog_parser_permission_denied_marks_upstream_error():
     assert ctx.had_upstream_error is True
 
 
+@pytest.mark.parametrize(
+    ("status", "subtype", "message"),
+    [
+        (
+            "UNAUTHENTICATED (code 401)",
+            "upstream_unauthenticated",
+            "OAuth credential expired.",
+        ),
+        (
+            "RESOURCE_EXHAUSTED (code 429)",
+            "upstream_resource_exhausted",
+            "quota exhausted for project.",
+        ),
+    ],
+)
+def test_klog_parser_additional_upstream_statuses_mark_upstream_error(
+    status: str,
+    subtype: str,
+    message: str,
+):
+    """Cover the remaining known swallowed Google-side status names."""
+
+    ctx = _new_ctx()
+    adapter = AgyPrintBackend()
+    line = f"E0527 12:00:00.000  1 log.go:1] {status}: {message}\n"
+    _handle_klog_line(line, ctx, adapter)
+    [evt] = ctx.events
+    assert evt.subtype == subtype
+    assert message in (evt.text or "")
+    assert ctx.had_upstream_error is True
+
+
 def test_klog_parser_captureless_upstream_pattern_uses_full_match(monkeypatch):
     """Future upstream patterns without capture groups should not crash."""
 
