@@ -1638,6 +1638,117 @@ def test_cancel_signals_running_job_without_metadata(tmp_path: Path):
     assert supervisor.has_active_job(response.job_id) is False
 
 
+@pytest.mark.parametrize(
+    "exit_code,run_error,event_error,expected_error",
+    [
+        (1, None, None, "non-zero exit"),
+        (1, RuntimeError("adapter finished with an exception"), None,
+         "adapter finished with an exception"),
+        (None, None, "wrapper timeout", "wrapper timeout"),
+    ],
+)
+def test_cancel_after_adapter_finishes_preserves_failure_during_spool_copy(
+    tmp_path: Path, monkeypatch, exit_code, run_error, event_error, expected_error,
+):
+    """Artifact copying must not make a finished backend cancellable."""
+
+    from agy_mcp import supervisor as supervisor_module
+    from agy_mcp.session_store import JobPaths
+
+    class SpoolAdapter(_ScriptedAdapter):
+        def run(self, request, **kwargs):
+            kwargs["stdout_path"].write_text("backend failure evidence", encoding="utf-8")
+            return super().run(request, **kwargs)
+
+    events = [CanonicalEvent(type="error", text=event_error)] if event_error else []
+    adapter = SpoolAdapter(
+        capability=_capability(), events=events,
+        exit_code=exit_code, spawn_raises=run_error,
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    copying = threading.Event()
+    release_copy = threading.Event()
+    original_migrate = supervisor_module._migrate_if_present
+
+    def migrate_and_pause(source, destination):
+        if source.name == "stdout.spool":
+            copying.set()
+            if not release_copy.wait(timeout=5):
+                raise RuntimeError("spool-copy gate timed out")
+        return original_migrate(source, destination)
+
+    monkeypatch.setattr(supervisor_module, "_migrate_if_present", migrate_and_pause)
+    response = supervisor.start(BridgeRequest(prompt="fail", cwd=str(tmp_path)))
+    assert response.success
+    with supervisor._lock:
+        handle = supervisor._jobs[response.job_id]
+    try:
+        assert copying.wait(timeout=3)
+        assert supervisor.status(response.job_id).status == "running"
+        assert supervisor.has_active_job(response.job_id) is True
+        assert not handle.cancel_event.is_set()
+        signalled = supervisor.cancel(response.job_id)
+        cancel_flag = handle.cancel_event.is_set()
+    finally:
+        release_copy.set()
+        handle.thread.join(timeout=3)
+    assert not handle.thread.is_alive()
+    assert supervisor.has_active_job(response.job_id) is False
+    assert handle.spool_dir is not None and not handle.spool_dir.exists()
+    assert JobPaths.for_job(supervisor.store.root, response.job_id).stdout.read_text(
+        encoding="utf-8",
+    ) == "backend failure evidence"
+    record = supervisor.status(response.job_id)
+    assert (signalled, cancel_flag, record.status, record.error) == (
+        False, False, "failed", expected_error,
+    )
+
+
+def test_spool_creation_failure_closes_cancellation_and_releases_worker(
+    tmp_path: Path, monkeypatch,
+):
+    """Failure before adapter.run must still close cancellation and finalize."""
+
+    from agy_mcp import supervisor as supervisor_module
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    finalizing = threading.Event()
+    release_worker = threading.Event()
+    original_update = supervisor.store.update_job
+
+    def fail_spool_creation(*args, **kwargs):
+        raise OSError("synthetic spool creation failure")
+
+    def pause_terminal_write(record):
+        if record.status == "failed":
+            finalizing.set()
+            if not release_worker.wait(timeout=5):
+                raise RuntimeError("early-failure gate timed out")
+        return original_update(record)
+
+    monkeypatch.setattr(supervisor_module.tempfile, "TemporaryDirectory", fail_spool_creation)
+    monkeypatch.setattr(supervisor.store, "update_job", pause_terminal_write)
+    response = supervisor.start(BridgeRequest(prompt="fail early", cwd=str(tmp_path)))
+    assert response.success
+    with supervisor._lock:
+        handle = supervisor._jobs[response.job_id]
+    try:
+        assert finalizing.wait(timeout=3)
+        assert supervisor.has_active_job(response.job_id) is True
+        assert supervisor.cancel(response.job_id) is False
+        assert not handle.cancel_event.is_set()
+    finally:
+        release_worker.set()
+        handle.thread.join(timeout=3)
+    assert not handle.thread.is_alive()
+    assert supervisor.has_active_job(response.job_id) is False
+    assert adapter.run_requests == []
+    record = supervisor.status(response.job_id)
+    assert record.status == "failed"
+    assert record.error == "spool dir creation failed: synthetic spool creation failure"
+
+
 def test_finalize_write_failure_releases_worker_and_slot(tmp_path: Path, monkeypatch):
     """A failed terminal write must not retain the handle or capacity slot."""
 
@@ -1689,6 +1800,241 @@ def test_finalize_write_failure_releases_worker_and_slot(tmp_path: Path, monkeyp
         second_handle.thread.join(timeout=3)
     assert not second_handle.thread.is_alive()
     assert supervisor.status(second.job_id).status == "cancelled"
+
+
+@pytest.mark.parametrize("finalizing", [False, True])
+def test_registered_job_id_cannot_be_reused_after_metadata_loss(
+    tmp_path: Path, monkeypatch, finalizing,
+):
+    """Metadata loss must not let another start replace a registered worker."""
+
+    from agy_mcp.session_store import JobPaths
+
+    adapter = _ScriptedAdapter(
+        capability=_capability(), events=[], block_until_cancel=not finalizing,
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    terminal_written = threading.Event()
+    release_worker = threading.Event()
+    original_update = supervisor.store.update_job
+
+    def update_and_pause(record):
+        result = original_update(record)
+        if finalizing and record.status == "completed":
+            terminal_written.set()
+            if not release_worker.wait(timeout=5):
+                raise RuntimeError("registered-worker gate timed out")
+        return result
+
+    monkeypatch.setattr(supervisor.store, "update_job", update_and_pause)
+    request = BridgeRequest(prompt="original", cwd=str(tmp_path))
+    first = supervisor.start(request, job_id="job_registered")
+    assert first.success
+    with supervisor._lock:
+        original_handle = supervisor._jobs[first.job_id]
+    handles = [original_handle]
+    try:
+        if finalizing:
+            assert terminal_written.wait(timeout=3)
+        else:
+            assert _wait_for(lambda: bool(adapter.run_requests))
+        JobPaths.for_job(supervisor.store.root, first.job_id).meta.unlink()
+        second = supervisor.start(request, job_id=first.job_id)
+        with supervisor._lock:
+            current_handle = supervisor._jobs[first.job_id]
+        if current_handle is not original_handle:
+            handles.append(current_handle)
+        signalled = supervisor.cancel(first.job_id)
+        original_cancelled = original_handle.cancel_event.is_set()
+    finally:
+        release_worker.set()
+        for handle in handles:
+            handle.cancel_event.set()
+            handle.thread.join(timeout=3)
+    assert all(not handle.thread.is_alive() for handle in handles)
+    assert second.success is False and "already exists" in second.error
+    assert current_handle is original_handle
+    assert signalled is (not finalizing) and original_cancelled is (not finalizing)
+    assert len(adapter.run_requests) == 1
+
+
+def test_concurrent_starts_reserve_job_id_before_store_creation(tmp_path: Path, monkeypatch):
+    """Same-ID admission is atomic without holding the registry lock over I/O."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[], block_until_cancel=True)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    creating = threading.Event()
+    release_creation = threading.Event()
+    second_finished = threading.Event()
+    original_create = supervisor.store.create_job
+    create_calls = []
+    responses = {}
+    request = BridgeRequest(prompt="same ID", cwd=str(tmp_path))
+
+    def create_and_pause(**kwargs):
+        create_calls.append(kwargs["job_id"])
+        if len(create_calls) == 1:
+            creating.set()
+            if not release_creation.wait(timeout=5):
+                raise RuntimeError("store-creation gate timed out")
+        return original_create(**kwargs)
+
+    def start_second():
+        responses["second"] = supervisor.start(request, job_id="job_concurrent")
+        second_finished.set()
+
+    monkeypatch.setattr(supervisor.store, "create_job", create_and_pause)
+    first = threading.Thread(
+        target=lambda: responses.update(
+            first=supervisor.start(request, job_id="job_concurrent"),
+        ),
+    )
+    second = threading.Thread(target=start_second)
+    first.start()
+    try:
+        assert creating.wait(timeout=3)
+        second.start()
+        assert second_finished.wait(timeout=2), "same-ID rejection waited for store I/O"
+    finally:
+        release_creation.set()
+        first.join(timeout=3)
+        if second.ident is not None:
+            second.join(timeout=3)
+        with supervisor._lock:
+            handles = list(supervisor._jobs.values())
+        for handle in handles:
+            handle.cancel_event.set()
+            handle.thread.join(timeout=3)
+    assert not first.is_alive() and not second.is_alive()
+    assert all(not handle.thread.is_alive() for handle in handles)
+    assert responses["first"].success is True
+    assert responses["second"].success is False
+    assert "already exists" in responses["second"].error
+    assert create_calls == ["job_concurrent"]
+
+
+def test_registered_job_id_cannot_be_reused_before_worker_starts(tmp_path: Path, monkeypatch):
+    """Registration reserves an ID even while thread.start has not completed."""
+
+    from agy_mcp.session_store import JobPaths
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[], block_until_cancel=True)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    starting = threading.Event()
+    release_start = threading.Event()
+    original_start = threading.Thread.start
+    worker_starts = []
+    responses = []
+    request = BridgeRequest(prompt="not started", cwd=str(tmp_path))
+
+    def start_and_pause(thread):
+        if thread.name == "supervisor-job_not_started":
+            worker_starts.append(thread)
+            if len(worker_starts) == 1:
+                starting.set()
+                if not release_start.wait(timeout=5):
+                    raise RuntimeError("thread-start gate timed out")
+        return original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start_and_pause)
+    caller = threading.Thread(
+        target=lambda: responses.append(supervisor.start(request, job_id="job_not_started")),
+    )
+    caller.start()
+    handles = []
+    try:
+        assert starting.wait(timeout=3)
+        with supervisor._lock:
+            original_handle = supervisor._jobs["job_not_started"]
+        handles.append(original_handle)
+        assert not original_handle.thread.is_alive()
+        JobPaths.for_job(supervisor.store.root, "job_not_started").meta.unlink()
+        second = supervisor.start(request, job_id="job_not_started")
+        with supervisor._lock:
+            current_handle = supervisor._jobs["job_not_started"]
+        if current_handle is not original_handle:
+            handles.append(current_handle)
+    finally:
+        release_start.set()
+        caller.join(timeout=3)
+        for handle in handles:
+            handle.cancel_event.set()
+            handle.thread.join(timeout=3)
+    assert not caller.is_alive() and all(not handle.thread.is_alive() for handle in handles)
+    assert responses[0].success is True
+    assert second.success is False and "already exists" in second.error
+    assert current_handle is original_handle
+    assert len(worker_starts) == 1
+
+
+@pytest.mark.parametrize("failure", ["store", "thread", "factory"])
+def test_start_failure_releases_job_id_for_retry(tmp_path: Path, monkeypatch, failure):
+    """Handled failures and propagated exceptions must release admission."""
+
+    from agy_mcp.session_store import JobPaths
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[], block_until_cancel=True)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    supervisor._job_slots = threading.Semaphore(1)
+    original_create = supervisor.store.create_job
+    original_start = threading.Thread.start
+    original_factory = supervisor._adapter_factory
+    calls = []
+
+    def fail_once(*args, **kwargs):
+        calls.append(None)
+        if len(calls) == 1:
+            raise OSError("synthetic creation failure")
+        return original_create(*args, **kwargs)
+
+    def fail_start_once(thread):
+        calls.append(None)
+        if len(calls) == 1:
+            raise RuntimeError("synthetic thread-start failure")
+        return original_start(thread)
+
+    def fail_factory_once(*args, **kwargs):
+        calls.append(None)
+        if len(calls) == 1:
+            raise RuntimeError("synthetic factory failure")
+        return original_factory(*args, **kwargs)
+
+    if failure == "store":
+        monkeypatch.setattr(supervisor.store, "create_job", fail_once)
+    elif failure == "thread":
+        monkeypatch.setattr(threading.Thread, "start", fail_start_once)
+    else:
+        monkeypatch.setattr(supervisor, "_adapter_factory", fail_factory_once)
+    request = BridgeRequest(prompt="retry", cwd=str(tmp_path))
+    if failure == "factory":
+        with pytest.raises(RuntimeError, match="synthetic factory failure"):
+            supervisor.start(request, job_id="job_retry")
+    else:
+        first = supervisor.start(request, job_id="job_retry")
+        assert first.success is False
+    JobPaths.for_job(supervisor.store.root, "job_retry").meta.unlink(missing_ok=True)
+    second = supervisor.start(request, job_id="job_retry")
+    assert second.success, "failed start retained the job ID or only capacity slot"
+    with supervisor._lock:
+        handle = supervisor._jobs[second.job_id]
+    try:
+        assert supervisor.cancel(second.job_id) is True
+    finally:
+        handle.cancel_event.set()
+        handle.thread.join(timeout=3)
+    assert not handle.thread.is_alive()
+
+
+@pytest.mark.parametrize("job_id", [["invalid"], {"id": "invalid"}, 42, "../invalid"])
+def test_start_invalid_job_id_keeps_structured_validation(tmp_path: Path, job_id):
+    """Admission must retain the store's structured invalid-ID failure."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="invalid", cwd=str(tmp_path)), job_id=job_id)
+    assert response.success is False
+    assert "invalid job_id" in response.error
+    assert adapter.run_requests == []
 
 
 # ---------------------------------------------------------------------------

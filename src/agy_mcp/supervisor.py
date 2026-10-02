@@ -168,6 +168,7 @@ class Supervisor:
         # supervisor and the synchronous path stay in lockstep.
         self._adapter_factory = adapter_factory or self._default_adapter_factory
         self._jobs: dict[str, _JobHandle] = {}
+        self._starting_jobs: set[str] = set()
         self._lock = threading.RLock()
         self._instance_id = secrets.token_hex(8)
         self._process_start_signature = _process_start_signature(os.getpid())
@@ -246,6 +247,36 @@ class Supervisor:
         / ``read_events``.
         """
 
+        resolved_job_id = job_id or generate_job_id()
+        try:
+            with self._lock:
+                occupied = (
+                    resolved_job_id in self._jobs
+                    or resolved_job_id in self._starting_jobs
+                )
+                if not occupied:
+                    self._starting_jobs.add(resolved_job_id)
+        except TypeError:
+            # Keep the existing structured store validation for unhashable IDs.
+            return self._start_reserved(request, job_id=resolved_job_id)
+        if occupied:
+            return BridgeResponse(
+                success=False,
+                error=self.safety.redact(
+                    f"job_id {resolved_job_id!r} already exists in this supervisor",
+                ),
+                cwd=self._response_cwd(request.cwd),
+                adapter=AdapterMetadata(),
+            ).touch()
+        try:
+            return self._start_reserved(request, job_id=resolved_job_id)
+        finally:
+            with self._lock:
+                self._starting_jobs.discard(resolved_job_id)
+
+    def _start_reserved(self, request: BridgeRequest, *, job_id: str) -> BridgeResponse:
+        """Prepare and register an admitted job without holding the registry lock."""
+
         cwd_path = Path(request.cwd).expanduser().resolve()
         gate = self.safety.gate_request(
             request,
@@ -322,7 +353,7 @@ class Supervisor:
                 adapter=AdapterMetadata(backend=backend_name),
             ).touch()
 
-        resolved_job_id = job_id or generate_job_id()
+        resolved_job_id = job_id
         effective_request = request
         worktree_handle: WorktreeHandle | None = None
         if _wants_worktree(request, self.config):
@@ -611,6 +642,12 @@ class Supervisor:
                             " | tb=" + tb if request.debug else ""
                         )
                     finally:
+                        # The backend has ended; copying evidence must not
+                        # allow a late cancel to reclassify its failure.
+                        with self._lock:
+                            handle = self._jobs.get(job_id)
+                            if handle is not None:
+                                handle.finalizing = True
                         # Copy the spool stdout / stderr into the kept
                         # location before TemporaryDirectory deletes them.
                         # This runs on both clean adapter returns and
@@ -626,7 +663,7 @@ class Supervisor:
             # otherwise the supervisor leaks a slot per failure and
             # eventually rejects every new start() with ``supervisor busy``.
             try:
-                # Close cancellation before a terminal record becomes visible.
+                # Also close cancellation for failures before adapter.run.
                 with self._lock:
                     handle = self._jobs.get(job_id)
                     if handle is not None:
