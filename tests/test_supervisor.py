@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from agy_mcp.adapters.base import AdapterRunResult, BaseAdapter, EventSink
 from agy_mcp.config import BackendConfig, Config, ExecuteConfig, SafetyConfig
@@ -19,7 +23,20 @@ from agy_mcp.models import (
 )
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
-from agy_mcp.supervisor import StoreEventSink, Supervisor, _migrate_if_present, _worktree_slug
+from agy_mcp.supervisor import (
+    _RECONCILE_ERROR,
+    StoreEventSink,
+    Supervisor,
+    _linux_process_start_signature,
+    _load_windows_process_api,
+    _migrate_if_present,
+    _pid_exists,
+    _process_start_signature,
+    _windows_pid_exists,
+    _windows_process_info,
+    _windows_process_start_signature,
+    _worktree_slug,
+)
 from agy_mcp.worktree import WorktreeHandle, cleanup_worktree
 
 # ---------------------------------------------------------------------------
@@ -298,6 +315,105 @@ def test_start_returns_running_envelope_and_completes(tmp_path: Path):
     assert [e.type for e in persisted] == ["system", "assistant", "result"]
 
 
+def test_start_records_supervisor_owner_signature(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "current-owner" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="hello", cwd=str(tmp_path)))
+
+    assert response.success is True
+    record = supervisor.store.get_job(response.job_id)
+    assert record is not None
+    assert record.pid == os.getpid()
+    assert record.extra["supervisor"] == {
+        "pid": os.getpid(),
+        "instance_id": supervisor._instance_id,
+        "process_start_signature": "current-owner",
+    }
+
+
+@pytest.mark.parametrize("surface", ["status", "result", "sessions"])
+def test_public_job_tools_hide_supervisor_owner_metadata(
+    tmp_path: Path,
+    monkeypatch,
+    surface: str,
+):
+    from agy_mcp import server
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[], block_until_cancel=True)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="public owner metadata", cwd=str(tmp_path)))
+    assert response.success
+    handle = supervisor._jobs[response.job_id]
+    monkeypatch.setattr(server, "_config", supervisor.config)
+    monkeypatch.setattr(server, "_safety", supervisor.safety)
+    monkeypatch.setattr(server, "_store", supervisor.store)
+    monkeypatch.setattr(server, "_supervisor", supervisor)
+    try:
+        assert _wait_for(lambda: bool(adapter.run_requests))
+        if surface != "status":
+            assert supervisor.cancel(response.job_id)
+            handle.thread.join(timeout=2)
+            assert not handle.thread.is_alive()
+        stored = supervisor.store.get_job(response.job_id)
+        stored.extra["route_warnings"] = ["fixture route warning"]
+        stored.extra["application"] = {"worker_pid": 9876}
+        supervisor.store.update_job(stored)
+        before = supervisor.store.get_job(response.job_id).model_dump(mode="python")
+
+        if surface == "status":
+            output = server.agy_status_tool(response.job_id)
+            public = output.model_dump(mode="json")["record"]
+        elif surface == "result":
+            output = server.agy_result_tool(response.job_id)
+            public = output.model_dump(mode="json")["record"]
+        else:
+            output = server.agy_sessions_tool()
+            public = output.model_dump(mode="json")["records"][0]
+
+        assert output.success
+        assert public["pid"] is None
+        assert "supervisor" not in public["extra"]
+        assert public["extra"]["route_warnings"] == ["fixture route warning"]
+        assert public["extra"]["application"] == {"worker_pid": 9876}
+        assert supervisor.store.get_job(response.job_id).model_dump(mode="python") == before
+    finally:
+        supervisor.cancel(response.job_id)
+        handle.thread.join(timeout=2)
+        assert not handle.thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [None, {"pid": 4321}, {"instance_id": "legacy", "pid": 9999}],
+)
+def test_public_record_preserves_legacy_worker_pid_and_other_extra(tmp_path: Path, owner):
+    supervisor = _supervisor_with(
+        _ScriptedAdapter(capability=_capability(), events=[]), tmp_path=tmp_path,
+    )
+    stored = supervisor.store.create_job(job_id="job_legacy_worker", cwd=str(tmp_path))
+    stored.status = "completed"
+    stored.pid = 4321
+    stored.extra = {
+        "route_warnings": ["fixture warning"],
+        "application": {"supervisor": "custom"},
+    }
+    if owner is not None:
+        stored.extra["supervisor"] = owner
+    supervisor.store.update_job(stored)
+    before = supervisor.store.get_job(stored.job_id).model_dump(mode="python")
+
+    public = supervisor.status(stored.job_id)
+
+    assert public.pid == 4321
+    assert public.extra["route_warnings"] == ["fixture warning"]
+    assert public.extra["application"] == {"supervisor": "custom"}
+    assert supervisor.store.get_job(stored.job_id).model_dump(mode="python") == before
+
+
 def test_start_redacts_request_snapshot(tmp_path: Path):
     events = [
         CanonicalEvent(type="assistant", text="ok"),
@@ -320,7 +436,9 @@ def test_start_redacts_request_snapshot(tmp_path: Path):
     assert record.request["extra_env"] == {"MY_TOKEN": "***"}
 
 
-def test_start_redacts_public_cwd_but_runs_adapter_in_raw_cwd(tmp_path: Path):
+def test_start_redacts_public_cwd_but_runs_adapter_in_raw_cwd(tmp_path: Path, monkeypatch):
+    # The synthetic macOS path need not be accessible on the test host.
+    monkeypatch.setattr("agy_mcp.supervisor.is_git_workspace", lambda _cwd: False)
     events = [
         CanonicalEvent(type="assistant", text="ok"),
         CanonicalEvent(type="result", subtype="success"),
@@ -481,6 +599,908 @@ def test_status_marks_crashed_worker_as_failed(tmp_path: Path):
     record = supervisor.status(response.job_id)
     assert record.status == "failed"
     assert "simulated crash" in (record.error or "")
+
+
+def test_status_keeps_foreign_live_supervisor_job_running(tmp_path: Path):
+    """A second process must not mark another live supervisor's job failed."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_live",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={"supervisor": {"pid": os.getpid(), "instance_id": "foreign"}},
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "running"
+    assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_keeps_foreign_live_supervisor_with_matching_signature(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A matching process signature prevents PID-reuse false positives."""
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "proc-stat:boot-id:42" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_live_signed",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={
+            "supervisor": {
+                "pid": os.getpid(),
+                "instance_id": "foreign",
+                "process_start_signature": "proc-stat:boot-id:42",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "running"
+    assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_reconciles_foreign_reused_pid(tmp_path: Path, monkeypatch):
+    """A reused PID must not keep a stale foreign job running forever."""
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        lambda pid: "proc-stat:boot-id:42" if pid == os.getpid() else None,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_reused_pid",
+        cwd=str(tmp_path),
+        pid=os.getpid(),
+        extra={
+            "supervisor": {
+                "pid": os.getpid(),
+                "instance_id": "foreign",
+                "process_start_signature": "proc-stat:boot-id:41",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
+
+
+def test_process_start_signature_uses_timezone_stable_ps_env(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="Mon Jan  1 00:00:00 2024\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("agy_mcp.supervisor.subprocess.run", _fake_run)
+
+    assert (
+        _process_start_signature(123_456_789)
+        == "ps-lstart:Mon Jan  1 00:00:00 2024"
+    )
+    assert captured["cmd"] == ["ps", "-o", "lstart=", "-p", "123456789"]
+    assert isinstance(captured["env"], dict)
+    assert captured["env"]["TZ"] == "UTC"
+    assert captured["env"]["LC_ALL"] == "C"
+
+
+def test_process_start_signature_uses_filetime_on_windows(monkeypatch):
+    calls: list[int] = []
+
+    def _fake_windows_signature(pid: int) -> str:
+        calls.append(pid)
+        return "win-filetime:123456789"
+
+    def _forbid_linux_signature(pid: int):
+        raise AssertionError(f"Linux process identity used for Windows PID {pid}")
+
+    monkeypatch.setattr("agy_mcp.supervisor.os.name", "nt")
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_process_start_signature",
+        _fake_windows_signature,
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._linux_process_start_signature",
+        _forbid_linux_signature,
+    )
+
+    assert _process_start_signature(4321) == "win-filetime:123456789"
+    assert calls == [4321]
+
+
+def test_linux_process_start_signature_uses_boot_id_and_start_ticks(tmp_path: Path):
+    proc_root = tmp_path / "proc"
+    proc_pid = proc_root / "123"
+    proc_boot = proc_root / "sys" / "kernel" / "random"
+    proc_pid.mkdir(parents=True)
+    proc_boot.mkdir(parents=True)
+    fields_after_comm = ["S"] + ["0"] * 19
+    fields_after_comm[19] = "42424242"
+    (proc_pid / "stat").write_text(
+        f"123 (python worker) {' '.join(fields_after_comm)}\n",
+        encoding="utf-8",
+    )
+    (proc_boot / "boot_id").write_text("boot-id-123\n", encoding="utf-8")
+
+    assert _linux_process_start_signature(123, proc_root=proc_root) == (
+        "proc-stat:boot-id-123:42424242"
+    )
+
+
+def test_windows_process_api_declares_pointer_width_safe_signatures(monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    class _Function:
+        argtypes = None
+        restype = None
+
+    class _Kernel32:
+        OpenProcess = _Function()
+        WaitForSingleObject = _Function()
+        GetExitCodeProcess = _Function()
+        GetProcessTimes = _Function()
+        CloseHandle = _Function()
+
+    kernel32 = _Kernel32()
+    loaded: dict[str, object] = {}
+
+    def _fake_win_dll(name: str, *, use_last_error: bool):
+        loaded["name"] = name
+        loaded["use_last_error"] = use_last_error
+        return kernel32
+
+    monkeypatch.setattr(ctypes, "WinDLL", _fake_win_dll, raising=False)
+
+    loaded_ctypes, loaded_wintypes, loaded_kernel32 = _load_windows_process_api()
+
+    assert loaded == {"name": "kernel32", "use_last_error": True}
+    assert loaded_ctypes is ctypes
+    assert loaded_wintypes is wintypes
+    assert loaded_kernel32 is kernel32
+    assert kernel32.OpenProcess.argtypes == (
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.WaitForSingleObject.argtypes == (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+    )
+    assert kernel32.WaitForSingleObject.restype is wintypes.DWORD
+    assert kernel32.GetExitCodeProcess.argtypes == (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    assert kernel32.GetExitCodeProcess.restype is wintypes.BOOL
+    filetime_pointer = ctypes.POINTER(wintypes.FILETIME)
+    assert kernel32.GetProcessTimes.argtypes == (
+        wintypes.HANDLE,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+    )
+    assert kernel32.GetProcessTimes.restype is wintypes.BOOL
+    assert kernel32.CloseHandle.argtypes == (wintypes.HANDLE,)
+    assert kernel32.CloseHandle.restype is wintypes.BOOL
+
+
+def test_windows_process_probe_distinguishes_absent_from_open_failure(monkeypatch):
+    class _Ctypes:
+        last_error = 0
+        last_error_calls = 0
+
+        @classmethod
+        def get_last_error(cls) -> int:
+            cls.last_error_calls += 1
+            return cls.last_error
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert access == 0x00101000
+            assert inherit is False
+            assert pid == 1234
+            return None
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (_Ctypes, object(), _Kernel32()),
+    )
+
+    for last_error, expected in ((5, None), (123, None), (87, False)):
+        _Ctypes.last_error = last_error
+        _Ctypes.last_error_calls = 0
+
+        exists, signature = _windows_process_info(1234)
+
+        assert exists is expected
+        assert signature is None
+        assert _Ctypes.last_error_calls == 1
+
+
+def test_windows_process_probe_treats_signaled_handle_as_dead_even_with_exit_259(
+    monkeypatch,
+):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+    calls: list[tuple[str, int]] = []
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert inherit is False
+            assert pid == 4321
+            calls.append(("open", access))
+            return handle
+
+        @staticmethod
+        def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+            assert timeout_ms == 0
+            calls.append(("wait", received_handle))
+            return 0
+
+        @staticmethod
+        def GetExitCodeProcess(received_handle: int, exit_code_pointer) -> int:
+            calls.append(("exit", received_handle))
+            ctypes.cast(
+                exit_code_pointer,
+                ctypes.POINTER(wintypes.DWORD),
+            ).contents.value = 259
+            return 1
+
+        @staticmethod
+        def GetProcessTimes(
+            received_handle: int,
+            creation_pointer,
+            exit_pointer,
+            kernel_pointer,
+            user_pointer,
+        ) -> int:
+            del exit_pointer, kernel_pointer, user_pointer
+            calls.append(("times", received_handle))
+            creation = ctypes.cast(
+                creation_pointer,
+                ctypes.POINTER(wintypes.FILETIME),
+            ).contents
+            creation.dwHighDateTime = 1
+            creation.dwLowDateTime = 2
+            return 1
+
+        @staticmethod
+        def CloseHandle(received_handle: int) -> int:
+            calls.append(("close", received_handle))
+            return 1
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (ctypes, wintypes, _Kernel32()),
+    )
+
+    exists, signature = _windows_process_info(4321)
+
+    assert exists is False
+    assert signature is None
+    assert calls == [
+        ("open", 0x00101000),
+        ("wait", handle),
+        ("close", handle),
+    ]
+
+
+def test_windows_process_probe_treats_wait_timeout_as_live(monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+    calls: list[tuple[str, int]] = []
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert inherit is False
+            assert pid == 4321
+            calls.append(("open", access))
+            return handle
+
+        @staticmethod
+        def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+            assert timeout_ms == 0
+            calls.append(("wait", received_handle))
+            return 258
+
+        @staticmethod
+        def GetProcessTimes(
+            received_handle: int,
+            creation_pointer,
+            exit_pointer,
+            kernel_pointer,
+            user_pointer,
+        ) -> int:
+            del exit_pointer, kernel_pointer, user_pointer
+            calls.append(("times", received_handle))
+            creation = ctypes.cast(
+                creation_pointer,
+                ctypes.POINTER(wintypes.FILETIME),
+            ).contents
+            creation.dwHighDateTime = 0x0123_4567
+            creation.dwLowDateTime = 0x89AB_CDEF
+            return 1
+
+        @staticmethod
+        def CloseHandle(received_handle: int) -> int:
+            calls.append(("close", received_handle))
+            return 1
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (ctypes, wintypes, _Kernel32()),
+    )
+
+    exists, signature = _windows_process_info(4321)
+
+    expected_filetime = (0x0123_4567 << 32) | 0x89AB_CDEF
+    assert exists is True
+    assert signature == f"win-filetime:{expected_filetime}"
+    assert calls == [
+        ("open", 0x00101000),
+        ("wait", handle),
+        ("times", handle),
+        ("close", handle),
+    ]
+
+
+def test_windows_process_probe_treats_failed_or_unknown_wait_as_inconclusive(
+    monkeypatch,
+):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+
+    def _probe(wait_result: int):
+        calls: list[tuple[str, int]] = []
+
+        class _Kernel32:
+            @staticmethod
+            def OpenProcess(access: int, inherit: bool, pid: int):
+                assert inherit is False
+                assert pid == 4321
+                calls.append(("open", access))
+                return handle
+
+            @staticmethod
+            def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+                assert timeout_ms == 0
+                calls.append(("wait", received_handle))
+                return wait_result
+
+            @staticmethod
+            def GetProcessTimes(
+                received_handle: int,
+                creation_pointer,
+                exit_pointer,
+                kernel_pointer,
+                user_pointer,
+            ) -> int:
+                del exit_pointer, kernel_pointer, user_pointer
+                calls.append(("times", received_handle))
+                creation = ctypes.cast(
+                    creation_pointer,
+                    ctypes.POINTER(wintypes.FILETIME),
+                ).contents
+                creation.dwHighDateTime = 1
+                creation.dwLowDateTime = 2
+                return 1
+
+            @staticmethod
+            def CloseHandle(received_handle: int) -> int:
+                calls.append(("close", received_handle))
+                return 1
+
+        monkeypatch.setattr(
+            "agy_mcp.supervisor._load_windows_process_api",
+            lambda: (ctypes, wintypes, _Kernel32()),
+        )
+        return _windows_process_info(4321), calls
+
+    for wait_result in (0xFFFF_FFFF, 1):
+        result, calls = _probe(wait_result)
+
+        assert result == (None, None)
+        assert calls == [
+            ("open", 0x00101000),
+            ("wait", handle),
+            ("close", handle),
+        ]
+
+
+def test_windows_process_probe_preserves_handle_and_reads_creation_filetime(
+    monkeypatch,
+):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234_5678_9ABC_DEF0
+    calls: list[tuple[str, int]] = []
+
+    class _Kernel32:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int):
+            assert (access, inherit, pid) == (0x00101000, False, 4321)
+            return handle
+
+        @staticmethod
+        def WaitForSingleObject(received_handle: int, timeout_ms: int) -> int:
+            assert timeout_ms == 0
+            calls.append(("wait", received_handle))
+            return 258
+
+        @staticmethod
+        def GetProcessTimes(
+            received_handle: int,
+            creation_pointer,
+            exit_pointer,
+            kernel_pointer,
+            user_pointer,
+        ) -> int:
+            del exit_pointer, kernel_pointer, user_pointer
+            calls.append(("times", received_handle))
+            creation = ctypes.cast(
+                creation_pointer,
+                ctypes.POINTER(wintypes.FILETIME),
+            ).contents
+            creation.dwHighDateTime = 0x0123_4567
+            creation.dwLowDateTime = 0x89AB_CDEF
+            return 1
+
+        @staticmethod
+        def CloseHandle(received_handle: int) -> int:
+            calls.append(("close", received_handle))
+            return 1
+
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._load_windows_process_api",
+        lambda: (ctypes, wintypes, _Kernel32()),
+    )
+
+    exists, signature = _windows_process_info(4321)
+
+    expected_filetime = (0x0123_4567 << 32) | 0x89AB_CDEF
+    assert exists is True
+    assert signature == f"win-filetime:{expected_filetime}"
+    assert calls == [("wait", handle), ("times", handle), ("close", handle)]
+
+
+def test_status_reconciles_windows_owner_when_creation_filetime_changed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_process_info",
+        lambda pid: (True, "win-filetime:222"),
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        _windows_process_start_signature,
+    )
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_windows_reused",
+        cwd=str(tmp_path),
+        pid=4321,
+        extra={
+            "supervisor": {
+                "pid": 4321,
+                "instance_id": "foreign",
+                "process_start_signature": "win-filetime:111",
+            }
+        },
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
+
+
+def test_pid_exists_uses_non_destructive_windows_probe(monkeypatch):
+    calls: list[int] = []
+
+    def _forbid_signal_probe(pid: int, signal: int) -> None:
+        raise AssertionError("os.kill must not be used for Windows PID probes")
+
+    def _fake_windows_pid_exists(pid: int) -> bool:
+        calls.append(pid)
+        return True
+
+    monkeypatch.setattr("agy_mcp.supervisor.os.name", "nt")
+    monkeypatch.setattr("agy_mcp.supervisor.os.kill", _forbid_signal_probe)
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_pid_exists",
+        _fake_windows_pid_exists,
+    )
+
+    assert _pid_exists(123) is True
+    assert calls == [123]
+
+
+def test_status_keeps_foreign_owner_when_windows_probe_is_inconclusive(
+    tmp_path: Path,
+    monkeypatch,
+):
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._windows_process_info",
+        lambda pid: (None, None),
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._pid_exists",
+        _windows_pid_exists,
+    )
+    monkeypatch.setattr(
+        "agy_mcp.supervisor._process_start_signature",
+        _windows_process_start_signature,
+    )
+
+    for suffix, signature in (("unsigned", None), ("signed", "win-filetime:111")):
+        owner = {"pid": 4321, "instance_id": "foreign"}
+        if signature is not None:
+            owner["process_start_signature"] = signature
+        record = supervisor.store.create_job(
+            job_id=f"job_foreign_windows_unknown_{suffix}",
+            cwd=str(tmp_path),
+            pid=4321,
+            extra={"supervisor": owner},
+        )
+
+        public = supervisor.status(record.job_id)
+
+        assert public.status == "running"
+        assert supervisor.store.get_job(record.job_id).status == "running"
+
+
+def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):
+    """A dead foreign owner is still reconciled as a stale running job."""
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    record = supervisor.store.create_job(
+        job_id="job_foreign_dead",
+        cwd=str(tmp_path),
+        pid=999_999_999,
+        extra={"supervisor": {"pid": 999_999_999, "instance_id": "foreign"}},
+    )
+
+    public = supervisor.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert supervisor.store.get_job(record.job_id).status == "failed"
+
+
+@pytest.fixture
+def foreign_supervisor_process(tmp_path: Path, request):
+    """Start a real owner whose worker remains active until the owner exits."""
+
+    if sys.platform != "linux" or not hasattr(os, "WNOWAIT"):
+        pytest.skip("requires Linux procfs and non-reaping waitid")
+    source_root = Path(__file__).resolve().parents[1]
+    owner_code = """
+import os, select, sys
+from pathlib import Path
+from agy_mcp.models import BridgeRequest, CanonicalEvent
+from test_supervisor import _capability, _ScriptedAdapter, _supervisor_with, _wait_for
+root = Path(sys.argv[1])
+if sys.argv[2] == "ps-lstart":
+    original_read_text = Path.read_text
+    def read_text(path, *args, **kwargs):
+        if path == Path("/proc/sys/kernel/random/boot_id"):
+            raise PermissionError("synthetic unreadable procfs boot ID")
+        return original_read_text(path, *args, **kwargs)
+    Path.read_text = read_text
+adapter = _ScriptedAdapter(
+    capability=_capability(),
+    events=[CanonicalEvent(type="system", subtype="init")],
+    block_until_cancel=True,
+)
+supervisor = _supervisor_with(adapter, tmp_path=root)
+response = supervisor.start(BridgeRequest(prompt="owner lifecycle test", cwd=str(root)))
+assert response.success
+assert _wait_for(lambda: bool(supervisor.store.read_events(response.job_id)))
+print(response.job_id, flush=True)
+ready, _, _ = select.select([sys.stdin], [], [], 4)
+assert ready
+if sys.stdin.readline().strip() == "finish":
+    handle = supervisor._jobs[response.job_id]
+    assert supervisor.cancel(response.job_id)
+    handle.thread.join(timeout=2)
+    assert not handle.thread.is_alive()
+    assert supervisor.status(response.job_id).status == "cancelled"
+    print("finished", flush=True)
+os._exit(0)
+"""
+    env = {
+        "PATH": os.defpath,
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": os.pathsep.join([str(source_root / "src"), str(source_root / "tests")]),
+    }
+    with subprocess.Popen(
+        [sys.executable, "-c", owner_code, str(tmp_path), getattr(request, "param", "proc-stat")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    ) as owner:
+        try:
+            ready, _, _ = select.select([owner.stdout], [], [], 4)
+            assert ready, "owner did not start its worker within the test deadline"
+            job_id = owner.stdout.readline().strip()
+            observer = _supervisor_with(
+                _ScriptedAdapter(capability=_capability(), events=[]), tmp_path=tmp_path,
+            )
+            record = observer.store.get_job(job_id)
+            assert record is not None and record.status == "running"
+            yield observer, record, owner
+        finally:
+            try:
+                owner.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                owner.kill()
+                owner.communicate(timeout=2)
+
+
+def test_status_keeps_actual_foreign_supervisor_worker_running(foreign_supervisor_process):
+    observer, record, _owner = foreign_supervisor_process
+
+    assert observer.status(record.job_id).status == "running"
+    assert observer.store.get_job(record.job_id).status == "running"
+
+
+def test_foreign_owner_probe_does_not_block_local_cancellation(
+    foreign_supervisor_process,
+    monkeypatch,
+):
+    foreign_observer, record, owner = foreign_supervisor_process
+    adapter = _ScriptedAdapter(capability=_capability(), events=[], block_until_cancel=True)
+    observer = _supervisor_with(adapter, tmp_path=foreign_observer.store.root)
+    response = observer.start(BridgeRequest(prompt="local cancellation", cwd=str(observer.store.root)))
+    assert response.success
+    handle = observer._jobs[response.job_id]
+    probe_entered = threading.Event()
+    release_probe = threading.Event()
+    cancel_finished = threading.Event()
+    statuses = []
+    signalled = []
+    original_signature = _process_start_signature
+
+    def _slow_signature(pid: int):
+        if pid == owner.pid:
+            probe_entered.set()
+            assert release_probe.wait(timeout=3), "test did not release the process probe"
+        return original_signature(pid)
+
+    def _cancel():
+        signalled.append(observer.cancel(response.job_id))
+        cancel_finished.set()
+
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", _slow_signature)
+    status_thread = threading.Thread(target=lambda: statuses.append(observer.status(record.job_id)))
+    cancel_thread = threading.Thread(target=_cancel)
+    try:
+        status_thread.start()
+        assert probe_entered.wait(timeout=2)
+        cancel_thread.start()
+        assert cancel_finished.wait(timeout=1), "cancellation waited for an unrelated process probe"
+        assert signalled == [True]
+        assert not release_probe.is_set()
+    finally:
+        release_probe.set()
+        status_thread.join(timeout=2)
+        if cancel_thread.ident is not None:
+            cancel_thread.join(timeout=2)
+        observer.cancel(response.job_id)
+        handle.thread.join(timeout=2)
+        assert not status_thread.is_alive() and not cancel_thread.is_alive()
+        assert not handle.thread.is_alive()
+    assert statuses[0].status == "running"
+
+
+def test_status_preserves_actual_owner_terminal_record_written_during_probe(
+    foreign_supervisor_process,
+    monkeypatch,
+):
+    observer, record, owner = foreign_supervisor_process
+    original_signature = _process_start_signature
+
+    def _finish_owner_during_probe(pid: int):
+        if pid == owner.pid:
+            owner.stdin.write("finish\n")
+            owner.stdin.flush()
+            ready, _, _ = select.select([owner.stdout], [], [], 2)
+            assert ready and owner.stdout.readline().strip() == "finished"
+            assert _wait_for(
+                lambda: os.waitid(os.P_PID, owner.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+                is not None,
+            )
+        return original_signature(pid)
+
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", _finish_owner_during_probe)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "cancelled"
+    assert public.error is None
+    assert public.finished_at is not None
+    assert observer.store.get_job(record.job_id).status == "cancelled"
+
+
+@pytest.mark.parametrize("owner_field", ["instance_id", "pid", "process_start_signature"])
+def test_status_defers_stale_owner_decision_if_identity_changes_during_probe(
+    foreign_supervisor_process,
+    monkeypatch,
+    owner_field: str,
+):
+    observer, record, owner = foreign_supervisor_process
+    original_signature = _process_start_signature
+
+    def _replace_owner_during_probe(pid: int):
+        assert pid == owner.pid
+        fresh = observer.store.get_job(record.job_id)
+        if owner_field == "instance_id":
+            fresh.extra["supervisor"][owner_field] = "replacement-instance"
+        elif owner_field == "pid":
+            fresh.extra["supervisor"][owner_field] = fresh.pid = 999_999_999
+        else:
+            fresh.extra["supervisor"][owner_field] += ":replacement-process"
+        observer.store.update_job(fresh)
+        return original_signature(pid) + ":previous-process"
+
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", _replace_owner_during_probe)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "running"
+    assert public.error is None and public.finished_at is None
+    assert observer.store.get_job(record.job_id).status == "running"
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", original_signature)
+    assert observer.status(record.job_id).status == ("running" if owner_field == "instance_id" else "failed")
+
+
+@pytest.mark.parametrize("foreign_supervisor_process", ["proc-stat", "ps-lstart"], indirect=True)
+@pytest.mark.parametrize("owner_has_exited", [False, True])
+def test_status_preserves_owner_liveness_when_signature_mechanism_changes(
+    foreign_supervisor_process,
+    monkeypatch,
+    owner_has_exited: bool,
+):
+    observer, record, owner = foreign_supervisor_process
+    expected = record.extra["supervisor"]["process_start_signature"]
+    if expected.startswith("proc-stat:"):
+        original_read_text = Path.read_text
+
+        def _read_text(path: Path, *args, **kwargs):
+            if path == Path("/proc/sys/kernel/random/boot_id"):
+                raise PermissionError("synthetic unreadable procfs boot ID")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _read_text)
+        current_mechanism = "ps-lstart:"
+    else:
+        assert expected.startswith("ps-lstart:")
+        current_mechanism = "proc-stat:"
+    if owner_has_exited:
+        owner.stdin.write("exit\n")
+        owner.stdin.flush()
+        assert _wait_for(
+            lambda: os.waitid(os.P_PID, owner.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            is not None,
+        )
+        assert Path(f"/proc/{owner.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    assert _process_start_signature(owner.pid).startswith(current_mechanism)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == ("failed" if owner_has_exited else "running")
+    assert observer.store.get_job(record.job_id).status == public.status
+    assert (public.finished_at is not None) is owner_has_exited
+    assert public.error == (_RECONCILE_ERROR if owner_has_exited else None)
+
+
+@pytest.mark.parametrize("foreign_supervisor_process", ["proc-stat", "ps-lstart"], indirect=True)
+def test_status_reconciles_actual_owner_with_mismatched_start_signature(
+    foreign_supervisor_process,
+    monkeypatch,
+):
+    observer, record, owner = foreign_supervisor_process
+    if record.extra["supervisor"]["process_start_signature"].startswith("ps-lstart:"):
+        monkeypatch.setattr("agy_mcp.supervisor._linux_process_start_signature", lambda pid: None)
+    current = _process_start_signature(owner.pid)
+    expected = record.extra["supervisor"]["process_start_signature"]
+    assert current == expected
+    record.extra["supervisor"]["process_start_signature"] += ":previous-process"
+    observer.store.update_job(record)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert public.finished_at is not None
+    assert observer.store.get_job(record.job_id).status == "failed"
+
+
+@pytest.mark.parametrize("keep_start_signature", [True, False])
+def test_status_reconciles_actual_zombie_supervisor_owner(
+    foreign_supervisor_process,
+    keep_start_signature: bool,
+):
+    observer, record, owner = foreign_supervisor_process
+    if not keep_start_signature and "supervisor" in record.extra:
+        record.extra["supervisor"].pop("process_start_signature", None)
+        observer.store.update_job(record)
+    owner.stdin.write("exit\n")
+    owner.stdin.flush()
+
+    assert _wait_for(
+        lambda: os.waitid(os.P_PID, owner.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+        is not None,
+    ), "owner did not exit within the test deadline"
+    state = Path(f"/proc/{owner.pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    assert state == "Z"
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert public.finished_at is not None
+    assert observer.store.get_job(record.job_id).status == "failed"
+
+
+@pytest.mark.parametrize("stat_text", [None, "malformed proc stat"])
+def test_pid_exists_keeps_live_process_when_proc_stat_is_unavailable(monkeypatch, stat_text):
+    proc_stat = Path(f"/proc/{os.getpid()}/stat")
+    original_read_text = Path.read_text
+
+    def _read_text(path: Path, *args, **kwargs):
+        if path == proc_stat:
+            if stat_text is None:
+                raise PermissionError("synthetic unreadable procfs")
+            return stat_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    assert _pid_exists(os.getpid()) is True
 
 
 # ---------------------------------------------------------------------------
