@@ -234,6 +234,7 @@ def test_resolve_job_reference_accepts_exact_id_or_unique_prefix(tmp_session_roo
 
     assert store.resolve_job_reference(record.job_id) == record
     assert store.resolve_job_reference("job_prefix_tar") == record
+    assert store.resolve_job_reference("job_zzz_nope") is None
 
 
 def test_resolve_job_reference_rejects_ambiguous_prefix(tmp_session_root: Path):
