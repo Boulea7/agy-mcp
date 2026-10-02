@@ -178,9 +178,12 @@ class SessionStore:
         except (OSError, json.JSONDecodeError):
             return None
         try:
-            return JobRecord.model_validate(data)
+            record = JobRecord.model_validate(data)
         except ValidationError:
             return None
+        if record.job_id != job_id:
+            return None
+        return record
 
     def update_job(self, record: JobRecord) -> JobRecord:
         record.touch()
@@ -345,13 +348,17 @@ class SessionStore:
 
         This is intentionally read-only and never creates missing job
         directories. Exact IDs keep their old behaviour through ``get_job``;
-        shorter prefixes must uniquely identify a stored record.
+        an occupied exact directory never resolves to a longer job, even
+        with invalid metadata. Shorter prefixes must uniquely identify a
+        stored record.
         """
 
         reference = _validate_job_reference(reference)
         exact = self.get_job(reference)
         if exact is not None:
             return exact
+        if (self.root / reference).is_dir():
+            return None
 
         match: JobRecord | None = None
         for path in self.root.iterdir():

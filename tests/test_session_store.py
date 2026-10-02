@@ -32,6 +32,46 @@ def test_create_and_get_job_round_trip(tmp_session_root: Path):
     assert fetched.request == {"prompt": "x"}
 
 
+def test_get_job_rejects_metadata_for_another_directory_without_writing(tmp_session_root: Path):
+    store = SessionStore(tmp_session_root)
+    misplaced = store.create_job(job_id="job_misplaced")
+    valid = store.create_job(job_id="job_valid")
+    wrong_path = JobPaths.for_job(tmp_session_root, misplaced.job_id).meta
+    valid_path = JobPaths.for_job(tmp_session_root, valid.job_id).meta
+    valid_bytes = valid_path.read_bytes()
+    wrong_path.write_bytes(valid_bytes)
+
+    assert store.get_job(misplaced.job_id) is None
+    assert [record.job_id for record in store.list_jobs()] == [valid.job_id]
+    assert store.finalize_job(misplaced.job_id, status="failed") is None
+    assert wrong_path.read_bytes() == valid_bytes
+    assert valid_path.read_bytes() == valid_bytes
+
+
+@pytest.mark.parametrize("metadata", ["wrong_id", "invalid_json", "missing_meta"])
+def test_resolve_job_reference_preserves_occupied_exact_directory(
+    tmp_session_root: Path, metadata: str,
+):
+    store = SessionStore(tmp_session_root)
+    exact = store.create_job(job_id="job_target")
+    longer = store.create_job(job_id="job_target_longer")
+    exact_path = JobPaths.for_job(tmp_session_root, exact.job_id).meta
+    longer_path = JobPaths.for_job(tmp_session_root, longer.job_id).meta
+    longer_bytes = longer_path.read_bytes()
+    if metadata == "wrong_id":
+        exact_path.write_bytes(longer_bytes)
+    elif metadata == "invalid_json":
+        exact_path.write_text("{invalid json", encoding="utf-8")
+    else:
+        exact_path.unlink()
+    original = exact_path.read_bytes() if exact_path.exists() else None
+
+    assert store.resolve_job_reference(exact.job_id) is None
+    assert store.resolve_job_reference("job_targ") == longer
+    assert (exact_path.read_bytes() if exact_path.exists() else None) == original
+    assert longer_path.read_bytes() == longer_bytes
+
+
 def test_finalize_job_writes_status_and_exit_code(tmp_session_root: Path):
     store = SessionStore(tmp_session_root)
     record = store.create_job()
