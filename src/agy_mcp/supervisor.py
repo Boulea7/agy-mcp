@@ -124,6 +124,7 @@ class _JobHandle:
     thread: threading.Thread
     started_at: float = field(default_factory=time.monotonic)
     spool_dir: Path | None = None
+    finalizing: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +541,7 @@ class Supervisor:
             handle = self._jobs.get(job_id)
             if handle is None:
                 return False
-            if not handle.thread.is_alive():
+            if handle.finalizing or not handle.thread.is_alive():
                 return False
             handle.cancel_event.set()
             return True
@@ -625,6 +626,11 @@ class Supervisor:
             # otherwise the supervisor leaks a slot per failure and
             # eventually rejects every new start() with ``supervisor busy``.
             try:
+                # Close cancellation before a terminal record becomes visible.
+                with self._lock:
+                    handle = self._jobs.get(job_id)
+                    if handle is not None:
+                        handle.finalizing = True
                 self._finalize(
                     job_id=job_id,
                     result=result,

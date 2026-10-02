@@ -1556,6 +1556,141 @@ def test_cancel_on_finished_job_returns_false(tmp_path: Path):
     assert supervisor.cancel(response.job_id) is False
 
 
+@pytest.mark.parametrize(
+    "exit_code,upstream_error,block_until_cancel,expected_status",
+    [
+        (0, False, False, "completed"),
+        (1, False, False, "failed"),
+        (0, True, False, "upstream_error"),
+        (0, False, True, "cancelled"),
+    ],
+)
+def test_cancel_on_terminal_job_during_worker_cleanup_returns_false(
+    tmp_path: Path, monkeypatch, exit_code, upstream_error,
+    block_until_cancel, expected_status,
+):
+    """A persisted terminal result ends cancellation before worker cleanup."""
+
+    adapter = _ScriptedAdapter(
+        capability=_capability(),
+        events=[CanonicalEvent(type="result", subtype="success")],
+        exit_code=exit_code,
+        had_upstream_error=upstream_error,
+        block_until_cancel=block_until_cancel,
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    terminal_written = threading.Event()
+    release_worker = threading.Event()
+    original_update = supervisor.store.update_job
+
+    def update_and_pause(record):
+        result = original_update(record)
+        if record.status == expected_status:
+            terminal_written.set()
+            if not release_worker.wait(timeout=5):
+                raise RuntimeError("terminal-write gate timed out")
+        return result
+
+    monkeypatch.setattr(supervisor.store, "update_job", update_and_pause)
+    response = supervisor.start(BridgeRequest(prompt="quick", cwd=str(tmp_path)))
+    assert response.success
+    with supervisor._lock:
+        handle = supervisor._jobs[response.job_id]
+    try:
+        if block_until_cancel:
+            assert supervisor.cancel(response.job_id) is True
+        assert terminal_written.wait(timeout=3)
+        assert handle.thread.is_alive()
+        assert supervisor.has_active_job(response.job_id) is True
+        assert supervisor.status(response.job_id).status == expected_status
+        cancel_flag_before = handle.cancel_event.is_set()
+        assert supervisor.cancel(response.job_id) is False
+        assert handle.cancel_event.is_set() == cancel_flag_before
+    finally:
+        release_worker.set()
+        handle.thread.join(timeout=3)
+    assert not handle.thread.is_alive()
+    assert supervisor.has_active_job(response.job_id) is False
+
+
+def test_cancel_signals_running_job_without_metadata(tmp_path: Path):
+    """A missing record must not prevent signalling an active exact worker."""
+
+    from agy_mcp.session_store import JobPaths
+
+    adapter = _ScriptedAdapter(
+        capability=_capability(), events=[], block_until_cancel=True,
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="wait", cwd=str(tmp_path)))
+    assert response.success
+    with supervisor._lock:
+        handle = supervisor._jobs[response.job_id]
+    try:
+        JobPaths.for_job(supervisor.store.root, response.job_id).meta.unlink()
+        assert supervisor.store.get_job(response.job_id) is None
+        assert supervisor.has_active_job(response.job_id) is True
+        assert supervisor.cancel(response.job_id) is True
+    finally:
+        handle.cancel_event.set()
+        handle.thread.join(timeout=3)
+    assert not handle.thread.is_alive()
+    assert supervisor.has_active_job(response.job_id) is False
+
+
+def test_finalize_write_failure_releases_worker_and_slot(tmp_path: Path, monkeypatch):
+    """A failed terminal write must not retain the handle or capacity slot."""
+
+    adapter = _ScriptedAdapter(
+        capability=_capability(), events=[], block_until_cancel=True,
+    )
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    supervisor._job_slots = threading.Semaphore(1)
+    original_worker = supervisor._run_job
+    original_update = supervisor.store.update_job
+    errors = []
+
+    def worker(*args, **kwargs):
+        try:
+            original_worker(*args, **kwargs)
+        except OSError as exc:
+            errors.append(str(exc))
+
+    def fail_terminal_write(record):
+        if record.status != "running":
+            raise OSError("synthetic terminal write failure")
+        return original_update(record)
+
+    monkeypatch.setattr(supervisor, "_run_job", worker)
+    monkeypatch.setattr(supervisor.store, "update_job", fail_terminal_write)
+    request = BridgeRequest(prompt="wait", cwd=str(tmp_path))
+    first = supervisor.start(request)
+    assert first.success
+    with supervisor._lock:
+        first_handle = supervisor._jobs[first.job_id]
+    try:
+        assert supervisor.cancel(first.job_id) is True
+    finally:
+        first_handle.cancel_event.set()
+        first_handle.thread.join(timeout=3)
+    assert not first_handle.thread.is_alive()
+    assert supervisor.has_active_job(first.job_id) is False
+    assert errors == ["synthetic terminal write failure"]
+
+    monkeypatch.setattr(supervisor.store, "update_job", original_update)
+    second = supervisor.start(request)
+    assert second.success, "finalization failure retained the only worker slot"
+    with supervisor._lock:
+        second_handle = supervisor._jobs[second.job_id]
+    try:
+        assert supervisor.cancel(second.job_id) is True
+    finally:
+        second_handle.cancel_event.set()
+        second_handle.thread.join(timeout=3)
+    assert not second_handle.thread.is_alive()
+    assert supervisor.status(second.job_id).status == "cancelled"
+
+
 # ---------------------------------------------------------------------------
 # Read / list / since-offset
 # ---------------------------------------------------------------------------
