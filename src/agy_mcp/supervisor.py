@@ -467,12 +467,11 @@ class Supervisor:
             return None
         if record.status != "running":
             return self._public_record(record)
+        # Process probes may block; do not serialize unrelated start/cancel
+        # calls behind them. A changed owner invalidates this stale proof.
+        owner_identity = _supervisor_owner_identity(record)
+        foreign_owner_live = _owned_by_foreign_live_supervisor(record, self._instance_id)
         with self._lock:
-            handle = self._jobs.get(job_id)
-            handle_alive = handle is not None and handle.thread.is_alive()
-            if handle_alive:
-                # Still under management — no reconciliation needed.
-                return self._public_record(record)
             # Re-read inside the lock so a worker that just persisted
             # ``status=completed`` and is about to pop its handle wins
             # the race instead of being reclassified as failed.
@@ -481,7 +480,12 @@ class Supervisor:
                 return self._public_record(record)
             if fresh.status != "running":
                 return self._public_record(fresh)
-            if _owned_by_foreign_live_supervisor(fresh, self._instance_id):
+            handle = self._jobs.get(job_id)
+            handle_alive = handle is not None and handle.thread.is_alive()
+            if handle_alive:
+                # Still under management — no reconciliation needed.
+                return self._public_record(fresh)
+            if foreign_owner_live or _supervisor_owner_identity(fresh) != owner_identity:
                 return self._public_record(fresh)
             finalised = self.store.finalize_job(
                 job_id,
@@ -727,6 +731,15 @@ def _utc_now() -> str:
     return utc_now_iso()
 
 
+def _supervisor_owner_identity(record: JobRecord) -> tuple[object, object, object] | None:
+    """Return the fields that determine which process owns a job."""
+
+    owner = record.extra.get("supervisor")
+    if not isinstance(owner, dict):
+        return None
+    return owner.get("instance_id"), owner.get("pid"), owner.get("process_start_signature")
+
+
 def _owned_by_foreign_live_supervisor(
     record: JobRecord,
     current_instance_id: str,
@@ -748,12 +761,14 @@ def _owned_by_foreign_live_supervisor(
 
 
 def _pid_matches_start_signature(pid: int, expected: str) -> bool:
-    """Return whether ``pid`` still has the recorded process identity."""
+    """Preserve an owner unless its death or identity mismatch is proven."""
 
     current = _process_start_signature(pid)
-    if current is None:
-        return _pid_exists(pid) is not False
-    return current == expected
+    if current is not None and current != expected:
+        # Different mechanisms cannot establish an identity mismatch.
+        if current.partition(":")[0] == expected.partition(":")[0]:
+            return False
+    return _pid_exists(pid) is not False
 
 
 def _process_start_signature(pid: int) -> str | None:
@@ -817,7 +832,7 @@ def _pid_exists(pid: int) -> bool | None:
 
 
 def _posix_pid_exists(pid: int) -> bool | None:
-    """Return whether ``pid`` exists using POSIX signal-0 semantics."""
+    """Return whether ``pid`` can still run, conservatively when unknown."""
 
     try:
         os.kill(pid, 0)
@@ -827,7 +842,17 @@ def _posix_pid_exists(pid: int) -> bool | None:
         return True
     except OSError:
         return None
-    return True
+    # Zombies still satisfy signal-0 and retain their start signature, but
+    # cannot run a supervisor's worker threads. Other POSIX hosts and
+    # unreadable procfs retain the existing conservative signal-0 result.
+    try:
+        stat_text = (Path("/proc") / str(pid) / "stat").read_text(
+            encoding="utf-8", errors="replace",
+        )
+        state = stat_text.rsplit(")", 1)[1].split()[0]
+    except (IndexError, OSError):
+        return True
+    return state not in {"Z", "X"}
 
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000

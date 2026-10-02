@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from agy_mcp.adapters.base import AdapterRunResult, BaseAdapter, EventSink
 from agy_mcp.config import BackendConfig, Config, ExecuteConfig, SafetyConfig
@@ -353,7 +357,9 @@ def test_start_redacts_request_snapshot(tmp_path: Path):
     assert record.request["extra_env"] == {"MY_TOKEN": "***"}
 
 
-def test_start_redacts_public_cwd_but_runs_adapter_in_raw_cwd(tmp_path: Path):
+def test_start_redacts_public_cwd_but_runs_adapter_in_raw_cwd(tmp_path: Path, monkeypatch):
+    # The synthetic macOS path need not be accessible on the test host.
+    monkeypatch.setattr("agy_mcp.supervisor.is_git_workspace", lambda _cwd: False)
     events = [
         CanonicalEvent(type="assistant", text="ok"),
         CanonicalEvent(type="result", subtype="success"),
@@ -542,7 +548,7 @@ def test_status_keeps_foreign_live_supervisor_with_matching_signature(
 
     monkeypatch.setattr(
         "agy_mcp.supervisor._process_start_signature",
-        lambda pid: "current-owner" if pid == os.getpid() else None,
+        lambda pid: "proc-stat:boot-id:42" if pid == os.getpid() else None,
     )
     adapter = _ScriptedAdapter(capability=_capability(), events=[])
     supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
@@ -554,7 +560,7 @@ def test_status_keeps_foreign_live_supervisor_with_matching_signature(
             "supervisor": {
                 "pid": os.getpid(),
                 "instance_id": "foreign",
-                "process_start_signature": "current-owner",
+                "process_start_signature": "proc-stat:boot-id:42",
             }
         },
     )
@@ -570,7 +576,7 @@ def test_status_reconciles_foreign_reused_pid(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(
         "agy_mcp.supervisor._process_start_signature",
-        lambda pid: "current-owner" if pid == os.getpid() else None,
+        lambda pid: "proc-stat:boot-id:42" if pid == os.getpid() else None,
     )
     adapter = _ScriptedAdapter(capability=_capability(), events=[])
     supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
@@ -582,7 +588,7 @@ def test_status_reconciles_foreign_reused_pid(tmp_path: Path, monkeypatch):
             "supervisor": {
                 "pid": os.getpid(),
                 "instance_id": "foreign",
-                "process_start_signature": "previous-owner",
+                "process_start_signature": "proc-stat:boot-id:41",
             }
         },
     )
@@ -1119,6 +1125,303 @@ def test_status_reconciles_foreign_dead_supervisor_job(tmp_path: Path):
     assert public.status == "failed"
     assert public.error == _RECONCILE_ERROR
     assert supervisor.store.get_job(record.job_id).status == "failed"
+
+
+@pytest.fixture
+def foreign_supervisor_process(tmp_path: Path, request):
+    """Start a real owner whose worker remains active until the owner exits."""
+
+    if sys.platform != "linux" or not hasattr(os, "WNOWAIT"):
+        pytest.skip("requires Linux procfs and non-reaping waitid")
+    source_root = Path(__file__).resolve().parents[1]
+    owner_code = """
+import os, select, sys
+from pathlib import Path
+from agy_mcp.models import BridgeRequest, CanonicalEvent
+from test_supervisor import _capability, _ScriptedAdapter, _supervisor_with, _wait_for
+root = Path(sys.argv[1])
+if sys.argv[2] == "ps-lstart":
+    original_read_text = Path.read_text
+    def read_text(path, *args, **kwargs):
+        if path == Path("/proc/sys/kernel/random/boot_id"):
+            raise PermissionError("synthetic unreadable procfs boot ID")
+        return original_read_text(path, *args, **kwargs)
+    Path.read_text = read_text
+adapter = _ScriptedAdapter(
+    capability=_capability(),
+    events=[CanonicalEvent(type="system", subtype="init")],
+    block_until_cancel=True,
+)
+supervisor = _supervisor_with(adapter, tmp_path=root)
+response = supervisor.start(BridgeRequest(prompt="owner lifecycle test", cwd=str(root)))
+assert response.success
+assert _wait_for(lambda: bool(supervisor.store.read_events(response.job_id)))
+print(response.job_id, flush=True)
+ready, _, _ = select.select([sys.stdin], [], [], 4)
+assert ready
+if sys.stdin.readline().strip() == "finish":
+    handle = supervisor._jobs[response.job_id]
+    assert supervisor.cancel(response.job_id)
+    handle.thread.join(timeout=2)
+    assert not handle.thread.is_alive()
+    assert supervisor.status(response.job_id).status == "cancelled"
+    print("finished", flush=True)
+os._exit(0)
+"""
+    env = {
+        "PATH": os.defpath,
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": os.pathsep.join([str(source_root / "src"), str(source_root / "tests")]),
+    }
+    with subprocess.Popen(
+        [sys.executable, "-c", owner_code, str(tmp_path), getattr(request, "param", "proc-stat")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    ) as owner:
+        try:
+            ready, _, _ = select.select([owner.stdout], [], [], 4)
+            assert ready, "owner did not start its worker within the test deadline"
+            job_id = owner.stdout.readline().strip()
+            observer = _supervisor_with(
+                _ScriptedAdapter(capability=_capability(), events=[]), tmp_path=tmp_path,
+            )
+            record = observer.store.get_job(job_id)
+            assert record is not None and record.status == "running"
+            yield observer, record, owner
+        finally:
+            try:
+                owner.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                owner.kill()
+                owner.communicate(timeout=2)
+
+
+def test_status_keeps_actual_foreign_supervisor_worker_running(foreign_supervisor_process):
+    observer, record, _owner = foreign_supervisor_process
+
+    assert observer.status(record.job_id).status == "running"
+    assert observer.store.get_job(record.job_id).status == "running"
+
+
+def test_foreign_owner_probe_does_not_block_local_cancellation(
+    foreign_supervisor_process,
+    monkeypatch,
+):
+    foreign_observer, record, owner = foreign_supervisor_process
+    adapter = _ScriptedAdapter(capability=_capability(), events=[], block_until_cancel=True)
+    observer = _supervisor_with(adapter, tmp_path=foreign_observer.store.root)
+    response = observer.start(BridgeRequest(prompt="local cancellation", cwd=str(observer.store.root)))
+    assert response.success
+    handle = observer._jobs[response.job_id]
+    probe_entered = threading.Event()
+    release_probe = threading.Event()
+    cancel_finished = threading.Event()
+    statuses = []
+    signalled = []
+    original_signature = _process_start_signature
+
+    def _slow_signature(pid: int):
+        if pid == owner.pid:
+            probe_entered.set()
+            assert release_probe.wait(timeout=3), "test did not release the process probe"
+        return original_signature(pid)
+
+    def _cancel():
+        signalled.append(observer.cancel(response.job_id))
+        cancel_finished.set()
+
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", _slow_signature)
+    status_thread = threading.Thread(target=lambda: statuses.append(observer.status(record.job_id)))
+    cancel_thread = threading.Thread(target=_cancel)
+    try:
+        status_thread.start()
+        assert probe_entered.wait(timeout=2)
+        cancel_thread.start()
+        assert cancel_finished.wait(timeout=1), "cancellation waited for an unrelated process probe"
+        assert signalled == [True]
+        assert not release_probe.is_set()
+    finally:
+        release_probe.set()
+        status_thread.join(timeout=2)
+        if cancel_thread.ident is not None:
+            cancel_thread.join(timeout=2)
+        observer.cancel(response.job_id)
+        handle.thread.join(timeout=2)
+        assert not status_thread.is_alive() and not cancel_thread.is_alive()
+        assert not handle.thread.is_alive()
+    assert statuses[0].status == "running"
+
+
+def test_status_preserves_actual_owner_terminal_record_written_during_probe(
+    foreign_supervisor_process,
+    monkeypatch,
+):
+    observer, record, owner = foreign_supervisor_process
+    original_signature = _process_start_signature
+
+    def _finish_owner_during_probe(pid: int):
+        if pid == owner.pid:
+            owner.stdin.write("finish\n")
+            owner.stdin.flush()
+            ready, _, _ = select.select([owner.stdout], [], [], 2)
+            assert ready and owner.stdout.readline().strip() == "finished"
+            assert _wait_for(
+                lambda: os.waitid(os.P_PID, owner.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+                is not None,
+            )
+        return original_signature(pid)
+
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", _finish_owner_during_probe)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "cancelled"
+    assert public.error is None
+    assert public.finished_at is not None
+    assert observer.store.get_job(record.job_id).status == "cancelled"
+
+
+@pytest.mark.parametrize("owner_field", ["instance_id", "pid", "process_start_signature"])
+def test_status_defers_stale_owner_decision_if_identity_changes_during_probe(
+    foreign_supervisor_process,
+    monkeypatch,
+    owner_field: str,
+):
+    observer, record, owner = foreign_supervisor_process
+    original_signature = _process_start_signature
+
+    def _replace_owner_during_probe(pid: int):
+        assert pid == owner.pid
+        fresh = observer.store.get_job(record.job_id)
+        if owner_field == "instance_id":
+            fresh.extra["supervisor"][owner_field] = "replacement-instance"
+        elif owner_field == "pid":
+            fresh.extra["supervisor"][owner_field] = fresh.pid = 999_999_999
+        else:
+            fresh.extra["supervisor"][owner_field] += ":replacement-process"
+        observer.store.update_job(fresh)
+        return original_signature(pid) + ":previous-process"
+
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", _replace_owner_during_probe)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "running"
+    assert public.error is None and public.finished_at is None
+    assert observer.store.get_job(record.job_id).status == "running"
+    monkeypatch.setattr("agy_mcp.supervisor._process_start_signature", original_signature)
+    assert observer.status(record.job_id).status == ("running" if owner_field == "instance_id" else "failed")
+
+
+@pytest.mark.parametrize("foreign_supervisor_process", ["proc-stat", "ps-lstart"], indirect=True)
+@pytest.mark.parametrize("owner_has_exited", [False, True])
+def test_status_preserves_owner_liveness_when_signature_mechanism_changes(
+    foreign_supervisor_process,
+    monkeypatch,
+    owner_has_exited: bool,
+):
+    observer, record, owner = foreign_supervisor_process
+    expected = record.extra["supervisor"]["process_start_signature"]
+    if expected.startswith("proc-stat:"):
+        original_read_text = Path.read_text
+
+        def _read_text(path: Path, *args, **kwargs):
+            if path == Path("/proc/sys/kernel/random/boot_id"):
+                raise PermissionError("synthetic unreadable procfs boot ID")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _read_text)
+        current_mechanism = "ps-lstart:"
+    else:
+        assert expected.startswith("ps-lstart:")
+        current_mechanism = "proc-stat:"
+    if owner_has_exited:
+        owner.stdin.write("exit\n")
+        owner.stdin.flush()
+        assert _wait_for(
+            lambda: os.waitid(os.P_PID, owner.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            is not None,
+        )
+        assert Path(f"/proc/{owner.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    assert _process_start_signature(owner.pid).startswith(current_mechanism)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == ("failed" if owner_has_exited else "running")
+    assert observer.store.get_job(record.job_id).status == public.status
+    assert (public.finished_at is not None) is owner_has_exited
+    assert public.error == (_RECONCILE_ERROR if owner_has_exited else None)
+
+
+@pytest.mark.parametrize("foreign_supervisor_process", ["proc-stat", "ps-lstart"], indirect=True)
+def test_status_reconciles_actual_owner_with_mismatched_start_signature(
+    foreign_supervisor_process,
+    monkeypatch,
+):
+    observer, record, owner = foreign_supervisor_process
+    if record.extra["supervisor"]["process_start_signature"].startswith("ps-lstart:"):
+        monkeypatch.setattr("agy_mcp.supervisor._linux_process_start_signature", lambda pid: None)
+    current = _process_start_signature(owner.pid)
+    expected = record.extra["supervisor"]["process_start_signature"]
+    assert current == expected
+    record.extra["supervisor"]["process_start_signature"] += ":previous-process"
+    observer.store.update_job(record)
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert public.finished_at is not None
+    assert observer.store.get_job(record.job_id).status == "failed"
+
+
+@pytest.mark.parametrize("keep_start_signature", [True, False])
+def test_status_reconciles_actual_zombie_supervisor_owner(
+    foreign_supervisor_process,
+    keep_start_signature: bool,
+):
+    observer, record, owner = foreign_supervisor_process
+    if not keep_start_signature and "supervisor" in record.extra:
+        record.extra["supervisor"].pop("process_start_signature", None)
+        observer.store.update_job(record)
+    owner.stdin.write("exit\n")
+    owner.stdin.flush()
+
+    assert _wait_for(
+        lambda: os.waitid(os.P_PID, owner.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+        is not None,
+    ), "owner did not exit within the test deadline"
+    state = Path(f"/proc/{owner.pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    assert state == "Z"
+
+    public = observer.status(record.job_id)
+
+    assert public.status == "failed"
+    assert public.error == _RECONCILE_ERROR
+    assert public.finished_at is not None
+    assert observer.store.get_job(record.job_id).status == "failed"
+
+
+@pytest.mark.parametrize("stat_text", [None, "malformed proc stat"])
+def test_pid_exists_keeps_live_process_when_proc_stat_is_unavailable(monkeypatch, stat_text):
+    proc_stat = Path(f"/proc/{os.getpid()}/stat")
+    original_read_text = Path.read_text
+
+    def _read_text(path: Path, *args, **kwargs):
+        if path == proc_stat:
+            if stat_text is None:
+                raise PermissionError("synthetic unreadable procfs")
+            return stat_text
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    assert _pid_exists(os.getpid()) is True
 
 
 # ---------------------------------------------------------------------------
