@@ -11,11 +11,14 @@ operator's ``$HOME``-rooted path never lands in the MCP transcript.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +33,33 @@ from agy_mcp.adapters.gemini import GeminiCliBackend
 from agy_mcp.config import Config, get_config
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
+
+_SERVER_IMPORT_TIMEOUT = 5
+_SERVER_IMPORT_MAX_BYTES = 4096
+_SERVER_IMPORT_PROBE = """
+import sys
+
+if sys.path and sys.path[0] == "":
+    sys.path[0] = sys.argv[1]
+else:
+    sys.path.insert(0, sys.argv[1])
+# Pin this package, then restore the caller's dependency search order.
+import agy_mcp
+sys.path.pop(0)
+import json
+from agy_mcp.config import SafetyConfig
+from agy_mcp.safety import SafetyPolicy
+
+safety = SafetyPolicy(config=SafetyConfig(redact_extra_patterns=json.load(sys.stdin)))
+try:
+    import agy_mcp.server
+except BaseException as exc:
+    result = {"ok": False, "detail": safety.redact(f"{type(exc).__name__}: {exc}")[:256]}
+else:
+    result = {"ok": True}
+with open(sys.argv[2], "w", encoding="utf-8") as output:
+    json.dump(result, output)
+"""
 
 
 @dataclass(slots=True)
@@ -89,6 +119,7 @@ def run_doctor(
     checks: list[DoctorCheck] = []
 
     checks.append(_check_python(sft))
+    checks.append(_check_mcp_server(sft))
     checks.append(_check_uv(sft))
     checks.extend(_check_backend(agy_adapter or AgyPrintBackend(safety=sft), sft, label="agy"))
     checks.extend(_check_backend(gemini_adapter or GeminiCliBackend(safety=sft), sft, label="gemini"))
@@ -108,6 +139,61 @@ def run_doctor(
 # ---------------------------------------------------------------------------
 # Individual probes
 # ---------------------------------------------------------------------------
+
+
+def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
+    """Check fresh server import and tool registration without starting services."""
+
+    ok = False
+    hint = "Check the agy-mcp installation and dependencies in this Python environment."
+    try:
+        with tempfile.TemporaryDirectory(prefix="agy-mcp-doctor-") as directory:
+            result_path = Path(directory) / "result.json"
+            completed = subprocess.run(
+                [
+                    sys.executable, "-c", _SERVER_IMPORT_PROBE,
+                    str(Path(__file__).resolve().parent.parent), str(result_path),
+                ],
+                input=json.dumps(list(safety.config.redact_extra_patterns)).encode(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_SERVER_IMPORT_TIMEOUT,
+            )
+            if completed.returncode != 0:
+                detail = f"Server import probe exited with code {completed.returncode}. {hint}"
+            else:
+                try:
+                    with result_path.open("rb") as result_file:
+                        raw = result_file.read(_SERVER_IMPORT_MAX_BYTES + 1)
+                except OSError as exc:
+                    raise ValueError("missing import diagnostic") from exc
+                if len(raw) > _SERVER_IMPORT_MAX_BYTES:
+                    raise ValueError("oversized import diagnostic")
+                result = json.loads(raw)
+                if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+                    raise ValueError("invalid import diagnostic")
+                ok = result["ok"]
+                if ok:
+                    detail = "Server module import and tool registration succeeded."
+                elif isinstance(result.get("detail"), str) and len(result["detail"]) <= 256:
+                    detail = f"Server import or tool registration failed: {result['detail']}. {hint}"
+                else:
+                    raise ValueError("invalid import diagnostic")
+    except subprocess.TimeoutExpired:
+        ok = False
+        detail = f"Server import probe timed out after {_SERVER_IMPORT_TIMEOUT} seconds. {hint}"
+    except OSError as exc:
+        ok = False
+        detail = f"Server import probe could not start: {exc}. {hint}"
+    except ValueError:
+        ok = False
+        detail = f"Server import probe did not produce a valid completion diagnostic. {hint}"
+    return DoctorCheck(
+        name="mcp_server",
+        ok=ok,
+        severity="info" if ok else "error",
+        detail=safety.redact(detail)[:512],
+    )
 
 
 def _check_python(safety: SafetyPolicy) -> DoctorCheck:
