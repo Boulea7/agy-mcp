@@ -22,7 +22,12 @@ def test_generate_job_id_is_unique():
 
 def test_create_and_get_job_round_trip(tmp_session_root: Path):
     store = SessionStore(tmp_session_root)
-    record = store.create_job(cwd="/tmp/repo", request={"prompt": "x"})
+    record = store.create_job(
+        cwd="/tmp/repo",
+        request={"prompt": "x"},
+        pid=1234,
+        extra={"supervisor": {"pid": 1234, "instance_id": "abc"}},
+    )
     assert record.job_id.startswith("job_")
     fetched = store.get_job(record.job_id)
     assert fetched is not None
@@ -30,6 +35,8 @@ def test_create_and_get_job_round_trip(tmp_session_root: Path):
     assert fetched.status == "running"
     assert fetched.cwd == "/tmp/repo"
     assert fetched.request == {"prompt": "x"}
+    assert fetched.pid == 1234
+    assert fetched.extra["supervisor"] == {"pid": 1234, "instance_id": "abc"}
 
 
 def test_get_job_rejects_metadata_for_another_directory_without_writing(tmp_session_root: Path):

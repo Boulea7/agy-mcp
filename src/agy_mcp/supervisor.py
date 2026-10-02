@@ -36,7 +36,9 @@ Phase 4 review invariants from R3 hand-off:
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -166,6 +168,8 @@ class Supervisor:
         self._adapter_factory = adapter_factory or self._default_adapter_factory
         self._jobs: dict[str, _JobHandle] = {}
         self._lock = threading.RLock()
+        self._instance_id = secrets.token_hex(8)
+        self._process_start_signature = _process_start_signature(os.getpid())
         # Cap concurrent worker threads so a flood of ``agy_start`` calls
         # can't spin up an unbounded number of subprocesses + reader
         # threads. (Phase 5 R2 security P1-3.)
@@ -180,9 +184,17 @@ class Supervisor:
         return self.safety.redact(str(cwd))
 
     def _public_record(self, record: JobRecord) -> JobRecord:
-        """Return a copy whose public path fields are redacted."""
+        """Return a copy without internal owner identity and with redacted paths."""
 
         data = _redact_value(record.model_dump(mode="python"), self.safety)
+        owner = data["extra"].pop("supervisor", None)
+        if (
+            isinstance(owner, dict)
+            and isinstance(owner.get("instance_id"), str)
+            and owner["instance_id"]
+            and owner.get("pid") == record.pid
+        ):
+            data["pid"] = None
         for key in ("log_path", "stdout_path", "stderr_path", "events_path"):
             if isinstance(data.get(key), str):
                 data[key] = self._public_session_path(record, data[key])
@@ -339,12 +351,22 @@ class Supervisor:
                 ).touch()
 
         try:
+            owner = {
+                "pid": os.getpid(),
+                "instance_id": self._instance_id,
+            }
+            if self._process_start_signature is not None:
+                owner["process_start_signature"] = self._process_start_signature
             record = self.store.create_job(
                 job_id=resolved_job_id,
                 session_id=effective_request.session_id,
                 cwd=self._response_cwd(effective_request.cwd),
                 request=_serialise_request(effective_request, self.safety),
                 backend=backend_name,
+                # Jobs execute in worker threads owned by this supervisor
+                # process, so pid intentionally identifies the owner process.
+                pid=os.getpid(),
+                extra={"supervisor": owner},
             )
         except (FileExistsError, TypeError, ValueError) as exc:
             self._job_slots.release()  # release the slot we just took
@@ -453,12 +475,11 @@ class Supervisor:
             return None
         if record.status != "running":
             return self._public_record(record)
+        # Process probes may block; do not serialize unrelated start/cancel
+        # calls behind them. A changed owner invalidates this stale proof.
+        owner_identity = _supervisor_owner_identity(record)
+        foreign_owner_live = _owned_by_foreign_live_supervisor(record, self._instance_id)
         with self._lock:
-            handle = self._jobs.get(job_id)
-            handle_alive = handle is not None and handle.thread.is_alive()
-            if handle_alive:
-                # Still under management — no reconciliation needed.
-                return self._public_record(record)
             # Re-read inside the lock so a worker that just persisted
             # ``status=completed`` and is about to pop its handle wins
             # the race instead of being reclassified as failed.
@@ -466,6 +487,13 @@ class Supervisor:
             if fresh is None:
                 return self._public_record(record)
             if fresh.status != "running":
+                return self._public_record(fresh)
+            handle = self._jobs.get(job_id)
+            handle_alive = handle is not None and handle.thread.is_alive()
+            if handle_alive:
+                # Still under management — no reconciliation needed.
+                return self._public_record(fresh)
+            if foreign_owner_live or _supervisor_owner_identity(fresh) != owner_identity:
                 return self._public_record(fresh)
             finalised = self.store.finalize_job(
                 job_id,
@@ -491,6 +519,13 @@ class Supervisor:
         events = self.store.read_events(job_id, since=since)
         translator = ProtocolTranslator(protocol, safety=self.safety, include_raw=False)
         return translator.translate_many(events)
+
+    def has_active_job(self, job_id: str) -> bool:
+        """Return whether an exact local job has a live worker."""
+
+        with self._lock:
+            handle = self._jobs.get(job_id)
+            return handle is not None and handle.thread.is_alive()
 
     def cancel(self, job_id: str) -> bool:
         """Signal a running job to stop; return True if a job was signalled.
@@ -709,6 +744,247 @@ def _utc_now() -> str:
     from agy_mcp.utils import utc_now_iso
 
     return utc_now_iso()
+
+
+def _supervisor_owner_identity(record: JobRecord) -> tuple[object, object, object] | None:
+    """Return the fields that determine which process owns a job."""
+
+    owner = record.extra.get("supervisor")
+    if not isinstance(owner, dict):
+        return None
+    return owner.get("instance_id"), owner.get("pid"), owner.get("process_start_signature")
+
+
+def _owned_by_foreign_live_supervisor(
+    record: JobRecord,
+    current_instance_id: str,
+) -> bool:
+    """Return True unless a foreign supervisor owner is provably stale."""
+
+    owner = record.extra.get("supervisor")
+    if not isinstance(owner, dict):
+        return False
+    if owner.get("instance_id") == current_instance_id:
+        return False
+    pid = owner.get("pid")
+    if not isinstance(pid, int):
+        return False
+    signature = owner.get("process_start_signature")
+    if isinstance(signature, str) and signature:
+        return _pid_matches_start_signature(pid, signature)
+    return _pid_exists(pid) is not False
+
+
+def _pid_matches_start_signature(pid: int, expected: str) -> bool:
+    """Preserve an owner unless its death or identity mismatch is proven."""
+
+    current = _process_start_signature(pid)
+    if current is not None and current != expected:
+        # Different mechanisms cannot establish an identity mismatch.
+        if current.partition(":")[0] == expected.partition(":")[0]:
+            return False
+    return _pid_exists(pid) is not False
+
+
+def _process_start_signature(pid: int) -> str | None:
+    """Return the strongest process start signature available on this host."""
+
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        return _windows_process_start_signature(pid)
+    linux_signature = _linux_process_start_signature(pid)
+    if linux_signature is not None:
+        return linux_signature
+    # Portable ps only exposes whole-second lstart values. Keep this as a
+    # best-effort fallback; same-second PID reuse cannot be disproved here.
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    started_at = result.stdout.strip()
+    return f"ps-lstart:{started_at}" if started_at else None
+
+
+def _linux_process_start_signature(
+    pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+) -> str | None:
+    """Return Linux boot-id + process start ticks when procfs is available."""
+
+    try:
+        stat_text = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        boot_id = (
+            proc_root / "sys" / "kernel" / "random" / "boot_id"
+        ).read_text(encoding="utf-8").strip()
+        fields_after_comm = stat_text.rsplit(")", 1)[1].strip().split()
+        start_ticks = fields_after_comm[19]
+    except (IndexError, OSError):
+        return None
+    if not boot_id or not start_ticks:
+        return None
+    return f"proc-stat:{boot_id}:{start_ticks}"
+
+
+def _pid_exists(pid: int) -> bool | None:
+    """Return PID liveness, or None when the probe is inconclusive."""
+
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_pid_exists(pid)
+    return _posix_pid_exists(pid)
+
+
+def _posix_pid_exists(pid: int) -> bool | None:
+    """Return whether ``pid`` can still run, conservatively when unknown."""
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    # Zombies still satisfy signal-0 and retain their start signature, but
+    # cannot run a supervisor's worker threads. Other POSIX hosts and
+    # unreadable procfs retain the existing conservative signal-0 result.
+    try:
+        stat_text = (Path("/proc") / str(pid) / "stat").read_text(
+            encoding="utf-8", errors="replace",
+        )
+        state = stat_text.rsplit(")", 1)[1].split()[0]
+    except (IndexError, OSError):
+        return True
+    return state not in {"Z", "X"}
+
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000
+_SYNCHRONIZE = 0x00100000
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
+
+
+def _load_windows_process_api():
+    """Load Kernel32 process APIs with explicit pointer-safe signatures."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+    )
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    filetime_pointer = ctypes.POINTER(wintypes.FILETIME)
+    kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+    )
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return ctypes, wintypes, kernel32
+
+
+def _windows_process_info(pid: int) -> tuple[bool | None, str | None]:
+    """Return Windows process liveness and identity when they are knowable."""
+
+    if pid <= 0:
+        return False, None
+    try:
+        ctypes, wintypes, kernel32 = _load_windows_process_api()
+        handle = kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE,
+            False,
+            pid,
+        )
+    except (AttributeError, ImportError, OSError, TypeError):
+        return None, None
+    if not handle:
+        try:
+            last_error = ctypes.get_last_error()
+        except (AttributeError, OSError):
+            return None, None
+        # OpenProcess reports ERROR_INVALID_PARAMETER for an invalid PID.
+        # Access denied and every other failure leave liveness unknown.
+        return (False, None) if last_error == 87 else (None, None)
+
+    try:
+        try:
+            wait_result = kernel32.WaitForSingleObject(handle, 0)
+        except (AttributeError, OSError, TypeError):
+            return None, None
+        if wait_result == _WAIT_OBJECT_0:
+            return False, None
+        if wait_result != _WAIT_TIMEOUT:
+            return None, None
+
+        creation_time = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        try:
+            has_times = kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation_time),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            )
+        except (AttributeError, OSError, TypeError):
+            return True, None
+        if not has_times:
+            return True, None
+        creation_filetime = (
+            (int(creation_time.dwHighDateTime) & 0xFFFF_FFFF) << 32
+        ) | (int(creation_time.dwLowDateTime) & 0xFFFF_FFFF)
+        return True, f"win-filetime:{creation_filetime}"
+    finally:
+        try:
+            kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, TypeError):
+            pass
+
+
+def _windows_process_start_signature(pid: int) -> str | None:
+    """Return the Windows creation FILETIME identity for ``pid``."""
+
+    _, signature = _windows_process_info(pid)
+    return signature
+
+
+def _windows_pid_exists(pid: int) -> bool | None:
+    """Return Windows PID liveness, or None when the probe is inconclusive."""
+
+    exists, _ = _windows_process_info(pid)
+    return exists
 
 
 def _migrate_if_present(src: Path, dst: Path) -> None:

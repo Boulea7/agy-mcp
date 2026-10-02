@@ -29,7 +29,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"], specifier = ">=1.21.2" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.21.2,<2" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },

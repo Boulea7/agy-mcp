@@ -336,6 +336,7 @@ def _validate_job_id_reference(safety: SafetyPolicy, reference: str) -> str | No
 def _resolve_job_id_reference(
     safety: SafetyPolicy,
     store: SessionStore,
+    supervisor: Supervisor,
     reference: str,
 ) -> tuple[str | None, str | None]:
     """Resolve an exact job id or unique prefix; return ``(job_id, error)``."""
@@ -344,6 +345,9 @@ def _resolve_job_id_reference(
     if err is not None:
         return None, err
     try:
+        # Preserve a local exact identity even if its record was purged.
+        if supervisor.has_active_job(reference):
+            return reference, None
         record = store.resolve_job_reference(reference)
     except ValueError as exc:
         return None, safety.redact(str(exc))
@@ -651,7 +655,7 @@ def agy_start_tool(
 )
 def agy_status_tool(job_id: str) -> StatusToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
-    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, job_id)
+    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, supervisor, job_id)
     if err is not None:
         return _wrapper_failure(safety, ValueError(err), StatusToolResponse)
     try:
@@ -690,7 +694,7 @@ def agy_read_tool(
     translate: OutputProtocol | None = None,
 ) -> ReadToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
-    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, job_id)
+    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, supervisor, job_id)
     if err is not None:
         return _wrapper_failure(
             safety, ValueError(err), ReadToolResponse,
@@ -761,7 +765,9 @@ def agy_result_tool(
     _config, safety, _store_, supervisor = _ensure_state()
     selected_job_id = job_id
     if selected_job_id is not None:
-        selected_job_id, err = _resolve_job_id_reference(safety, _store_, selected_job_id)
+        selected_job_id, err = _resolve_job_id_reference(
+            safety, _store_, supervisor, selected_job_id,
+        )
         if err is not None:
             return _wrapper_failure(safety, ValueError(err), ResultToolResponse)
     if since < 0:
@@ -862,7 +868,7 @@ def agy_result_tool(
 )
 def agy_cancel_tool(job_id: str) -> CancelToolResponse:
     config, safety, _store_, supervisor = _ensure_state()
-    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, job_id)
+    resolved_job_id, err = _resolve_job_id_reference(safety, _store_, supervisor, job_id)
     if err is not None:
         return _wrapper_failure(
             safety, ValueError(err), CancelToolResponse,
