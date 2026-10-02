@@ -63,6 +63,26 @@ Output: numbered list, each item severity P0/P1/P2/P3, with file:line.
 Skip nits.
 ```
 
+### adversarial review variant
+
+Use this as a stricter `mode="review"` prompt when the change affects
+security boundaries, concurrency, persistence, migrations, release tooling,
+or anything hard to roll back. This is a prompt profile, not a separate
+bridge mode.
+
+```
+Adversarial review: <diff path or branch/base>
+Attack the change as if you are trying to block an unsafe merge.
+Focus on:
+1. P0/P1 correctness regressions and data loss,
+2. auth, permission, path traversal, and secret leakage,
+3. races, stale state, retries, cancellation, and idempotency,
+4. migration, release, rollback, and partial-failure behavior,
+5. missing tests for the riskiest path.
+Output findings first. Use P0/P1/P2/P3 with file:line. If no blocker,
+write "no P0/P1 findings" and list residual risks separately.
+```
+
 ## execute — apply changes in an isolated worktree
 
 Use only when you've already reviewed a prototype and want it applied.
