@@ -335,6 +335,85 @@ def test_start_records_supervisor_owner_signature(tmp_path: Path, monkeypatch):
     }
 
 
+@pytest.mark.parametrize("surface", ["status", "result", "sessions"])
+def test_public_job_tools_hide_supervisor_owner_metadata(
+    tmp_path: Path,
+    monkeypatch,
+    surface: str,
+):
+    from agy_mcp import server
+
+    adapter = _ScriptedAdapter(capability=_capability(), events=[], block_until_cancel=True)
+    supervisor = _supervisor_with(adapter, tmp_path=tmp_path)
+    response = supervisor.start(BridgeRequest(prompt="public owner metadata", cwd=str(tmp_path)))
+    assert response.success
+    handle = supervisor._jobs[response.job_id]
+    monkeypatch.setattr(server, "_config", supervisor.config)
+    monkeypatch.setattr(server, "_safety", supervisor.safety)
+    monkeypatch.setattr(server, "_store", supervisor.store)
+    monkeypatch.setattr(server, "_supervisor", supervisor)
+    try:
+        assert _wait_for(lambda: bool(adapter.run_requests))
+        if surface != "status":
+            assert supervisor.cancel(response.job_id)
+            handle.thread.join(timeout=2)
+            assert not handle.thread.is_alive()
+        stored = supervisor.store.get_job(response.job_id)
+        stored.extra["route_warnings"] = ["fixture route warning"]
+        stored.extra["application"] = {"worker_pid": 9876}
+        supervisor.store.update_job(stored)
+        before = supervisor.store.get_job(response.job_id).model_dump(mode="python")
+
+        if surface == "status":
+            output = server.agy_status_tool(response.job_id)
+            public = output.model_dump(mode="json")["record"]
+        elif surface == "result":
+            output = server.agy_result_tool(response.job_id)
+            public = output.model_dump(mode="json")["record"]
+        else:
+            output = server.agy_sessions_tool()
+            public = output.model_dump(mode="json")["records"][0]
+
+        assert output.success
+        assert public["pid"] is None
+        assert "supervisor" not in public["extra"]
+        assert public["extra"]["route_warnings"] == ["fixture route warning"]
+        assert public["extra"]["application"] == {"worker_pid": 9876}
+        assert supervisor.store.get_job(response.job_id).model_dump(mode="python") == before
+    finally:
+        supervisor.cancel(response.job_id)
+        handle.thread.join(timeout=2)
+        assert not handle.thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [None, {"pid": 4321}, {"instance_id": "legacy", "pid": 9999}],
+)
+def test_public_record_preserves_legacy_worker_pid_and_other_extra(tmp_path: Path, owner):
+    supervisor = _supervisor_with(
+        _ScriptedAdapter(capability=_capability(), events=[]), tmp_path=tmp_path,
+    )
+    stored = supervisor.store.create_job(job_id="job_legacy_worker", cwd=str(tmp_path))
+    stored.status = "completed"
+    stored.pid = 4321
+    stored.extra = {
+        "route_warnings": ["fixture warning"],
+        "application": {"supervisor": "custom"},
+    }
+    if owner is not None:
+        stored.extra["supervisor"] = owner
+    supervisor.store.update_job(stored)
+    before = supervisor.store.get_job(stored.job_id).model_dump(mode="python")
+
+    public = supervisor.status(stored.job_id)
+
+    assert public.pid == 4321
+    assert public.extra["route_warnings"] == ["fixture warning"]
+    assert public.extra["application"] == {"supervisor": "custom"}
+    assert supervisor.store.get_job(stored.job_id).model_dump(mode="python") == before
+
+
 def test_start_redacts_request_snapshot(tmp_path: Path):
     events = [
         CanonicalEvent(type="assistant", text="ok"),

@@ -184,9 +184,17 @@ class Supervisor:
         return self.safety.redact(str(cwd))
 
     def _public_record(self, record: JobRecord) -> JobRecord:
-        """Return a copy whose public path fields are redacted."""
+        """Return a copy without internal owner identity and with redacted paths."""
 
         data = _redact_value(record.model_dump(mode="python"), self.safety)
+        owner = data["extra"].pop("supervisor", None)
+        if (
+            isinstance(owner, dict)
+            and isinstance(owner.get("instance_id"), str)
+            and owner["instance_id"]
+            and owner.get("pid") == record.pid
+        ):
+            data["pid"] = None
         for key in ("log_path", "stdout_path", "stderr_path", "events_path"):
             if isinstance(data.get(key), str):
                 data[key] = self._public_session_path(record, data[key])
