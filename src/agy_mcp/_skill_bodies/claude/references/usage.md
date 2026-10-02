@@ -65,6 +65,11 @@ events = agy_read(job_id, translate="claude")
 agy_cancel(job_id)
 ```
 
+The metadata tools accept a full `job_id` or a unique prefix. For example,
+`agy_status("job_177986")` resolves to the matching stored job when exactly
+one id starts with that prefix; ambiguous prefixes return `success=false`
+with an explicit ambiguity error.
+
 ## Response envelope
 
 Every CLI invocation prints a single JSON line on stdout:

@@ -38,6 +38,7 @@ JOB_ID_PREFIX = "job_"
 # anything that could traverse out of the store root. Generated ids satisfy
 # this regex (see generate_job_id).
 _JOB_ID_RE = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
+_JOB_ID_PREFIX_RE = re.compile(r"^job_[A-Za-z0-9_-]{1,80}$")
 
 
 def generate_job_id() -> str:
@@ -60,6 +61,14 @@ def _validate_job_id(job_id: str) -> str:
             f"invalid job_id {job_id!r}: must match {_JOB_ID_RE.pattern}"
         )
     return job_id
+
+
+def _validate_job_reference(reference: str) -> str:
+    if not isinstance(reference, str) or not _JOB_ID_PREFIX_RE.fullmatch(reference):
+        raise ValueError(
+            f"invalid job_id reference {reference!r}: must match {_JOB_ID_PREFIX_RE.pattern}"
+        )
+    return reference
 
 
 @dataclass(slots=True)
@@ -173,9 +182,12 @@ class SessionStore:
         except (OSError, json.JSONDecodeError):
             return None
         try:
-            return JobRecord.model_validate(data)
+            record = JobRecord.model_validate(data)
         except ValidationError:
             return None
+        if record.job_id != job_id:
+            return None
+        return record
 
     def update_job(self, record: JobRecord) -> JobRecord:
         record.touch()
@@ -334,6 +346,40 @@ class SessionStore:
             if record.session_id == session_id:
                 return record
         return None
+
+    def resolve_job_reference(self, reference: str) -> JobRecord | None:
+        """Resolve an exact job id or unique job-id prefix to a JobRecord.
+
+        This is intentionally read-only and never creates missing job
+        directories. Exact IDs keep their old behaviour through ``get_job``;
+        an occupied exact directory never resolves to a longer job, even
+        with invalid metadata. Shorter prefixes must uniquely identify a
+        stored record.
+        """
+
+        reference = _validate_job_reference(reference)
+        exact = self.get_job(reference)
+        if exact is not None:
+            return exact
+        if (self.root / reference).is_dir():
+            return None
+
+        match: JobRecord | None = None
+        for path in self.root.iterdir():
+            job_id = path.name
+            if (
+                not path.is_dir()
+                or not _JOB_ID_RE.fullmatch(job_id)
+                or not job_id.startswith(reference)
+            ):
+                continue
+            record = self.get_job(job_id)
+            if record is None:
+                continue
+            if match is not None:
+                raise ValueError("job_id reference is ambiguous; pass a longer job_id")
+            match = record
+        return match
 
     # ------------------------------------------------------------------
     # Internals

@@ -520,6 +520,13 @@ class Supervisor:
         translator = ProtocolTranslator(protocol, safety=self.safety, include_raw=False)
         return translator.translate_many(events)
 
+    def has_active_job(self, job_id: str) -> bool:
+        """Return whether an exact local job has a live worker."""
+
+        with self._lock:
+            handle = self._jobs.get(job_id)
+            return handle is not None and handle.thread.is_alive()
+
     def cancel(self, job_id: str) -> bool:
         """Signal a running job to stop; return True if a job was signalled.
 

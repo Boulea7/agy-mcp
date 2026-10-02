@@ -131,10 +131,10 @@ collaboration backend any MCP client can call. Two equivalent paths:
 | `agy` | Synchronous one-shot call (PROMPT / cd / sandbox / SESSION_ID + `mode` / `backend` / `output_protocol` / `worktree` / `allow_write` / `extra_env`) |
 | `agy_continue` | Resume a prior `SESSION_ID` |
 | `agy_start` | Background long job; returns `job_id` immediately |
-| `agy_status` | Poll job state: running / completed / failed / cancelled / upstream_error |
-| `agy_read` | Read job event stream (raw / claude / codex protocols) |
-| `agy_result` | Fetch a finished job result; omitting `job_id` returns the latest finished job |
-| `agy_cancel` | Cross-platform process-group cancel |
+| `agy_status` | Poll job state: running / completed / failed / cancelled / upstream_error; `job_id` may be a unique prefix |
+| `agy_read` | Read job event stream (raw / claude / codex protocols); `job_id` may be a unique prefix |
+| `agy_result` | Fetch a finished job result; omitting `job_id` returns the latest finished job; passed ids may be unique prefixes |
+| `agy_cancel` | Cross-platform process-group cancel; `job_id` may be a unique prefix |
 | `agy_sessions` | List recent sessions |
 | `agy_doctor` | Env + auth + capability probe (no secrets) |
 | `agy_install_skill` | Install SKILL bundles into Claude / Codex / Antigravity dirs |
