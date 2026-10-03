@@ -157,6 +157,11 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
         python_flags.append("-S")
     if sys.flags.optimize:
         python_flags.append("-OO" if sys.flags.optimize >= 2 else "-O")
+    # Respect the caller's disabled bytecode-write policy, including runtime changes.
+    if sys.dont_write_bytecode:
+        python_flags.append("-B")
+    if sys.pycache_prefix is not None:
+        python_flags.extend(["-X", f"pycache_prefix={sys.pycache_prefix}"])
     if sys.flags.bytes_warning:
         python_flags.append("-bb" if sys.flags.bytes_warning >= 2 else "-b")
     if sys.flags.warn_default_encoding:

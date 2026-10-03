@@ -699,6 +699,95 @@ raise SystemExit(exit_code)
     assert not (probe_environment / "sessions").exists()
 
 
+@pytest.mark.parametrize(
+    "flags,disable_at_runtime,disabled,explicit_prefix",
+    [
+        pytest.param(["-B"], False, True, False, id="explicit_B"),
+        pytest.param([], True, True, False, id="runtime_disabled"),
+        pytest.param([], False, False, False, id="normal_write_control"),
+        pytest.param([], False, False, True, id="explicit_cache_prefix"),
+    ],
+)
+def test_public_doctor_preserves_caller_bytecode_cache_policy(
+    probe_environment: Path, flags: list[str], disable_at_runtime: bool,
+    disabled: bool, explicit_prefix: bool,
+):
+    package_root = _copy_probe_package(probe_environment)
+    markers = probe_environment / "bytecode-imports.jsonl"
+    oracle = probe_environment / "caller-oracle.json"
+    cache_prefix = probe_environment / "bytecode-cache"
+    fallback_prefix = probe_environment / "fallback-bytecode-cache"
+    dependency = _mcp_fixture(probe_environment, f'''
+import json
+import sys
+from pathlib import Path
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(json.dumps({{"disabled": sys.dont_write_bytecode,
+                             "prefix": sys.pycache_prefix}}) + "\\n")
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    env["PYTHONPYCACHEPREFIX"] = str(fallback_prefix if explicit_prefix else cache_prefix)
+    env["PYTHONSAFEPATH"] = ""
+    code = """
+import json
+import os
+import sys
+from pathlib import Path
+package_root, oracle, disable_at_runtime = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor
+from agy_mcp.doctor import DoctorCheck
+if disable_at_runtime == "True":
+    sys.dont_write_bytecode = True
+from agy_mcp import server
+prefix = Path(sys.pycache_prefix)
+Path(oracle).write_text(json.dumps({
+    "disabled": sys.dont_write_bytecode,
+    "cache_before": sorted(str(path) for path in prefix.rglob("*.pyc")),
+    "lazy_state": [server._config, server._store, server._supervisor],
+}), encoding="utf-8")
+doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
+doctor._check_backend = lambda *args, **kwargs: []
+doctor._check_auth = lambda safety: DoctorCheck("auth", True, "fixture")
+doctor._check_network_env = lambda safety: DoctorCheck("network_env", True, "fixture")
+doctor._check_session_store = lambda *args, **kwargs: DoctorCheck("session_store", True, "fixture")
+environment = dict(os.environ)
+exit_code = doctor.main()
+assert dict(os.environ) == environment
+raise SystemExit(exit_code)
+"""
+    caller_flags = [*flags]
+    if explicit_prefix:
+        caller_flags.extend(["-X", f"pycache_prefix={cache_prefix}"])
+    result = subprocess.run(
+        [sys.executable, *caller_flags, "-c", code, str(package_root), str(oracle), str(disable_at_runtime)],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode == 0 and result.stderr == ""
+    caller = json.loads(oracle.read_text(encoding="utf-8"))
+    assert caller["disabled"] is disabled and caller["lazy_state"] == [None] * 3
+    report = json.loads(result.stdout)
+    assert report["healthy"] and all(check["ok"] for check in report["checks"])
+    caches = {str(path) for path in cache_prefix.rglob("*.pyc")}
+    if disabled:
+        assert caches == set(caller["cache_before"])
+    else:
+        assert caches
+    assert not fallback_prefix.exists()
+    assert [json.loads(line) for line in markers.read_text().splitlines()] == [
+        {"disabled": disabled, "prefix": str(cache_prefix)}
+    ] * 2
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
 def test_timeout_kills_and_reaps_direct_child_and_removes_diagnostic_directory(
     probe_environment: Path, monkeypatch: pytest.MonkeyPatch,
 ):
