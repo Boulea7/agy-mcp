@@ -217,6 +217,86 @@ print(json.dumps(_check_mcp_server(SafetyPolicy()).to_dict()))
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in protected} == before
 
 
+@pytest.mark.parametrize(
+    "flags,optimization,environment_optimization",
+    [
+        ([], 0, None),
+        (["-O"], 1, None),
+        (["-OO"], 2, None),
+        (["-E", "-O"], 1, None),
+        (["-E", "-OO"], 2, None),
+        ([], 1, "1"),
+        ([], 2, "2"),
+    ],
+)
+def test_public_doctor_preserves_caller_optimization(
+    probe_environment: Path, flags: list[str], optimization: int,
+    environment_optimization: str | None,
+):
+    package_root = _copy_probe_package(probe_environment)
+    markers = probe_environment / "optimization-imports"
+    oracle = probe_environment / "caller-oracle.json"
+    dependency = _mcp_fixture(probe_environment, f'''
+import os
+from pathlib import Path
+
+def optimization_level():
+    """Keep this docstring to distinguish -O from -OO."""
+    return 0 if __debug__ else (2 if optimization_level.__doc__ is None else 1)
+
+level = optimization_level()
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(str(level) + "\\n")
+if level != int(os.environ["AGY_DOCTOR_TEST_OPTIMIZATION"]):
+    raise ImportError("SDK imported with a different optimization level")
+
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env.pop("PYTHONOPTIMIZE", None)
+    env["PYTHONSAFEPATH"] = ""
+    env["AGY_DOCTOR_TEST_OPTIMIZATION"] = str(optimization)
+    if environment_optimization is not None:
+        env["PYTHONOPTIMIZE"] = environment_optimization
+    code = """
+import json
+import sys
+from pathlib import Path
+package_root, oracle = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor, server
+from agy_mcp.doctor import DoctorCheck
+Path(oracle).write_text(json.dumps({
+    "optimize": sys.flags.optimize,
+    "lazy_state": [server._config, server._store, server._supervisor],
+}), encoding="utf-8")
+doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
+doctor._check_backend = lambda *args, **kwargs: []
+doctor._check_auth = lambda safety: DoctorCheck("auth", True, "fixture")
+doctor._check_network_env = lambda safety: DoctorCheck("network_env", True, "fixture")
+doctor._check_session_store = lambda *args, **kwargs: DoctorCheck("session_store", True, "fixture")
+raise SystemExit(doctor.main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", *flags, "-c", code, str(package_root), str(oracle)],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.stderr == ""
+    assert json.loads(oracle.read_text()) == {"optimize": optimization, "lazy_state": [None] * 3}
+    report = json.loads(result.stdout)
+    check = next(item for item in report["checks"] if item["name"] == "mcp_server")
+    assert check["ok"] is True, check["detail"]
+    assert report["healthy"] is True and result.returncode == 0
+    assert markers.read_text().splitlines() == [str(optimization)] * 2
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
 def test_timeout_kills_and_reaps_direct_child_and_removes_diagnostic_directory(
     probe_environment: Path, monkeypatch: pytest.MonkeyPatch,
 ):

@@ -155,6 +155,8 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
     # Isolated mode does not imply -S; preserve that separate site restriction.
     if sys.flags.no_site:
         python_flags.append("-S")
+    if sys.flags.optimize:
+        python_flags.append("-OO" if sys.flags.optimize >= 2 else "-O")
     try:
         with tempfile.TemporaryDirectory(prefix="agy-mcp-doctor-") as directory:
             result_path = Path(directory) / "result.json"

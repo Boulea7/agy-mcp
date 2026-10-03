@@ -1059,11 +1059,18 @@ def test_agy_doctor_refresh_keeps_inflight_adapter_separate(reset_state, monkeyp
 
 
 def test_public_mcp_calls_respond_while_doctor_import_times_out(reset_state, monkeypatch, tmp_path):
-    import os
-
     from agy_mcp import doctor
     from agy_mcp.doctor import DoctorCheck
 
+    popen = subprocess.Popen
+    children = []
+
+    def observe_child(argv, **kwargs):
+        process = popen(argv, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(doctor.subprocess, "Popen", observe_child)
     dependency = tmp_path / "dependency" / "mcp" / "server"
     dependency.mkdir(parents=True)
     pid_path = tmp_path / "probe-pid"
@@ -1115,8 +1122,9 @@ def test_public_mcp_calls_respond_while_doctor_import_times_out(reset_state, mon
     assert cancel["success"] is True and cancel["signalled"] is False
     check = next(item for item in report["report"]["checks"] if item["name"] == "mcp_server")
     assert check["ok"] is False and "timed out after 1 seconds" in check["detail"]
-    with pytest.raises(ProcessLookupError):
-        os.kill(int(pid_path.read_text()), 0)
+    assert len(children) == 1
+    assert int(pid_path.read_text()) == children[0].pid
+    assert children[0].returncode is not None and children[0].returncode != 0
     assert not list(scratch.iterdir())
     assert config.read_text() == "" and not (tmp_path / "probe-sessions").exists()
 

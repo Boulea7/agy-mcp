@@ -395,31 +395,39 @@ def test_detect_caches_until_refresh(tmp_path, monkeypatch):
 def test_concurrent_detect_shares_one_cold_probe(monkeypatch):
     backend = AgyPrintBackend()
     probe_started = Event()
-    second_call_started = Event()
+    lock_contended = Event()
     second_probe_started = Event()
     release_probe = Event()
     calls = []
+    capability_lock = backend._capability_lock
+
+    class ObservedLock:
+        def __enter__(self):
+            if not capability_lock.acquire(blocking=False):
+                lock_contended.set()
+                capability_lock.acquire()
+
+        def __exit__(self, *args):
+            capability_lock.release()
 
     def probe():
         calls.append(None)
         if len(calls) > 1:
             second_probe_started.set()
         probe_started.set()
-        assert release_probe.wait(timeout=3)
+        assert release_probe.wait(timeout=10)
         return Capability(backend="agy", bin_path="fixture-agy")
 
-    def second_call():
-        second_call_started.set()
-        return backend.detect()
-
+    monkeypatch.setattr(backend, "_capability_lock", ObservedLock())
     monkeypatch.setattr(backend, "_probe", probe)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(backend.detect)
         try:
             assert probe_started.wait(timeout=3)
-            second = pool.submit(second_call)
-            assert second_call_started.wait(timeout=3)
-            second_probe_started.wait(timeout=0.2)
+            second = pool.submit(backend.detect)
+            assert lock_contended.wait(timeout=3)
+            assert not second_probe_started.is_set()
+            assert len(calls) == 1
         finally:
             release_probe.set()
         first_result = first.result(timeout=3)
