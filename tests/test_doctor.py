@@ -297,6 +297,107 @@ raise SystemExit(doctor.main())
     assert not (probe_environment / "sessions").exists()
 
 
+@pytest.mark.parametrize(
+    "flags,startup_warning,later_warning,caller_ok,probe_ok",
+    [
+        ([], "ignore", None, True, True),
+        ([], "error", None, False, False),
+        (["-W", "error"], "ignore", None, False, False),
+        (["-Werror"], "ignore", None, False, False),
+        (["-W", "ignore", "-W", "error"], "ignore", None, False, False),
+        (["-W", "error", "-W", "ignore"], "error", None, True, True),
+        (["-E", "-W", "error"], "ignore", None, False, False),
+        ([], "ignore", "error", True, True),
+        ([], "error", "ignore", False, False),
+        ([], "", "error::DeprecationWarning", True, True),
+        ([], "ignore::UserWarning", "error::DeprecationWarning", True, True),
+        (["-Werror", "-Wignore"], "ignore,error", None, False, False),
+        ([], "ignore,error", "error,ignore", False, False),
+    ],
+)
+def test_public_doctor_preserves_parsed_startup_warning_options(
+    probe_environment: Path, flags: list[str], startup_warning: str,
+    later_warning: str | None, caller_ok: bool, probe_ok: bool,
+):
+    package_root = _copy_probe_package(probe_environment)
+    oracle = probe_environment / "caller-oracle.json"
+    markers = probe_environment / "warning-imports.jsonl"
+    dependency = _mcp_fixture(probe_environment, f'''
+import json
+import sys
+import warnings
+from pathlib import Path
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(json.dumps(sys.warnoptions) + "\\n")
+warnings.warn("controlled SDK import warning", DeprecationWarning)
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = ""
+    env.pop("PYTHONDEVMODE", None)
+    env["PYTHONWARNINGS"] = startup_warning
+    code = """
+import json
+import os
+import sys
+from pathlib import Path
+package_root, oracle, later_warning = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor
+from agy_mcp.doctor import DoctorCheck
+if later_warning != "unchanged":
+    os.environ["PYTHONWARNINGS"] = later_warning
+try:
+    from agy_mcp import server
+except DeprecationWarning as exc:
+    caller_ok = False
+    lazy_state = "agy_mcp.server" not in sys.modules
+    error = str(exc)
+else:
+    caller_ok = True
+    lazy_state = all(x is None for x in (server._config, server._store, server._supervisor))
+    error = None
+Path(oracle).write_text(json.dumps({
+    "caller_ok": caller_ok, "lazy_state": lazy_state, "error": error,
+    "warnoptions": sys.warnoptions,
+}), encoding="utf-8")
+doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
+doctor._check_backend = lambda *args, **kwargs: []
+doctor._check_auth = lambda safety: DoctorCheck("auth", True, "fixture")
+doctor._check_network_env = lambda safety: DoctorCheck("network_env", True, "fixture")
+doctor._check_session_store = lambda *args, **kwargs: DoctorCheck("session_store", True, "fixture")
+warning_environment = os.environ["PYTHONWARNINGS"]
+exit_code = doctor.main()
+assert os.environ["PYTHONWARNINGS"] == warning_environment
+raise SystemExit(exit_code)
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", *flags, "-c", code, str(package_root), str(oracle),
+         later_warning if later_warning is not None else "unchanged"],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.stderr == ""
+    caller = json.loads(oracle.read_text())
+    assert caller["caller_ok"] is caller_ok and caller["lazy_state"]
+    if not caller_ok:
+        assert caller["error"] == "controlled SDK import warning"
+    report = json.loads(result.stdout)
+    check = next(item for item in report["checks"] if item["name"] == "mcp_server")
+    assert check["ok"] is probe_ok, check["detail"]
+    assert report["healthy"] is probe_ok and result.returncode == (0 if probe_ok else 1)
+    if not probe_ok:
+        assert "DeprecationWarning: controlled SDK import warning" in check["detail"]
+    imports = [json.loads(line) for line in markers.read_text().splitlines()]
+    assert len(imports) == 2 and imports == [caller["warnoptions"]] * 2
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
 def test_timeout_kills_and_reaps_direct_child_and_removes_diagnostic_directory(
     probe_environment: Path, monkeypatch: pytest.MonkeyPatch,
 ):

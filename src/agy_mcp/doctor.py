@@ -157,6 +157,12 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
         python_flags.append("-S")
     if sys.flags.optimize:
         python_flags.append("-OO" if sys.flags.optimize >= 2 else "-O")
+    # Replay startup warning options without re-reading a later PYTHONWARNINGS.
+    # Keep the other environment variables for fresh dependency overrides.
+    probe_env = dict(os.environ)
+    probe_env.pop("PYTHONWARNINGS", None)
+    for warning_option in sys.warnoptions:
+        python_flags.extend(["-W", warning_option])
     try:
         with tempfile.TemporaryDirectory(prefix="agy-mcp-doctor-") as directory:
             result_path = Path(directory) / "result.json"
@@ -168,6 +174,7 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
                     sys.path[0] if sys.path else "", str(result_path),
                 ],
                 input=json.dumps(list(safety.config.redact_extra_patterns)).encode(),
+                env=probe_env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=_SERVER_IMPORT_TIMEOUT,
