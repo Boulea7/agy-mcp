@@ -157,6 +157,8 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
         python_flags.append("-S")
     if sys.flags.optimize:
         python_flags.append("-OO" if sys.flags.optimize >= 2 else "-O")
+    if sys.flags.dev_mode:
+        python_flags.extend(["-X", "dev"])
     # Respect the caller's disabled bytecode-write policy, including runtime changes.
     if sys.dont_write_bytecode:
         python_flags.append("-B")
@@ -174,6 +176,7 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
     # Do not re-read environment settings already represented by the caller's modes.
     # Keep the other environment variables for fresh dependency overrides.
     probe_env = dict(os.environ)
+    probe_env.pop("PYTHONDEVMODE", None)
     probe_env.pop("PYTHONOPTIMIZE", None)
     probe_env.pop("PYTHONDONTWRITEBYTECODE", None)
     probe_env.pop("PYTHONPYCACHEPREFIX", None)

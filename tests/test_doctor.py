@@ -352,6 +352,101 @@ raise SystemExit(doctor.main())
 
 
 @pytest.mark.parametrize(
+    "flags,later_development,development_mode,caller_ok",
+    [
+        ([], None, False, True),
+        (["-X", "dev"], None, True, False),
+        ([], "1", False, True),
+    ],
+)
+def test_public_doctor_preserves_effective_development_mode(
+    probe_environment: Path, flags: list[str], later_development: str | None,
+    development_mode: bool, caller_ok: bool,
+):
+    package_root = _copy_probe_package(probe_environment)
+    oracle = probe_environment / "caller-oracle.json"
+    markers = probe_environment / "development-imports.jsonl"
+    dependency = _mcp_fixture(probe_environment, f'''
+import json
+import os
+import sys
+from pathlib import Path
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(json.dumps({{"dev_mode": sys.flags.dev_mode,
+                            "warnoptions": sys.warnoptions,
+                            "development_env_present": "PYTHONDEVMODE" in os.environ}}) + "\\n")
+b"ascii".decode("utf-8", errors="owned_invalid_decoder_policy")
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = ""
+    env.pop("PYTHONDEVMODE", None)
+    env["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
+    code = """
+import json
+import os
+import sys
+from pathlib import Path
+package_root, oracle, later_development = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor
+from agy_mcp.doctor import DoctorCheck
+if later_development != "unchanged":
+    os.environ["PYTHONDEVMODE"] = later_development
+try:
+    from agy_mcp import server
+except LookupError as exc:
+    caller_ok = False
+    lazy_state = "agy_mcp.server" not in sys.modules
+    error = str(exc)
+else:
+    caller_ok = True
+    lazy_state = all(x is None for x in (server._config, server._store, server._supervisor))
+    error = None
+Path(oracle).write_text(json.dumps({
+    "caller_ok": caller_ok, "lazy_state": lazy_state, "error": error,
+    "dev_mode": sys.flags.dev_mode, "warnoptions": sys.warnoptions,
+}), encoding="utf-8")
+doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
+doctor._check_backend = lambda *args, **kwargs: []
+doctor._check_auth = lambda safety: DoctorCheck("auth", True, "fixture")
+doctor._check_network_env = lambda safety: DoctorCheck("network_env", True, "fixture")
+doctor._check_session_store = lambda *args, **kwargs: DoctorCheck("session_store", True, "fixture")
+parent_environment = dict(os.environ)
+exit_code = doctor.main()
+assert parent_environment == dict(os.environ)
+raise SystemExit(exit_code)
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", *flags, "-c", code, str(package_root), str(oracle),
+         later_development if later_development is not None else "unchanged"],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.stderr == ""
+    caller = json.loads(oracle.read_text(encoding="utf-8"))
+    assert caller["caller_ok"] is caller_ok and caller["lazy_state"]
+    assert caller["dev_mode"] is development_mode
+    report = json.loads(result.stdout)
+    check = next(item for item in report["checks"] if item["name"] == "mcp_server")
+    assert check["ok"] is caller_ok, check["detail"]
+    assert report["healthy"] is caller_ok and result.returncode == (0 if caller_ok else 1)
+    if not caller_ok:
+        assert "LookupError" in check["detail"] and "unknown error handler" in caller["error"]
+    imports = [json.loads(line) for line in markers.read_text(encoding="utf-8").splitlines()]
+    assert len(imports) == 2
+    assert [item["dev_mode"] for item in imports] == [development_mode] * 2
+    assert [item["warnoptions"] for item in imports] == [caller["warnoptions"]] * 2
+    assert [item["development_env_present"] for item in imports] == [later_development is not None, False]
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
+@pytest.mark.parametrize(
     "flags,startup_warning,later_warning,caller_ok,probe_ok",
     [
         ([], "ignore", None, True, True),
@@ -361,6 +456,8 @@ raise SystemExit(doctor.main())
         (["-W", "ignore", "-W", "error"], "ignore", None, False, False),
         (["-W", "error", "-W", "ignore"], "error", None, True, True),
         (["-E", "-W", "error"], "ignore", None, False, False),
+        (["-X", "dev", "-Werror", "-Wignore"], "", None, True, True),
+        (["-X", "dev", "-Wignore", "-Werror"], "", None, False, False),
         ([], "ignore", "error", True, True),
         ([], "error", "ignore", False, False),
         ([], "", "error::DeprecationWarning", True, True),
