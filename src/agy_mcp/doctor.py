@@ -176,6 +176,14 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
     # Do not re-read environment settings already represented by the caller's modes.
     # Keep the other environment variables for fresh dependency overrides.
     probe_env = dict(os.environ)
+    probe_env.pop("PYTHONNOUSERSITE", None)
+    probe_env.pop("PYTHONSAFEPATH", None)
+    if "PYTHONHOME" in probe_env and not sys.flags.ignore_environment:
+        # Preserve the base installation, including an alternate home and venv.
+        probe_env["PYTHONHOME"] = (
+            sys.base_prefix if sys.base_prefix == sys.base_exec_prefix
+            else os.pathsep.join((sys.base_prefix, sys.base_exec_prefix))
+        )
     probe_env.pop("PYTHONDEVMODE", None)
     probe_env.pop("PYTHONOPTIMIZE", None)
     probe_env.pop("PYTHONDONTWRITEBYTECODE", None)

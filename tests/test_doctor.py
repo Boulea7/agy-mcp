@@ -1379,3 +1379,125 @@ print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
         assert "ModuleNotFoundError: No module named 'agy_doctor_user_site_fixture'" in check["detail"]
     assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
     assert not (probe_environment / "sessions").exists()
+
+
+@pytest.mark.parametrize("later_safe_path", [None, "1"])
+def test_probe_keeps_entrypoint_search_after_later_safe_path_environment(
+    probe_environment: Path, later_safe_path: str | None,
+):
+    package_root = _copy_probe_package(probe_environment)
+    cwd = _mcp_fixture(probe_environment, "raise ImportError('owned cwd SDK failure')\n")
+    env = dict(os.environ, PYTHONPATH=str(package_root), PYTHONSAFEPATH="")
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", """
+import json
+import os
+import sys
+from agy_mcp import doctor
+from agy_mcp.safety import SafetyPolicy
+assert not sys.flags.safe_path
+if sys.argv[1] != "unchanged":
+    os.environ["PYTHONSAFEPATH"] = sys.argv[1]
+try:
+    import agy_mcp.server
+except ImportError as exc:
+    assert str(exc) == "owned cwd SDK failure"
+else:
+    raise AssertionError("the caller must search its real entrypoint directory")
+environment = dict(os.environ)
+print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
+assert dict(os.environ) == environment
+""", later_safe_path or "unchanged"],
+        capture_output=True, text=True, env=env, cwd=cwd, timeout=15,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    check = json.loads(result.stdout)
+    assert check["ok"] is False
+    assert "ImportError: owned cwd SDK failure" in check["detail"]
+    assert not (probe_environment / "sessions").exists()
+
+
+@pytest.mark.parametrize("later_no_user_site", [None, "1"])
+def test_probe_keeps_user_site_after_later_environment_change(
+    probe_environment: Path, later_no_user_site: str | None,
+):
+    package_root = _copy_probe_package(probe_environment)
+    runtime = probe_environment / "interpreter"
+    venv.EnvBuilder(with_pip=False, system_site_packages=True).create(runtime)
+    executable = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    dependency = _mcp_fixture(probe_environment, """
+import agy_doctor_user_site_fixture
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+""")
+    dependencies = Path(importlib.util.find_spec("pydantic").origin).parent.parent
+    userbase = probe_environment / "userbase"
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([
+        str(dependency), str(package_root), str(dependencies),
+    ]), PYTHONUSERBASE=str(userbase), PYTHONNOUSERSITE="", PYTHONSAFEPATH="")
+    location = subprocess.run(
+        [str(executable), "-B", "-S", "-c", "import site; print(site.getusersitepackages())"],
+        capture_output=True, text=True, env=env, timeout=15,
+    )
+    assert location.returncode == 0 and location.stderr == ""
+    user_site = Path(location.stdout.strip())
+    assert user_site.is_relative_to(userbase)
+    user_site.mkdir(parents=True)
+    (user_site / "agy_doctor_user_site_fixture.py").write_text("", encoding="utf-8")
+    result = subprocess.run(
+        [str(executable), "-B", "-c", """
+import json
+import os
+import site
+import sys
+from agy_mcp import doctor
+from agy_mcp.safety import SafetyPolicy
+assert not sys.flags.no_user_site and site.ENABLE_USER_SITE
+if sys.argv[1] != "unchanged":
+    os.environ["PYTHONNOUSERSITE"] = sys.argv[1]
+from agy_mcp import server
+assert server._config is None and server._store is None and server._supervisor is None
+environment = dict(os.environ)
+print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
+assert dict(os.environ) == environment
+""", later_no_user_site or "unchanged"],
+        capture_output=True, text=True, env=env, cwd=probe_environment, timeout=15,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    check = json.loads(result.stdout)
+    assert check["ok"] is True
+    assert not (probe_environment / "sessions").exists()
+
+
+@pytest.mark.parametrize("flag", [None, "-E", "-I"])
+def test_probe_preserves_installation_after_later_python_home(
+    probe_environment: Path, flag: str | None,
+):
+    package_root = _copy_probe_package(probe_environment)
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    result = subprocess.run(
+        [sys.executable, "-B", *([flag] if flag else []), "-c", """
+import json
+import os
+import sys
+sys.path.insert(1 if not sys.flags.safe_path else 0, sys.argv[2])
+from agy_mcp import doctor
+from agy_mcp.safety import SafetyPolicy
+from agy_mcp import server
+assert server._config is None and server._store is None and server._supervisor is None
+os.environ["PYTHONHOME"] = sys.argv[1]
+environment = dict(os.environ)
+print(json.dumps(doctor._check_mcp_server(SafetyPolicy()).to_dict()))
+assert dict(os.environ) == environment
+""", str(probe_environment / "missing-home"), str(package_root)],
+        capture_output=True, text=True, env=dict(env, PYTHONPATH=str(package_root)),
+        cwd=probe_environment, timeout=15,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    check = json.loads(result.stdout)
+    assert check["ok"] is True
+    assert not (probe_environment / "sessions").exists()
