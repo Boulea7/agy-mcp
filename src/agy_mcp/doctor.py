@@ -11,11 +11,14 @@ operator's ``$HOME``-rooted path never lands in the MCP transcript.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +33,32 @@ from agy_mcp.adapters.gemini import GeminiCliBackend
 from agy_mcp.config import Config, get_config
 from agy_mcp.safety import SafetyPolicy
 from agy_mcp.session_store import SessionStore
+
+_SERVER_IMPORT_TIMEOUT = 5
+_SERVER_IMPORT_MAX_BYTES = 4096
+_SERVER_IMPORT_PROBE = """
+import sys
+
+if sys.path and sys.path[0] == "":
+    sys.path[0] = sys.argv[2]
+sys.path.insert(0, sys.argv[1])
+# Pin this package, then restore the caller's dependency search order.
+import agy_mcp
+sys.path.pop(0)
+import json
+from agy_mcp.config import SafetyConfig
+from agy_mcp.safety import SafetyPolicy
+
+safety = SafetyPolicy(config=SafetyConfig(redact_extra_patterns=json.load(sys.stdin)))
+try:
+    import agy_mcp.server
+except BaseException as exc:
+    result = {"ok": False, "detail": safety.redact(f"{type(exc).__name__}: {exc}")[:256]}
+else:
+    result = {"ok": True}
+with open(sys.argv[3], "w", encoding="utf-8") as output:
+    json.dump(result, output)
+"""
 
 
 @dataclass(slots=True)
@@ -89,6 +118,7 @@ def run_doctor(
     checks: list[DoctorCheck] = []
 
     checks.append(_check_python(sft))
+    checks.append(_check_mcp_server(sft))
     checks.append(_check_uv(sft))
     checks.extend(_check_backend(agy_adapter or AgyPrintBackend(safety=sft), sft, label="agy"))
     checks.extend(_check_backend(gemini_adapter or GeminiCliBackend(safety=sft), sft, label="gemini"))
@@ -108,6 +138,111 @@ def run_doctor(
 # ---------------------------------------------------------------------------
 # Individual probes
 # ---------------------------------------------------------------------------
+
+
+def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
+    """Check fresh server import and tool registration without starting services."""
+
+    ok = False
+    hint = "Check the agy-mcp installation and dependencies in this Python environment."
+    python_flags = ["-I"] if sys.flags.isolated else [
+        flag for flag, enabled in (
+            ("-E", sys.flags.ignore_environment),
+            ("-s", sys.flags.no_user_site),
+            ("-P", sys.flags.safe_path),
+        ) if enabled
+    ]
+    # Isolated mode does not imply -S; preserve that separate site restriction.
+    if sys.flags.no_site:
+        python_flags.append("-S")
+    if sys.flags.optimize:
+        python_flags.append("-OO" if sys.flags.optimize >= 2 else "-O")
+    if sys.flags.dev_mode:
+        python_flags.extend(["-X", "dev"])
+    # Respect the caller's disabled bytecode-write policy, including runtime changes.
+    if sys.dont_write_bytecode:
+        python_flags.append("-B")
+    if sys.pycache_prefix is not None:
+        python_flags.extend(["-X", f"pycache_prefix={sys.pycache_prefix}"])
+    if sys.flags.bytes_warning:
+        python_flags.append("-bb" if sys.flags.bytes_warning >= 2 else "-b")
+    if sys.flags.warn_default_encoding:
+        python_flags.extend(["-X", "warn_default_encoding"])
+    # Preserve effective decoding and decimal-conversion modes, including disabled settings.
+    python_flags.extend([
+        "-X", f"utf8={sys.flags.utf8_mode}",
+        "-X", f"int_max_str_digits={sys.get_int_max_str_digits()}",
+    ])
+    # Do not re-read environment settings already represented by the caller's modes.
+    # Keep the other environment variables for fresh dependency overrides.
+    probe_env = dict(os.environ)
+    probe_env.pop("PYTHONNOUSERSITE", None)
+    probe_env.pop("PYTHONSAFEPATH", None)
+    if "PYTHONHOME" in probe_env and not sys.flags.ignore_environment:
+        # Preserve the base installation, including an alternate home and venv.
+        probe_env["PYTHONHOME"] = (
+            sys.base_prefix if sys.base_prefix == sys.base_exec_prefix
+            else os.pathsep.join((sys.base_prefix, sys.base_exec_prefix))
+        )
+    probe_env.pop("PYTHONDEVMODE", None)
+    probe_env.pop("PYTHONOPTIMIZE", None)
+    probe_env.pop("PYTHONDONTWRITEBYTECODE", None)
+    probe_env.pop("PYTHONPYCACHEPREFIX", None)
+    probe_env.pop("PYTHONWARNINGS", None)
+    probe_env.pop("PYTHONWARNDEFAULTENCODING", None)
+    for warning_option in sys.warnoptions:
+        python_flags.extend(["-W", warning_option])
+    try:
+        with tempfile.TemporaryDirectory(prefix="agy-mcp-doctor-") as directory:
+            result_path = Path(directory) / "result.json"
+            completed = subprocess.run(
+                [
+                    sys.executable, *python_flags,
+                    "-c", _SERVER_IMPORT_PROBE,
+                    str(Path(__file__).resolve().parent.parent),
+                    sys.path[0] if sys.path else "", str(result_path),
+                ],
+                input=json.dumps(list(safety.config.redact_extra_patterns)).encode(),
+                env=probe_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_SERVER_IMPORT_TIMEOUT,
+            )
+            if completed.returncode != 0:
+                detail = f"Server import probe exited with code {completed.returncode}. {hint}"
+            else:
+                try:
+                    with result_path.open("rb") as result_file:
+                        raw = result_file.read(_SERVER_IMPORT_MAX_BYTES + 1)
+                except OSError as exc:
+                    raise ValueError("missing import diagnostic") from exc
+                if len(raw) > _SERVER_IMPORT_MAX_BYTES:
+                    raise ValueError("oversized import diagnostic")
+                result = json.loads(raw)
+                if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+                    raise ValueError("invalid import diagnostic")
+                ok = result["ok"]
+                if ok:
+                    detail = "Server module import and tool registration succeeded."
+                elif isinstance(result.get("detail"), str) and len(result["detail"]) <= 256:
+                    detail = f"Server import or tool registration failed: {result['detail']}. {hint}"
+                else:
+                    raise ValueError("invalid import diagnostic")
+    except subprocess.TimeoutExpired:
+        ok = False
+        detail = f"Server import probe timed out after {_SERVER_IMPORT_TIMEOUT} seconds. {hint}"
+    except OSError as exc:
+        ok = False
+        detail = f"Server import probe could not start: {exc}. {hint}"
+    except ValueError:
+        ok = False
+        detail = f"Server import probe did not produce a valid completion diagnostic. {hint}"
+    return DoctorCheck(
+        name="mcp_server",
+        ok=ok,
+        severity="info" if ok else "error",
+        detail=safety.redact(detail)[:512],
+    )
 
 
 def _check_python(safety: SafetyPolicy) -> DoctorCheck:

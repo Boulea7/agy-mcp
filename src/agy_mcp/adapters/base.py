@@ -334,15 +334,17 @@ class BaseAdapter(abc.ABC):
         self.bin_override = bin_override
         self.safety = safety or SafetyPolicy()
         self._capability: Capability | None = None
+        self._capability_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Capability detection
     # ------------------------------------------------------------------
 
     def detect(self, *, refresh: bool = False) -> Capability:
-        if self._capability is None or refresh:
-            self._capability = self._probe()
-        return self._capability
+        with self._capability_lock:
+            if self._capability is None or refresh:
+                self._capability = self._probe()
+            return self._capability
 
     @abc.abstractmethod
     def _probe(self) -> Capability:

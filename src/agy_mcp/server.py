@@ -18,6 +18,7 @@ calls sync tool functions inline. ``agy`` and ``agy_continue`` would block
 that loop while ``_bridge_run`` waits on a subprocess, so they are declared
 ``async def`` and dispatch the blocking work to a worker thread via
 :func:`anyio.to_thread.run_sync` (Phase 5 R1 arch P1.1).
+``agy_doctor`` likewise runs its blocking probes in a worker thread.
 
 Every tool routes its output through :class:`SafetyPolicy` before
 serialisation — adapter buffers, capability warnings, and error strings
@@ -32,6 +33,7 @@ import asyncio
 import re
 import threading
 import weakref
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -933,19 +935,22 @@ def agy_sessions_tool(limit: int = 50) -> SessionsToolResponse:
         "the MCP server)."
     ),
 )
-def agy_doctor_tool(force_refresh: bool = False) -> DoctorToolResponse:
+async def agy_doctor_tool(force_refresh: bool = False) -> DoctorToolResponse:
     config, safety, store, _supervisor_ = _ensure_state()
     try:
         agy_adapter, gemini_adapter = _ensure_adapters(force_refresh=force_refresh)
     except Exception as exc:  # noqa: BLE001 - never let init crash the tool
         return _wrapper_failure(safety, exc, DoctorToolResponse, version=__version__)
     try:
-        report = run_doctor(
-            config=config,
-            safety=safety,
-            agy_adapter=agy_adapter,
-            gemini_adapter=gemini_adapter,
-            session_store=store,
+        report = await anyio.to_thread.run_sync(
+            partial(
+                run_doctor,
+                config=config,
+                safety=safety,
+                agy_adapter=agy_adapter,
+                gemini_adapter=gemini_adapter,
+                session_store=store,
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         return _wrapper_failure(safety, exc, DoctorToolResponse, version=__version__)

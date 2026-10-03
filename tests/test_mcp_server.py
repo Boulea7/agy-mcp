@@ -942,7 +942,7 @@ def test_agy_sessions_rejects_negative_limit(reset_state):
 
 
 def test_agy_doctor_returns_structured_report(reset_state):
-    out = server.agy_doctor_tool()
+    out = _run_async(server.agy_doctor_tool())
     assert out["success"] is True
     assert "report" in out
     report = out["report"]
@@ -954,6 +954,179 @@ def test_agy_doctor_returns_structured_report(reset_state):
     # Doctor must NOT leak /Users/<user>/ paths
     for c in report["checks"]:
         assert "/Users/" not in c["detail"]
+
+
+def test_agy_doctor_initialises_on_loop_and_probes_in_worker(reset_state, monkeypatch):
+    from threading import get_ident
+
+    from agy_mcp.doctor import DoctorReport
+
+    loop_thread = get_ident()
+    ensure_state = server._ensure_state
+    ensure_adapters = server._ensure_adapters
+
+    def state_on_loop():
+        assert get_ident() == loop_thread
+        return ensure_state()
+
+    def adapters_on_loop(**kwargs):
+        assert get_ident() == loop_thread
+        return ensure_adapters(**kwargs)
+
+    def report_in_worker(**kwargs):
+        assert get_ident() != loop_thread
+        assert kwargs["config"] is reset_state.config
+        assert kwargs["safety"] is reset_state.safety
+        assert kwargs["session_store"] is reset_state.store
+        assert kwargs["agy_adapter"] is server._agy_adapter
+        assert kwargs["gemini_adapter"] is server._gemini_adapter
+        return DoctorReport(healthy=True, checks=[], platform="fixture", python_version="fixture")
+
+    monkeypatch.setattr(server, "_ensure_state", state_on_loop)
+    monkeypatch.setattr(server, "_ensure_adapters", adapters_on_loop)
+    monkeypatch.setattr(server, "run_doctor", report_in_worker)
+    out = _run_async(server.agy_doctor_tool(force_refresh=True))
+    assert out.success
+    assert out.report["healthy"] is True
+
+
+@pytest.mark.parametrize("failure_stage", ["adapters", "report"])
+def test_agy_doctor_keeps_redacted_failure_envelope(reset_state, monkeypatch, failure_stage):
+    def fail(**kwargs):
+        raise ValueError("probe failed: Bearer synthetic-doctor-credential")
+
+    target = "_ensure_adapters" if failure_stage == "adapters" else "run_doctor"
+    monkeypatch.setattr(server, target, fail)
+    out = _run_async(server.agy_doctor_tool(force_refresh=True))
+    assert not out.success
+    assert out.report is None
+    assert out.version == server.__version__
+    assert "probe failed:" in out.error
+    assert "synthetic-doctor-credential" not in out.error
+
+
+def test_agy_doctor_refresh_keeps_inflight_adapter_separate(reset_state, monkeypatch):
+    from threading import Event
+
+    from agy_mcp import doctor
+    from agy_mcp.doctor import DoctorCheck
+
+    probe_started = Event()
+    release_probe = Event()
+    probed_adapters = []
+
+    def probe(adapter):
+        probed_adapters.append(adapter)
+        if len(probed_adapters) == 1:
+            probe_started.set()
+            assert release_probe.wait(timeout=5)
+        return Capability(backend="agy", bin_path="fixture-agy", authenticated=True)
+
+    monkeypatch.setattr(server.AgyPrintBackend, "_probe", probe)
+    monkeypatch.setattr(
+        doctor, "_check_mcp_server", lambda safety: DoctorCheck("mcp_server", True, "fixture"),
+    )
+    monkeypatch.setattr(doctor, "_check_uv", lambda safety: DoctorCheck("uv", True, "fixture"))
+    monkeypatch.setattr(doctor, "_check_auth", lambda safety: DoctorCheck("auth", True, "fixture"))
+    monkeypatch.setattr(
+        doctor, "_check_network_env", lambda safety: DoctorCheck("network_env", True, "fixture"),
+    )
+
+    async def refresh_during_probe():
+        first = asyncio.create_task(server.agy_doctor_tool())
+        try:
+            async def wait_for_probe():
+                while not probe_started.is_set():
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_probe(), timeout=3)
+            old_adapter = server._agy_adapter
+            refreshed = await server.agy_doctor_tool(force_refresh=True)
+            new_adapter = server._agy_adapter
+            cached = await server.agy_doctor_tool()
+            assert not first.done()
+            assert old_adapter is not new_adapter
+            assert server._agy_adapter is new_adapter
+            assert probed_adapters == [old_adapter, new_adapter]
+            assert refreshed.success and cached.success
+        finally:
+            release_probe.set()
+            initial = await first
+        assert initial.success
+        assert server._agy_adapter is new_adapter
+
+    _run_async(refresh_during_probe())
+
+
+def test_public_mcp_calls_respond_while_doctor_import_times_out(reset_state, monkeypatch, tmp_path):
+    from agy_mcp import doctor
+    from agy_mcp.doctor import DoctorCheck
+
+    popen = subprocess.Popen
+    children = []
+
+    def observe_child(argv, **kwargs):
+        process = popen(argv, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(doctor.subprocess, "Popen", observe_child)
+    dependency = tmp_path / "dependency" / "mcp" / "server"
+    dependency.mkdir(parents=True)
+    pid_path = tmp_path / "probe-pid"
+    (dependency.parent / "__init__.py").write_text("", encoding="utf-8")
+    (dependency / "__init__.py").write_text("", encoding="utf-8")
+    (dependency / "fastmcp.py").write_text(
+        f"import os,time\nfrom pathlib import Path\n"
+        f"Path({str(pid_path)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "probe-config.toml"
+    config.write_text("", encoding="utf-8")
+    scratch = tmp_path / "diagnostics"
+    scratch.mkdir()
+    source = Path(doctor.__file__).resolve().parent.parent
+    monkeypatch.setenv("PYTHONPATH", str(dependency.parents[1]) + os.pathsep + str(source))
+    monkeypatch.setenv("AGY_MCP_CONFIG", str(config))
+    monkeypatch.setenv("AGY_MCP_SESSION_ROOT", str(tmp_path / "probe-sessions"))
+    monkeypatch.setattr(doctor.tempfile, "tempdir", str(scratch))
+    monkeypatch.setattr(doctor, "_SERVER_IMPORT_TIMEOUT", 1)
+    monkeypatch.setattr(server, "_ensure_adapters", lambda **kwargs: (object(), object()))
+    monkeypatch.setattr(doctor, "_check_uv", lambda safety: DoctorCheck("uv", True, "fixture"))
+    monkeypatch.setattr(doctor, "_check_backend", lambda adapter, safety, label: [])
+    monkeypatch.setattr(doctor, "_check_auth", lambda safety: DoctorCheck("auth", True, "fixture"))
+    monkeypatch.setattr(
+        doctor, "_check_network_env", lambda safety: DoctorCheck("network_env", True, "fixture"),
+    )
+
+    async def concurrent_calls():
+        pending = asyncio.create_task(server.mcp.call_tool("agy_doctor", {}))
+        try:
+            async def wait_for_probe():
+                while not pid_path.exists():
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_probe(), timeout=3)
+            status, cancel = await asyncio.gather(
+                server.mcp.call_tool("agy_status", {"job_id": "job_owned_fixture"}),
+                server.mcp.call_tool("agy_cancel", {"job_id": "job_owned_fixture"}),
+            )
+            assert not pending.done(), "status/cancel waited for the doctor probe to finish"
+        finally:
+            report = await pending
+        return report[1], status[1], cancel[1]
+
+    report, status, cancel = _run_async(concurrent_calls())
+    assert report["success"] is True
+    assert status["success"] is False
+    assert cancel["success"] is True and cancel["signalled"] is False
+    check = next(item for item in report["report"]["checks"] if item["name"] == "mcp_server")
+    assert check["ok"] is False and "timed out after 1 seconds" in check["detail"]
+    assert len(children) == 1
+    assert int(pid_path.read_text()) == children[0].pid
+    assert children[0].returncode is not None and children[0].returncode != 0
+    assert not list(scratch.iterdir())
+    assert config.read_text() == "" and not (tmp_path / "probe-sessions").exists()
 
 
 def test_doctor_network_env_summarises_proxy_without_credentials(
@@ -1550,10 +1723,10 @@ def test_agy_install_skill_corrupted_bundle_emits_warning(reset_state, monkeypat
 def test_agy_doctor_force_refresh_rebuilds_adapters(reset_state):
     """Phase 5 R2 sec P2-1: force_refresh drops cached singletons."""
 
-    out1 = server.agy_doctor_tool()
+    out1 = _run_async(server.agy_doctor_tool())
     assert out1["success"] is True
     cached_first = server._agy_adapter
-    out2 = server.agy_doctor_tool(force_refresh=True)
+    out2 = _run_async(server.agy_doctor_tool(force_refresh=True))
     assert out2["success"] is True
     cached_second = server._agy_adapter
     assert cached_first is not cached_second
