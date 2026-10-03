@@ -157,10 +157,20 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
         python_flags.append("-S")
     if sys.flags.optimize:
         python_flags.append("-OO" if sys.flags.optimize >= 2 else "-O")
-    # Replay startup warning options without re-reading a later PYTHONWARNINGS.
+    if sys.flags.bytes_warning:
+        python_flags.append("-bb" if sys.flags.bytes_warning >= 2 else "-b")
+    if sys.flags.warn_default_encoding:
+        python_flags.extend(["-X", "warn_default_encoding"])
+    # Preserve effective decoding and decimal-conversion modes, including disabled settings.
+    python_flags.extend([
+        "-X", f"utf8={sys.flags.utf8_mode}",
+        "-X", f"int_max_str_digits={sys.get_int_max_str_digits()}",
+    ])
+    # Replay startup warning settings without re-reading later warning environment changes.
     # Keep the other environment variables for fresh dependency overrides.
     probe_env = dict(os.environ)
     probe_env.pop("PYTHONWARNINGS", None)
+    probe_env.pop("PYTHONWARNDEFAULTENCODING", None)
     for warning_option in sys.warnoptions:
         python_flags.extend(["-W", warning_option])
     try:

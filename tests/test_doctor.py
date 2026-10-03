@@ -398,6 +398,307 @@ raise SystemExit(exit_code)
     assert not (probe_environment / "sessions").exists()
 
 
+@pytest.mark.parametrize(
+    "flags,bytes_mode,caller_ok",
+    [
+        ([], 0, True),
+        (["-b"], 1, True),
+        (["-bb"], 2, False),
+        (["-b", "-W", "error::BytesWarning"], 1, True),
+        (["-b", "-W", "default::BytesWarning", "-W", "error::BytesWarning"], 1, False),
+        (["-bb", "-W", "error::BytesWarning", "-W", "ignore::BytesWarning"], 2, True),
+    ],
+)
+def test_public_doctor_preserves_bytes_warning_generation_and_filter_order(
+    probe_environment: Path, flags: list[str], bytes_mode: int, caller_ok: bool,
+):
+    package_root = _copy_probe_package(probe_environment)
+    oracle = probe_environment / "caller-oracle.json"
+    markers = probe_environment / "bytes-warning-imports.jsonl"
+    dependency = _mcp_fixture(probe_environment, f'''
+import json
+import sys
+from pathlib import Path
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(json.dumps({{"bytes_warning": sys.flags.bytes_warning,
+                            "warnoptions": sys.warnoptions}}) + "\\n")
+comparison = b"controlled SDK bytes" == "controlled SDK bytes"
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = ""
+    env.pop("PYTHONDEVMODE", None)
+    env["PYTHONWARNINGS"] = "ignore::UserWarning"
+    code = """
+import json
+import os
+import sys
+from pathlib import Path
+package_root, oracle = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor
+from agy_mcp.doctor import DoctorCheck
+try:
+    from agy_mcp import server
+except BytesWarning as exc:
+    caller_ok = False
+    lazy_state = "agy_mcp.server" not in sys.modules
+    error = str(exc)
+else:
+    caller_ok = True
+    lazy_state = all(x is None for x in (server._config, server._store, server._supervisor))
+    error = None
+Path(oracle).write_text(json.dumps({
+    "caller_ok": caller_ok, "lazy_state": lazy_state, "error": error,
+    "bytes_warning": sys.flags.bytes_warning, "warnoptions": sys.warnoptions,
+}), encoding="utf-8")
+doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
+doctor._check_backend = lambda *args, **kwargs: []
+doctor._check_auth = lambda safety: DoctorCheck("auth", True, "fixture")
+doctor._check_network_env = lambda safety: DoctorCheck("network_env", True, "fixture")
+doctor._check_session_store = lambda *args, **kwargs: DoctorCheck("session_store", True, "fixture")
+warning_environment = os.environ["PYTHONWARNINGS"]
+exit_code = doctor.main()
+assert os.environ["PYTHONWARNINGS"] == warning_environment
+raise SystemExit(exit_code)
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", *flags, "-c", code, str(package_root), str(oracle)],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    caller = json.loads(oracle.read_text())
+    assert caller["caller_ok"] is caller_ok and caller["lazy_state"]
+    assert caller["bytes_warning"] == bytes_mode
+    if flags in (["-b"], ["-b", "-W", "error::BytesWarning"]):
+        assert "BytesWarning: Comparison between bytes and string" in result.stderr
+    else:
+        assert result.stderr == ""
+    report = json.loads(result.stdout)
+    check = next(item for item in report["checks"] if item["name"] == "mcp_server")
+    assert check["ok"] is caller_ok, check["detail"]
+    assert report["healthy"] is caller_ok and result.returncode == (0 if caller_ok else 1)
+    if not caller_ok:
+        assert "BytesWarning: Comparison between bytes and string" in check["detail"]
+    imports = [json.loads(line) for line in markers.read_text().splitlines()]
+    assert len(imports) == 2
+    assert [item["warnoptions"] for item in imports] == [caller["warnoptions"]] * 2
+    assert [item["bytes_warning"] for item in imports] == [bytes_mode] * 2
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
+@pytest.mark.parametrize(
+    "flags,encoding_mode,later_encoding,caller_ok",
+    [
+        (["-W", "error::EncodingWarning"], 0, None, True),
+        (["-X", "warn_default_encoding", "-W", "error::EncodingWarning"], 1, None, False),
+        (["-W", "error::EncodingWarning"], 0, "1", True),
+    ],
+)
+def test_public_doctor_preserves_startup_encoding_warning_generation(
+    probe_environment: Path, flags: list[str], encoding_mode: int,
+    later_encoding: str | None, caller_ok: bool,
+):
+    package_root = _copy_probe_package(probe_environment)
+    oracle = probe_environment / "caller-oracle.json"
+    markers = probe_environment / "encoding-warning-imports.jsonl"
+    ascii_file = probe_environment / "owned-ascii.txt"
+    ascii_file.write_text("owned ASCII contents", encoding="utf-8")
+    dependency = _mcp_fixture(probe_environment, f'''
+import json
+import os
+import sys
+from pathlib import Path
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(json.dumps({{"warn_default_encoding": sys.flags.warn_default_encoding,
+                            "warnoptions": sys.warnoptions,
+                            "encoding_env_present": "PYTHONWARNDEFAULTENCODING" in os.environ}}) + "\\n")
+with open({str(ascii_file)!r}) as input_file:
+    contents = input_file.read()
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = ""
+    env.pop("PYTHONDEVMODE", None)
+    env.pop("PYTHONWARNDEFAULTENCODING", None)
+    env["PYTHONWARNINGS"] = "ignore::UserWarning"
+    code = """
+import json
+import os
+import sys
+from pathlib import Path
+package_root, oracle, later_encoding = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor
+from agy_mcp.doctor import DoctorCheck
+if later_encoding != "unchanged":
+    os.environ["PYTHONWARNDEFAULTENCODING"] = later_encoding
+try:
+    from agy_mcp import server
+except EncodingWarning as exc:
+    caller_ok = False
+    lazy_state = "agy_mcp.server" not in sys.modules
+    error = str(exc)
+else:
+    caller_ok = True
+    lazy_state = all(x is None for x in (server._config, server._store, server._supervisor))
+    error = None
+Path(oracle).write_text(json.dumps({
+    "caller_ok": caller_ok, "lazy_state": lazy_state, "error": error,
+    "warn_default_encoding": sys.flags.warn_default_encoding, "warnoptions": sys.warnoptions,
+}), encoding="utf-8")
+doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
+doctor._check_backend = lambda *args, **kwargs: []
+doctor._check_auth = lambda safety: DoctorCheck("auth", True, "fixture")
+doctor._check_network_env = lambda safety: DoctorCheck("network_env", True, "fixture")
+doctor._check_session_store = lambda *args, **kwargs: DoctorCheck("session_store", True, "fixture")
+warning_environment = os.environ["PYTHONWARNINGS"]
+encoding_environment = os.environ.get("PYTHONWARNDEFAULTENCODING")
+exit_code = doctor.main()
+assert os.environ["PYTHONWARNINGS"] == warning_environment
+assert os.environ.get("PYTHONWARNDEFAULTENCODING") == encoding_environment
+raise SystemExit(exit_code)
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", *flags, "-c", code, str(package_root), str(oracle),
+         later_encoding if later_encoding is not None else "unchanged"],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.stderr == ""
+    caller = json.loads(oracle.read_text())
+    assert caller["caller_ok"] is caller_ok and caller["lazy_state"]
+    assert caller["warn_default_encoding"] == encoding_mode
+    report = json.loads(result.stdout)
+    check = next(item for item in report["checks"] if item["name"] == "mcp_server")
+    assert check["ok"] is caller_ok, check["detail"]
+    assert report["healthy"] is caller_ok and result.returncode == (0 if caller_ok else 1)
+    if not caller_ok:
+        assert "EncodingWarning" in check["detail"] and "encoding" in caller["error"]
+    imports = [json.loads(line) for line in markers.read_text().splitlines()]
+    assert len(imports) == 2
+    assert [item["warnoptions"] for item in imports] == [caller["warnoptions"]] * 2
+    assert [item["warn_default_encoding"] for item in imports] == [encoding_mode] * 2
+    assert [item["encoding_env_present"] for item in imports] == [later_encoding is not None, False]
+    assert ascii_file.read_text(encoding="utf-8") == "owned ASCII contents"
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
+@pytest.mark.parametrize(
+    "operation,flags,environment_mode,effective_mode,caller_ok",
+    [
+        ("utf8", ["-X", "utf8=0"], "1", 0, False),
+        ("utf8", ["-X", "utf8=1"], "0", 1, True),
+        ("integer", ["-X", "int_max_str_digits=640"], "0", 640, False),
+        ("integer", ["-X", "int_max_str_digits=0"], "640", 0, True),
+    ],
+)
+def test_public_doctor_preserves_effective_text_and_integer_conversion_modes(
+    probe_environment: Path, operation: str, flags: list[str],
+    environment_mode: str, effective_mode: int, caller_ok: bool,
+):
+    package_root = _copy_probe_package(probe_environment)
+    oracle = probe_environment / "caller-oracle.json"
+    markers = probe_environment / "builtin-imports.jsonl"
+    text_file = probe_environment / "owned-utf8-digit.txt"
+    text_file.write_text("\u0661", encoding="utf-8")
+    dependency = _mcp_fixture(probe_environment, f'''
+import json
+import os
+import sys
+from pathlib import Path
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(json.dumps({{"utf8": sys.flags.utf8_mode,
+                            "integer": sys.get_int_max_str_digits(),
+                            "raw_utf8_env": os.environ.get("PYTHONUTF8"),
+                            "raw_integer_env": os.environ.get("PYTHONINTMAXSTRDIGITS")}}) + "\\n")
+if {operation!r} == "utf8":
+    with open({str(text_file)!r}) as input_file:
+        value = int(input_file.read())
+else:
+    value = int("1" * 700)
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env["PYTHONSAFEPATH"] = ""
+    for name in ("PYTHONUTF8", "PYTHONINTMAXSTRDIGITS", "PYTHONWARNDEFAULTENCODING", "PYTHONDEVMODE"):
+        env.pop(name, None)
+    env.update({"LC_ALL": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONWARNINGS": "ignore"})
+    env["PYTHONUTF8" if operation == "utf8" else "PYTHONINTMAXSTRDIGITS"] = environment_mode
+    code = """
+import json
+import os
+import sys
+from pathlib import Path
+package_root, oracle = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor
+from agy_mcp.doctor import DoctorCheck
+try:
+    from agy_mcp import server
+except (UnicodeDecodeError, ValueError) as exc:
+    caller_ok = False
+    lazy_state = "agy_mcp.server" not in sys.modules
+    error = str(exc)
+else:
+    caller_ok = True
+    lazy_state = all(x is None for x in (server._config, server._store, server._supervisor))
+    error = None
+Path(oracle).write_text(json.dumps({
+    "caller_ok": caller_ok, "lazy_state": lazy_state, "error": error,
+    "utf8": sys.flags.utf8_mode, "integer": sys.get_int_max_str_digits(),
+}), encoding="utf-8")
+doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
+doctor._check_backend = lambda *args, **kwargs: []
+doctor._check_auth = lambda safety: DoctorCheck("auth", True, "fixture")
+doctor._check_network_env = lambda safety: DoctorCheck("network_env", True, "fixture")
+doctor._check_session_store = lambda *args, **kwargs: DoctorCheck("session_store", True, "fixture")
+environment = {key: os.environ.get(key) for key in (
+    "PYTHONUTF8", "PYTHONINTMAXSTRDIGITS", "PYTHONWARNINGS", "PYTHONPATH"
+)}
+exit_code = doctor.main()
+assert {key: os.environ.get(key) for key in environment} == environment
+raise SystemExit(exit_code)
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", *flags, "-c", code, str(package_root), str(oracle)],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.stderr == ""
+    caller = json.loads(oracle.read_text())
+    assert caller["caller_ok"] is caller_ok and caller["lazy_state"]
+    assert caller[operation] == effective_mode
+    report = json.loads(result.stdout)
+    check = next(item for item in report["checks"] if item["name"] == "mcp_server")
+    assert check["ok"] is caller_ok, check["detail"]
+    assert report["healthy"] is caller_ok and result.returncode == (0 if caller_ok else 1)
+    if not caller_ok:
+        assert "UnicodeDecodeError" in check["detail"] or "ValueError" in check["detail"]
+    imports = [json.loads(line) for line in markers.read_text().splitlines()]
+    assert len(imports) == 2
+    assert [item[operation] for item in imports] == [effective_mode] * 2
+    assert [item["raw_utf8_env"] for item in imports] == [env.get("PYTHONUTF8")] * 2
+    assert [item["raw_integer_env"] for item in imports] == [env.get("PYTHONINTMAXSTRDIGITS")] * 2
+    assert text_file.read_text(encoding="utf-8") == "\u0661"
+    assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
+    assert not (probe_environment / "sessions").exists()
+
+
 def test_timeout_kills_and_reaps_direct_child_and_removes_diagnostic_directory(
     probe_environment: Path, monkeypatch: pytest.MonkeyPatch,
 ):
