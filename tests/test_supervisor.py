@@ -580,6 +580,133 @@ def test_start_execute_runs_inside_retained_worktree(tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("window", ["before_registration", "before_thread_start"])
+def test_status_preserves_running_job_during_startup(tmp_path: Path, monkeypatch, window):
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    sup = _supervisor_with(adapter, tmp_path=tmp_path)
+    boundary = threading.Event()
+    release_start = threading.Event()
+    backend_entered = threading.Event()
+    release_backend = threading.Event()
+    original_run = adapter.run
+    job_id = "job_startup_status"
+    responses = []
+    errors = []
+    handle = None
+
+    def run_and_hold(*args, **kwargs):
+        backend_entered.set()
+        assert release_backend.wait(timeout=5)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "run", run_and_hold)
+    if window == "before_registration":
+        original_create = sup.store.create_job
+
+        def create_and_hold(**kwargs):
+            record = original_create(**kwargs)
+            boundary.set()
+            assert release_start.wait(timeout=5)
+            return record
+
+        monkeypatch.setattr(sup.store, "create_job", create_and_hold)
+    else:
+        original_start = threading.Thread.start
+
+        def start_and_hold(thread):
+            if thread.name == "supervisor-" + job_id:
+                boundary.set()
+                assert release_start.wait(timeout=5)
+            return original_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start_and_hold)
+
+    def call_start():
+        try:
+            responses.append(sup.start(BridgeRequest(prompt="hello", cwd=str(tmp_path)), job_id=job_id))
+        except Exception as exc:
+            errors.append(exc)
+
+    starter = threading.Thread(target=call_start)
+    starter.start()
+    try:
+        assert boundary.wait(timeout=3)
+        with sup._lock:
+            handle = sup._jobs.get(job_id)
+            assert job_id in sup._starting_jobs
+            assert (handle is not None) == (window == "before_thread_start")
+            assert handle is None or not handle.thread.is_alive()
+        observed = sup.status(job_id)
+        assert observed.status == "running"
+        assert observed.error is None
+        assert sup.store.get_job(job_id).status == "running"
+        assert sup.cancel(job_id) is False
+        release_start.set()
+        starter.join(timeout=3)
+        assert not starter.is_alive() and not errors
+        assert len(responses) == 1 and responses[0].success
+        assert backend_entered.wait(timeout=3)
+        with sup._lock:
+            handle = sup._jobs[job_id]
+        assert sup.status(job_id).status == "running"
+    finally:
+        release_start.set()
+        release_backend.set()
+        starter.join(timeout=3)
+        with sup._lock:
+            handle = handle or sup._jobs.get(job_id)
+        if handle is not None and handle.thread.ident is not None:
+            handle.thread.join(timeout=3)
+        assert not starter.is_alive()
+        assert handle is None or not handle.thread.is_alive()
+
+    final = sup.status(job_id)
+    assert final.status == "completed"
+    assert final.exit_code == 0
+    assert final.error is None
+    assert not sup._jobs and not sup._starting_jobs
+
+
+def test_status_reconciles_local_orphan_after_duplicate_start_returns(tmp_path: Path, monkeypatch):
+    adapter = _ScriptedAdapter(capability=_capability(), events=[])
+    sup = _supervisor_with(adapter, tmp_path=tmp_path)
+    job_id = "job_orphan_duplicate"
+    sup.store.create_job(
+        job_id=job_id,
+        cwd=str(tmp_path),
+        extra={"supervisor": {"instance_id": sup._instance_id, "pid": os.getpid()}},
+    )
+    boundary = threading.Event()
+    release_start = threading.Event()
+    original_factory = sup._adapter_factory
+    responses = []
+
+    def factory_and_hold(*args):
+        boundary.set()
+        assert release_start.wait(timeout=5)
+        return original_factory(*args)
+
+    monkeypatch.setattr(sup, "_adapter_factory", factory_and_hold)
+    starter = threading.Thread(
+        target=lambda: responses.append(
+            sup.start(BridgeRequest(prompt="hello", cwd=str(tmp_path)), job_id=job_id),
+        ),
+    )
+    starter.start()
+    try:
+        assert boundary.wait(timeout=3)
+        assert sup.status(job_id).status == "running"
+    finally:
+        release_start.set()
+        starter.join(timeout=3)
+    assert not starter.is_alive()
+    assert len(responses) == 1 and responses[0].success is False
+    assert not sup._jobs and not sup._starting_jobs
+    final = sup.status(job_id)
+    assert final.status == "failed"
+    assert final.error == _RECONCILE_ERROR
+
+
 def test_status_marks_crashed_worker_as_failed(tmp_path: Path):
     """If the worker thread dies without finalizing (impossible in normal
     code paths but worth covering), status() must rewrite the record."""
