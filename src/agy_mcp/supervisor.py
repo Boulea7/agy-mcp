@@ -520,12 +520,20 @@ class Supervisor:
                 return self._public_record(record)
             if fresh.status != "running":
                 return self._public_record(fresh)
+            fresh_owner_identity = _supervisor_owner_identity(fresh)
+            if (
+                job_id in self._starting_jobs
+                and fresh_owner_identity is not None
+                and fresh_owner_identity[0] == self._instance_id
+            ):
+                # A local start may not have registered or started its worker yet.
+                return self._public_record(fresh)
             handle = self._jobs.get(job_id)
             handle_alive = handle is not None and handle.thread.is_alive()
             if handle_alive:
                 # Still under management — no reconciliation needed.
                 return self._public_record(fresh)
-            if foreign_owner_live or _supervisor_owner_identity(fresh) != owner_identity:
+            if foreign_owner_live or fresh_owner_identity != owner_identity:
                 return self._public_record(fresh)
             finalised = self.store.finalize_job(
                 job_id,
