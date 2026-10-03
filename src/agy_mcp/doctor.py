@@ -171,9 +171,12 @@ def _check_mcp_server(safety: SafetyPolicy) -> DoctorCheck:
         "-X", f"utf8={sys.flags.utf8_mode}",
         "-X", f"int_max_str_digits={sys.get_int_max_str_digits()}",
     ])
-    # Replay startup warning settings without re-reading later warning environment changes.
+    # Do not re-read environment settings already represented by the caller's modes.
     # Keep the other environment variables for fresh dependency overrides.
     probe_env = dict(os.environ)
+    probe_env.pop("PYTHONOPTIMIZE", None)
+    probe_env.pop("PYTHONDONTWRITEBYTECODE", None)
+    probe_env.pop("PYTHONPYCACHEPREFIX", None)
     probe_env.pop("PYTHONWARNINGS", None)
     probe_env.pop("PYTHONWARNDEFAULTENCODING", None)
     for warning_option in sys.warnoptions:

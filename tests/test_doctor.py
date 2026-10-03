@@ -217,6 +217,60 @@ print(json.dumps(_check_mcp_server(SafetyPolicy()).to_dict()))
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in protected} == before
 
 
+@pytest.mark.parametrize("later_optimization", [None, "1"])
+def test_public_doctor_does_not_reapply_later_optimization_environment(
+    probe_environment: Path, later_optimization: str | None,
+):
+    package_root = _copy_probe_package(probe_environment)
+    markers = probe_environment / "optimization-imports"
+    dependency = _mcp_fixture(probe_environment, f'''
+from pathlib import Path
+with Path({str(markers)!r}).open("a", encoding="utf-8") as output:
+    output.write(str(__debug__) + "\\n")
+assert not __debug__, "SDK debug assertion prevents import"
+class FastMCP:
+    def __init__(self, *args, **kwargs):
+        pass
+    def tool(self, *args, **kwargs):
+        return lambda function: function
+''')
+    env = dict(os.environ)
+    env.pop("PYTHONOPTIMIZE", None)
+    env["PYTHONSAFEPATH"] = ""
+    code = """
+import json
+import os
+import sys
+package_root, later_optimization = sys.argv[1:]
+sys.path.insert(1, package_root)
+from agy_mcp import doctor
+from agy_mcp.safety import SafetyPolicy
+if later_optimization != "none":
+    os.environ["PYTHONOPTIMIZE"] = later_optimization
+environment = dict(os.environ)
+try:
+    from agy_mcp import server
+except AssertionError as exc:
+    assert str(exc) == "SDK debug assertion prevents import"
+else:
+    raise AssertionError("the caller should fail the SDK's real assertion")
+check = doctor._check_mcp_server(SafetyPolicy())
+assert dict(os.environ) == environment
+print(json.dumps(check.to_dict()))
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", code, str(package_root), later_optimization or "none"],
+        cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode == 0 and result.stderr == ""
+    check = json.loads(result.stdout)
+    assert check["ok"] is False, check["detail"]
+    assert "AssertionError: SDK debug assertion prevents import" in check["detail"]
+    assert markers.read_text().splitlines() == ["True"] * 2
+    assert not (probe_environment / "sessions").exists()
+
+
 @pytest.mark.parametrize(
     "flags,optimization,environment_optimization",
     [
@@ -700,16 +754,18 @@ raise SystemExit(exit_code)
 
 
 @pytest.mark.parametrize(
-    "flags,disable_at_runtime,disabled,explicit_prefix",
+    "flags,runtime_policy,disabled,explicit_prefix",
     [
-        pytest.param(["-B"], False, True, False, id="explicit_B"),
-        pytest.param([], True, True, False, id="runtime_disabled"),
-        pytest.param([], False, False, False, id="normal_write_control"),
-        pytest.param([], False, False, True, id="explicit_cache_prefix"),
+        pytest.param(["-B"], "unchanged", True, False, id="explicit_B"),
+        pytest.param([], "disabled", True, False, id="runtime_disabled"),
+        pytest.param([], "unchanged", False, False, id="normal_write_control"),
+        pytest.param([], "unchanged", False, True, id="explicit_cache_prefix"),
+        pytest.param([], "enabled", False, False, id="runtime_enabled_despite_environment"),
+        pytest.param(["-B"], "default_prefix", True, False, id="runtime_default_prefix_despite_environment"),
     ],
 )
 def test_public_doctor_preserves_caller_bytecode_cache_policy(
-    probe_environment: Path, flags: list[str], disable_at_runtime: bool,
+    probe_environment: Path, flags: list[str], runtime_policy: str,
     disabled: bool, explicit_prefix: bool,
 ):
     package_root = _copy_probe_package(probe_environment)
@@ -732,6 +788,8 @@ class FastMCP:
 ''')
     env = dict(os.environ)
     env.pop("PYTHONDONTWRITEBYTECODE", None)
+    if runtime_policy == "enabled":
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONPYCACHEPREFIX"] = str(fallback_prefix if explicit_prefix else cache_prefix)
     env["PYTHONSAFEPATH"] = ""
     code = """
@@ -739,17 +797,21 @@ import json
 import os
 import sys
 from pathlib import Path
-package_root, oracle, disable_at_runtime = sys.argv[1:]
+package_root, oracle, runtime_policy = sys.argv[1:]
 sys.path.insert(1, package_root)
 from agy_mcp import doctor
 from agy_mcp.doctor import DoctorCheck
-if disable_at_runtime == "True":
+if runtime_policy == "disabled":
     sys.dont_write_bytecode = True
+elif runtime_policy == "enabled":
+    sys.dont_write_bytecode = False
+elif runtime_policy == "default_prefix":
+    sys.pycache_prefix = None
 from agy_mcp import server
-prefix = Path(sys.pycache_prefix)
+prefix = Path(sys.pycache_prefix) if sys.pycache_prefix is not None else None
 Path(oracle).write_text(json.dumps({
     "disabled": sys.dont_write_bytecode,
-    "cache_before": sorted(str(path) for path in prefix.rglob("*.pyc")),
+    "cache_before": sorted(str(path) for path in prefix.rglob("*.pyc")) if prefix else [],
     "lazy_state": [server._config, server._store, server._supervisor],
 }), encoding="utf-8")
 doctor._check_uv = lambda safety: DoctorCheck("uv", True, "fixture")
@@ -766,7 +828,7 @@ raise SystemExit(exit_code)
     if explicit_prefix:
         caller_flags.extend(["-X", f"pycache_prefix={cache_prefix}"])
     result = subprocess.run(
-        [sys.executable, *caller_flags, "-c", code, str(package_root), str(oracle), str(disable_at_runtime)],
+        [sys.executable, *caller_flags, "-c", code, str(package_root), str(oracle), runtime_policy],
         cwd=dependency, env=env, capture_output=True, text=True, timeout=15,
     )
 
@@ -781,8 +843,9 @@ raise SystemExit(exit_code)
     else:
         assert caches
     assert not fallback_prefix.exists()
+    expected_prefix = None if runtime_policy == "default_prefix" else str(cache_prefix)
     assert [json.loads(line) for line in markers.read_text().splitlines()] == [
-        {"disabled": disabled, "prefix": str(cache_prefix)}
+        {"disabled": disabled, "prefix": expected_prefix}
     ] * 2
     assert (probe_environment / "config.toml").read_text(encoding="utf-8") == ""
     assert not (probe_environment / "sessions").exists()
