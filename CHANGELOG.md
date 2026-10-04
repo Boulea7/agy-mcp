@@ -6,6 +6,46 @@ uses [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-10-04
+
+### Added
+
+- `agy_status`, `agy_read`, `agy_result`, and `agy_cancel` accept unique
+  job-ID prefixes. Exact IDs retain priority, and ambiguous prefixes return
+  structured errors.
+- `agy_doctor` checks fresh MCP server import and tool registration with
+  bounded, redacted diagnostics.
+
+### Fixed
+
+- Include the existing `mcp[cli]>=1.21.2,<2` dependency bound so fresh installs
+  remain compatible with the FastMCP server, addressing the installation
+  issue reported in [#12](https://github.com/Boulea7/agy-mcp/issues/12).
+- Preserve running status for jobs owned by a live foreign supervisor or
+  still being started, avoiding premature stale-job reconciliation.
+- Reject cancellation after worker finalization begins, preserving the
+  original terminal result and cancellation ownership.
+- Run doctor probes off the MCP event loop and serialize capability-cache
+  refreshes so concurrent calls remain responsive.
+- Preserve the caller's effective Python import paths and interpreter modes
+  during doctor server-import checks.
+- Reject stored job metadata whose `job_id` does not match its directory.
+
+### Packaging
+
+- Derive required bundled skill files from tracked source and require wheel
+  `RECORD` coverage for every shipped file.
+
+### Tested
+
+- Added regression coverage for authentication and quota errors, supervisor
+  lifecycle races, doctor import modes, and package version-fallback consistency.
+
+### Documentation
+
+- Added adversarial review guidance to the bundled Claude, Codex, and
+  Antigravity collaboration skills and their prompt examples.
+
 ## [0.1.8] — 2026-05-27
 
 ### Added
@@ -487,7 +527,8 @@ First public-ready cut.
   dry-run on three modes, real `agy --print` call with session
   resume.
 
-[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/Boulea7/agy-mcp/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/Boulea7/agy-mcp/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Boulea7/agy-mcp/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/Boulea7/agy-mcp/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/Boulea7/agy-mcp/compare/v0.1.5...v0.1.6
