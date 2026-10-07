@@ -12,9 +12,10 @@
 （与 `.github/workflows/release.yml` 里的 `environment.name` 一致）。
 
 可选保护：
-- **Required reviewers**：勾选自己 — 每次发布前你点一下 Approve
-  才会真正 publish，给一个最后的人工 abort 机会。
-- **Wait timer**：5 min — push tag 后 5 分钟内可撤销。
+- **Required reviewers**：配置后 publish job 需要批准；是否允许
+  自己批准取决于 environment 的自审设置。
+- **Wait timer**：按需延迟 publish job，等待期间可取消 workflow；
+  这不能撤回已完成的上传。
 - **Deployment branches**：限制为 tag `v*` —— 防止有人推个野
   branch 触发发布。
 
@@ -35,61 +36,103 @@ publisher（如果 `agy-mcp` 还未存在）/ Manage publishers（如果已
 `release` environment 下发起的 publish 请求。**不需要任何
 token、密码或 API key。**
 
-### 3. 验证
+### 3. 发布前本地验证
 
-跑一次 `.github/workflows/release.yml` 的 `workflow_dispatch`，
-input 填一个已存在的 tag（如 `v0.1.5`）做 dry-run。如果你不想
-实际 publish，先临时把 release.yml 里的 publish job 的
-`pypa/gh-action-pypi-publish` 改成 `--repository-url
-https://test.pypi.org/legacy/`（TestPyPI），并在 TestPyPI 也
-配同样的 trusted publisher。
+`Release` 的 `workflow_dispatch` **会真实发布**：它从指定 tag
+运行 verify、build、PyPI publish 和 GitHub Release，没有 dry-run
+开关。不要用已发布的 tag 试跑，也不要临时改 workflow 做 TestPyPI
+验证。发布前先在本地核对 `pyproject.toml`、`src/agy_mcp/__init__.py`
+与 `uv.lock` 的项目版本以及 CHANGELOG，并在空的 `dist/` 目录中构建：
+
+```bash
+uv run ruff check src tests scripts
+uv run pytest -q
+uv build
+uv run python scripts/check_release_artifacts.py
+```
+
+用全新虚拟环境安装刚构建的 wheel，避免旧 editable 安装掩盖漏文件。
+以下离线示例要求提前准备好所有依赖 wheel；缺包时先补齐本地依赖，
+不要把安装失败当验证成功：
+
+```bash
+smoke_dir="$(mktemp -d)"
+python3 -m venv "$smoke_dir/venv"
+"$smoke_dir/venv/bin/python" -m pip --isolated install --no-index \
+  --find-links /path/to/dependency-wheels --retries 0 \
+  dist/agy_mcp-0.1.9-py3-none-any.whl
+"$smoke_dir/venv/bin/python" -I - <<'PY'
+from importlib import import_module
+from importlib.metadata import distribution
+
+dist = distribution("agy-mcp")
+assert dist.version == "0.1.9"
+expected = {
+    "agymcp": "agy_mcp.cli:main",
+    "agy-bridge": "agy_mcp.bridge:main",
+    "agy-doctor": "agy_mcp.doctor:main",
+    "agy-install-skill": "agy_mcp.install:main",
+}
+assert {ep.name: ep.value for ep in dist.entry_points
+        if ep.group == "console_scripts"} == expected
+import_module("agy_mcp.server")
+print("Installed wheel metadata and server import OK")
+PY
+```
+
+这里仅检查安装元数据与模块导入，不调用 console 入口或 MCP 工具。
+`agymcp --help` 会启动 stdio server；`agy-bridge --dry-run` 会探测
+真实后端与鉴权；`agy-doctor` 会读取本机鉴权状态；`agy-install-skill`
+默认写入用户目录。它们属于用户自愿执行的手工诊断或安装操作，不能
+作为无副作用的自动 smoke，也不能代替真实 provider E2E 验证。
 
 ## 常规发布流程
 
 ```bash
-# 1. 确认 CHANGELOG.md 已写好新版本 entry，main 干净
-git status --short  # 必须空
+# 1. Verify version 0.1.9, CHANGELOG, the release commit, and a clean checkout.
+git status --short  # Must be empty.
 git log --oneline -3
+# Complete the local checks above and verify the release commit SHA.
 
-# 2. 打 annotated tag（必须 annotated，否则 GH Release notes 抓不到）
-git tag -a v0.1.6 -m "release: v0.1.6 — <one-line summary>"
+# 2. Tag the verified release commit; confirm this version is not already published.
+git tag -a v0.1.9 -m "release: v0.1.9 — <one-line summary>"
 
-# 3. push tag 触发 release workflow
-git push origin v0.1.6
+# 3. Push the annotated tag to trigger the Release workflow.
+git push origin v0.1.9
 
-# 4. 去 GitHub Actions 看 Release workflow
+# 4. Check the Release workflow in GitHub Actions.
 #    https://github.com/Boulea7/agy-mcp/actions/workflows/release.yml
-#    a) verify (matrix tests) → build (audit) → 等 Approve
-#    b) Approve 后 publish 跑 OIDC trusted publishing 到 PyPI
-#    c) github-release 创建 GitHub Release，附 wheel + sdist + 自动 release notes
+#    a) verify (matrix tests) → build (audit) → publish
+#       Approval is required only if configured for the release environment.
+#    b) publish uses OIDC trusted publishing to PyPI.
+#    c) github-release attaches the wheel and sdist with generated release notes.
 ```
 
 ## 发布后验证
 
 ```bash
-# PyPI 上能搜到
+# Check the published PyPI version.
 curl -s https://pypi.org/pypi/agy-mcp/json | jq '.info.version'
 
-# 用 uvx 直接调（无需 git clone）
-uvx --from agy-mcp agymcp --help
-
-# uv tool install 切到 PyPI 源
-uv tool uninstall agy-mcp
-uv tool install agy-mcp
-agymcp --help
-agy-doctor
+# Install the exact PyPI version in another fresh environment.
+smoke_dir="$(mktemp -d)"
+python3 -m venv "$smoke_dir/venv"
+"$smoke_dir/venv/bin/python" -m pip --isolated install --retries 0 agy-mcp==0.1.9
 ```
+
+再用该环境的 Python 执行上面的 metadata/import 检查。不要调用四个
+console 入口来代替安装验证；真实后端与平台集成仍需单独手工验证。
 
 ## 回滚
 
 PyPI **不允许 delete + 重发同一版本号**（即便 yank 也只是隐藏）。
 出问题立即：
 
-1. **小问题**：发 patch 版本 `v0.1.6` → `v0.1.7`，CHANGELOG 注明
-   "supersedes v0.1.6 due to <issue>"。
+1. **小问题**：发新的 patch 版本，CHANGELOG 注明
+   "supersedes v0.1.9 due to <issue>"。
 2. **严重问题（数据丢失 / 安全）**：
-   - PyPI 上 yank v0.1.6（标记为不可见，`pip install agy-mcp`
-     不再选它，但 `agy-mcp==0.1.6` 仍可装）。
+   - PyPI 上 yank v0.1.9（标记为不可见，`pip install agy-mcp`
+     不再选它，但 `agy-mcp==0.1.9` 仍可装）。
    - 发 patch 版本修复 + 公告。
 
 ## 常见坑
@@ -97,12 +140,11 @@ PyPI **不允许 delete + 重发同一版本号**（即便 yank 也只是隐藏�
 - **PyPI 端 trusted publisher 没建** → `publish` job 报
   `invalid-publisher: valid token, but no corresponding publisher`。
   按 §1 步骤建一遍。
-- **Environment 名字拼错** → workflow 卡在 `Waiting for review`
-  永不进入 publish。检查 PyPI publisher config 里的 environment
+- **Environment 名字拼错** → trusted publisher 校验可能失败。
+  检查 PyPI publisher config 里的 environment
   name 与 release.yml 一字不差（区分大小写）。
-- **CHANGELOG 没写 / tag 不是 annotated** → GH Release notes 抓
-  不到摘要，会用 GitHub 自动生成的 "compare since last tag" 文案
-  （勉强可用但不如手工写）。
+- **版本、CHANGELOG 或 tag 指向的提交不一致** → 可能发布错误产物。
+  push tag 前逐项核对；GitHub Release notes 由 workflow 自动生成。
 - **`uv build` 漏文件** → release-gate 会 fail。原因通常是
   `pyproject.toml` 的 `[tool.hatch.build.targets.wheel]` /
   `[tool.hatch.build.targets.sdist]` 没把新模块加进去；同时
@@ -111,10 +153,9 @@ PyPI **不允许 delete + 重发同一版本号**（即便 yank 也只是隐藏�
 
 ## Trusted publishing 的优势
 
-- 无长期凭证：每次 publish 由 OIDC 临时签发，10 分钟过期。
-- 凭证泄漏不可重放：与 GitHub repo + workflow + environment 三元组
-  绑定，复制走也用不了。
+- 无需本地 PyPI API token：publish 通过 OIDC 换取临时发布凭证，
+  不假定固定有效期。
+- 发布身份受 GitHub repo、workflow 与 environment 配置约束。
 - 可审计：每次 publish 都有 GitHub Actions log + PyPI 端 publisher
   log 双向追溯。
-- 设置一次永久有效：对比经典 API token "上传一个 secret + 6 个月
-  rotate"，trusted publishing 一次配完无需维护。
+- 仓库、workflow 或 environment 改名时需要同步核对 publisher 配置。
