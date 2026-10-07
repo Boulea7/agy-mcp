@@ -41,13 +41,16 @@ token、密码或 API key。**
 `Release` 的 `workflow_dispatch` **会真实发布**：它从指定 tag
 运行 verify、build、PyPI publish 和 GitHub Release，没有 dry-run
 开关。不要用已发布的 tag 试跑，也不要临时改 workflow 做 TestPyPI
-验证。发布前先在本地核对 `pyproject.toml`、`src/agy_mcp/__init__.py`
+验证。手动重跑时，workflow 的运行 ref 和 `tag` 输入必须指定同一个
+版本 tag（例如 `v0.1.9`）。在上述 `v*` tag 限制下，仅填写 `tag`
+输入而从 `main` 运行 workflow，不能满足 environment 的发布规则。
+发布前先在本地核对 `pyproject.toml`、`src/agy_mcp/__init__.py`
 与 `uv.lock` 的项目版本以及 CHANGELOG，并在空的 `dist/` 目录中构建：
 
 ```bash
-uv run ruff check src tests scripts
-uv run pytest -q
-uv build
+uv run ruff check src tests scripts && \
+uv run pytest -q && \
+uv build && \
 uv run python scripts/check_release_artifacts.py
 ```
 
@@ -56,11 +59,11 @@ uv run python scripts/check_release_artifacts.py
 不要把安装失败当验证成功：
 
 ```bash
-smoke_dir="$(mktemp -d)"
-python3 -m venv "$smoke_dir/venv"
+smoke_dir="$(mktemp -d)" && \
+python3 -m venv "$smoke_dir/venv" && \
 "$smoke_dir/venv/bin/python" -m pip --isolated install --no-index \
   --find-links /path/to/dependency-wheels --retries 0 \
-  dist/agy_mcp-0.1.9-py3-none-any.whl
+  dist/agy_mcp-0.1.9-py3-none-any.whl && \
 "$smoke_dir/venv/bin/python" -I - <<'PY'
 from importlib import import_module
 from importlib.metadata import distribution
@@ -95,9 +98,8 @@ git log --oneline -3
 # Complete the local checks above and verify the release commit SHA.
 
 # 2. Tag the verified release commit; confirm this version is not already published.
-git tag -a v0.1.9 -m "release: v0.1.9 — <one-line summary>"
-
-# 3. Push the annotated tag to trigger the Release workflow.
+# 3. Push the annotated tag only if tag creation succeeds.
+git tag -a v0.1.9 -m "release: v0.1.9 — <one-line summary>" && \
 git push origin v0.1.9
 
 # 4. Check the Release workflow in GitHub Actions.
@@ -115,8 +117,8 @@ git push origin v0.1.9
 curl -s https://pypi.org/pypi/agy-mcp/json | jq '.info.version'
 
 # Install the exact PyPI version in another fresh environment.
-smoke_dir="$(mktemp -d)"
-python3 -m venv "$smoke_dir/venv"
+smoke_dir="$(mktemp -d)" && \
+python3 -m venv "$smoke_dir/venv" && \
 "$smoke_dir/venv/bin/python" -m pip --isolated install --retries 0 agy-mcp==0.1.9
 ```
 
