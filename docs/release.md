@@ -55,14 +55,14 @@ uv run python scripts/check_release_artifacts.py
 ```
 
 用全新虚拟环境安装刚构建的 wheel，避免旧 editable 安装掩盖漏文件。
-以下离线示例要求提前准备好所有依赖 wheel；缺包时先补齐本地依赖，
-不要把安装失败当验证成功：
+以下示例由 pip 解析依赖；离线时，先准备完整的依赖 wheelhouse，再给
+install 命令加上 `--no-index --find-links <wheelhouse>`。不要把安装失败
+当验证成功：
 
 ```bash
 smoke_dir="$(mktemp -d)" && \
 python3 -m venv "$smoke_dir/venv" && \
-"$smoke_dir/venv/bin/python" -m pip --isolated install --no-index \
-  --find-links /path/to/dependency-wheels --retries 0 \
+"$smoke_dir/venv/bin/python" -m pip --isolated install --retries 0 \
   dist/agy_mcp-0.1.9-py3-none-any.whl && \
 "$smoke_dir/venv/bin/python" -I - <<'PY'
 from importlib import import_module
